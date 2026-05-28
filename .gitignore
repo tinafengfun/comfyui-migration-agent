@@ -1,0 +1,8 @@
+node_modules/
+dist/
+workspaces/
+.demo-state/
+logs/
+*.env
+.env
+sdk-sessions/
