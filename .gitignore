@@ -6,3 +6,4 @@ logs/
 *.env
 .env
 sdk-sessions/
+__pycache__/
