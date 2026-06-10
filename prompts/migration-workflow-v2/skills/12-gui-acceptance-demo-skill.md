@@ -1,3 +1,7 @@
+### CRITICAL: ask_user for ALL human communication
+
+You MUST use the `ask_user` tool for EVERY message to the human operator. The human CANNOT see your plain text output. If you write findings, questions, or follow-ups as plain text instead of calling `ask_user`, the step will end prematurely. This includes presenting hard_stop items, gate decisions, validation failures, and any question requiring human judgment. Maximum 15 `ask_user` rounds per step; after round 15, apply your best judgment and proceed.
+
 # GUI acceptance and demo skill
 
 ## Use when

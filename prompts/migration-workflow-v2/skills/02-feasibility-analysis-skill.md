@@ -21,7 +21,7 @@ Use as Step 02 after Step 00 intake and Step 01 asset/custom-node resolution to 
 ## Algorithm
 
 1. Identify whether the request is workflow migration, package migration, tuning, delivery, runtime/platform selection, or non-ComfyUI work.
-2. Confirm hardware budget and fidelity. If hardware evidence is missing, continue only as preliminary routing and add a human gate.
+2. Confirm hardware budget and fidelity. If hardware evidence is missing, continue only as preliminary routing and flag for interactive review.
 3. Load the source workflow JSON read-only. Count source nodes, links, and obvious output/display nodes. Do not treat this as Step 03 inventory; it is a coverage sanity check.
 4. Read `00-intake-preflight.md` and extract `source_node_count`, `scanned_node_count`, `missing_node_ids`, required assets, required custom nodes, source hints, and Step 01 work-queue status when available.
 5. Read `01-assets.csv` and classify every row as `resolved/staged`, `source reachable but not staged`, `missing`, `unresolved source`, `access blocked`, `runtime-auto-download hidden asset`, or `smoke-only alias`.
@@ -31,9 +31,52 @@ Use as Step 02 after Step 00 intake and Step 01 asset/custom-node resolution to 
 9. Estimate active model footprint and likely activation peak only after the relevant asset rows and hardware budget are known. If either side is missing, state that capacity routing is preliminary.
 10. Identify obvious CUDA-only/provider-only risks, staged-but-not-installed custom-node commits, local installed commit mismatches, and hidden runtime assets that can change the route.
 11. Classify the task into XPU migration, CPU fallback, environment/integration gap, feature-development gap, capacity risk, dependency/human gate, hard stop, or non-ComfyUI route.
-12. Write all-node feasibility accounting with one row per source node whenever the route depends on node scope. A node may be dependency-free, resolved, non-source-identical boundary, disconnected/reference, frontend-only, or deferred to a later step, but it must not disappear.
-13. Write `02-feasibility.md` with a terminal state: `complete` or `hard_stop`. Do NOT write `human_gate_reached` or `orchestrator_status` in artifacts — the system controls gating via `gate-signal.json`.
-14. Include a `completion_decision` block and a Toolization block before closing Step 02.
+12. Write all-node feasibility accounting with one row per source node whenever the route depends on node scope.
+13. **Interactive risk review** — If risks, human interventions, or unverified assumptions exist, engage the human operator via `ask_user` for discussion and decision collection (see protocol below).
+14. Write `02-feasibility.md` with a terminal state: `complete` or `hard_stop`.
+15. If human decisions were collected, write `02-decisions.json`.
+16. Include a `completion_decision` block and a Toolization block before closing Step 02.
+
+## Interactive risk review protocol
+
+When the analysis identifies risks, human interventions, or unverified assumptions:
+
+### CRITICAL: ask_user for ALL human communication
+
+You MUST use the `ask_user` tool for EVERY message to the human operator. The human CANNOT see your plain text output. If you write follow-up questions as plain text instead of calling `ask_user`, the step will end prematurely. Call `ask_user` for each round of the discussion.
+
+### Decision tracker (mandatory)
+
+Maintain a tracker across all discussion rounds. Present it with every `ask_user` call:
+
+```text
+Decision Tracker:
+  [ ] D1: Fidelity tier — smoke / production / custom
+  [ ] D2: Hardware — device + VRAM / auto-detect
+  [ ] D3: Resource policy — offload settings
+  [ ] D4: Risk acceptance — per-risk decisions
+```
+
+Items start as `[ ]` and move to `✓` when decided. Max 8 items total.
+
+### Multi-round with convergence
+
+1. **Round 1**: Call `ask_user` with findings + numbered items + tracker (all `[ ]`)
+2. **Rounds 2-14**: Human asks questions → call `ask_user` again with answer + updated tracker
+   - Mark `✓` for any item the human clearly decides
+   - Add new items (D5, D6...) only if discussion reveals new risks
+   - **IMPORTANT:** Every response to the human MUST go through `ask_user`, NOT plain text
+3. **Round 5 (convergence)**: For any open items, state recommendations:
+   ```
+   [ ] D3: recommending "both offload allowed"
+   [ ] D4: recommending "accept for smoke tier"
+   Please confirm or I will apply these recommendations.
+   ```
+4. **Finalize**: All items `✓` → write `02-decisions.json` + update `02-feasibility.md`
+
+**Maximum 15 `ask_user` rounds.** After round 15, apply recommendations for any remaining open items and proceed.
+
+**Skip interaction only when:** zero risks, zero interventions needed, zero unverified assumptions.
 
 ## Coverage and handoff checks
 
@@ -112,7 +155,7 @@ Use `../templates/intel-xpu-hardware-reference.md` to fill the hardware side of 
 
 Use workflow structure, model sizes, source hints, Step 01 acquisition evidence, and documented target requirements. Do not rely on optimism.
 
-If the backend generated `02-feasibility.md` before the SDK agent starts, treat it as a precheck scaffold/evidence snapshot. It is not the final Step 02 decision until the agent has consumed Step 01 evidence and written the final routing summary or a human gate.
+If the backend generated `02-feasibility.md` before the SDK agent starts, treat it as a precheck scaffold/evidence snapshot. It is not the final Step 02 decision until the agent has consumed Step 01 evidence and written the final routing summary or completed interactive risk review.
 
 Minimum evidence:
 
@@ -131,8 +174,7 @@ Minimum evidence:
 
 | State | Meaning |
 | --- | --- |
-| `complete` | Evidence is sufficient to route the workflow and continue to Step 03. |
-| `human_gate_reached` | Do NOT write this status in artifacts. If a genuine blocker exists, document it factually and the system will create `gate-signal.json` to gate the step. |
+| `complete` | Evidence is sufficient, interactive risk review done (when needed), decisions recorded. Continue to Step 03. |
 | `hard_stop` | Safe continuation is impossible under current requirements without changing the requirement, hardware, assets, or no-bypass boundary. |
 
 ## Completion decision
@@ -145,24 +187,10 @@ completion_decision:
   success_criteria_checked:
   evidence_artifacts:
   unresolved_gaps:
-  human_gate_prompt:
   next_step_allowed:
 ```
 
-`complete` is allowed only when all mandatory criteria have durable evidence: Step 00/01 consumed, all-node coverage reconciled, dependency coverage reconciled, source workflow unmodified, asset/custom-node readiness current, boundary changes preserved, hardware budget measured or gated, and `step03_context` present.
-
-## Human intervention standards
-
-Document blockers factually when:
-
-- source-identical assets or inputs are missing, private, or access-blocked;
-- a smoke-only alias would change fidelity claims;
-- full node/dependency coverage cannot be proven from Step 00/01 artifacts;
-- target hardware, usable VRAM, fidelity tier, CPU offload, reduced-resource policy, or multi-XPU availability is unknown;
-- capacity appears near or above budget;
-- a critical custom node is source-unknown, registration-unknown, XPU-unknown, or likely CUDA-only.
-
-Do NOT write `human_gate_reached`, `orchestrator_status`, or other gate keywords in artifacts. The system controls gating exclusively via `gate-signal.json`.
+`complete` is allowed only when all mandatory criteria have durable evidence: Step 00/01 consumed, all-node coverage reconciled, dependency coverage reconciled, source workflow unmodified, asset/custom-node readiness current, boundary changes preserved, hardware budget measured or gated, interactive risk review completed (when risks existed), and `step03_context` present.
 
 ## Hard stops
 
@@ -173,8 +201,6 @@ Do NOT write `human_gate_reached`, `orchestrator_status`, or other gate keywords
 - continuation would require bypassing, deleting, replacing, or semantically changing nodes without approval
 
 ## Output schema
-
-Do NOT include `orchestrator_status` in your artifact. Gating is managed by the system via `gate-signal.json`, not by LLM-written status markers.
 
 ```text
 target
@@ -188,8 +214,8 @@ estimated_peak_vram
 initial_class
 risks
 human_intervention_needed
-hard_stops
 assumptions_to_verify
+## Human decisions (if interactive review was conducted)
 step03_context
 toolization
 completion_decision
@@ -217,7 +243,7 @@ The scaffold is safe only for read-only Step 02 work. It may parse Step 00/01 ar
 - dependency coverage status;
 - target hardware/fidelity assumptions;
 - preliminary route and terminal state;
-- human decisions needed before normal runtime work.
+- human decisions already made or still required.
 
 ## Example from prior work
 

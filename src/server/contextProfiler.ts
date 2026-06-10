@@ -161,7 +161,7 @@ export async function profileContext(artifactPath: string): Promise<ContextProfi
   const cumulativeSnapshots = buildCumulativeSnapshots(steps);
 
   // Build summary
-  const totalJsonlChars = steps.reduce((s, p) => s + p.sessionFiles.find(f => f.type === "jsonl")?.chars ?? 0, 0);
+  const totalJsonlChars = steps.reduce((s, p) => s + (p.sessionFiles.find(f => f.type === "jsonl")?.chars ?? 0), 0);
   const totalPromptChars = steps.reduce((s, p) => s + p.promptChars, 0);
   const totalEvents = steps.reduce((s, p) => s + p.totalEvents, 0);
   const lastSnapshot = cumulativeSnapshots[cumulativeSnapshots.length - 1];

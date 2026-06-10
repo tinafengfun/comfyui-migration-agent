@@ -154,10 +154,13 @@ function extractModelRequests(nodes: WorkflowNode[]): Array<{ name: string; role
   const requests = new Map<string, { name: string; role: string; expectedFolder: string }>();
   for (const node of nodes) {
     const type = String(node.type ?? "");
-    for (const value of node.widgets_values ?? []) {
+    for (const value of iterWidgetValues(node.widgets_values)) {
       if (typeof value !== "string" || !modelFilePattern.test(value)) continue;
+      // Normalize backslash separators (Windows-style paths from exported workflows)
+      const normalizedName = value.replace(/\\/g, "/");
+      const name = path.basename(normalizedName);
       const request = {
-        name: value,
+        name,
         role: type || "model dependency",
         expectedFolder: expectedModelFolder(type)
       };
@@ -172,7 +175,7 @@ function extractInputMediaRequests(nodes: WorkflowNode[]): string[] {
   for (const node of nodes) {
     const type = String(node.type ?? "").toLowerCase();
     if (!type.includes("load") && !type.includes("input")) continue;
-    for (const value of node.widgets_values ?? []) {
+    for (const value of iterWidgetValues(node.widgets_values)) {
       if (typeof value === "string" && (mediaFilePattern.test(value) || value.startsWith("http"))) {
         result.add(value);
       }
@@ -420,4 +423,10 @@ function cell(value: string): string {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
+}
+
+function iterWidgetValues(widgetsValues: unknown): unknown[] {
+  if (Array.isArray(widgetsValues)) return widgetsValues;
+  if (isRecord(widgetsValues)) return Object.values(widgetsValues);
+  return [];
 }

@@ -42,6 +42,43 @@ function isDeletableTask(task: MigrationTask) {
   return ["completed", "failed", "hard_stopped", "terminated", "pending"].includes(task.status);
 }
 
+/** Lightweight markdown → HTML for chat messages */
+function renderMarkdown(md: string): string {
+  let html = md
+    // Escape HTML (but preserve what we generate below)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+  // Code blocks (``` ... ```)
+  html = html.replace(/```(\w*)\n?([\s\S]*?)```/g, "<pre><code>$2</code></pre>");
+  // Inline code
+  html = html.replace(/`([^`]+)`/g, "<code>$1</code>");
+  // Bold
+  html = html.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+  // Italic
+  html = html.replace(/\*([^*]+)\*/g, "<em>$1</em>");
+  // Headers (## and ### only, within message context)
+  html = html.replace(/^### (.+)$/gm, "<h4>$1</h4>");
+  html = html.replace(/^## (.+)$/gm, "<h3>$1</h3>");
+  // Unordered list items (- or *)
+  html = html.replace(/^(\s*)[-*] (.+)$/gm, "$1<li>$2</li>");
+  // Ordered list items (1. 2. etc)
+  html = html.replace(/^(\s*)\d+\. (.+)$/gm, "$1<li>$2</li>");
+  // Wrap consecutive <li> in <ul>
+  html = html.replace(/((?:<li>.*?<\/li>\s*)+)/g, "<ul>$1</ul>");
+  // Line breaks (double newline → paragraph, single newline preserved by pre-wrap)
+  html = html.replace(/\n\n/g, "</p><p>");
+  return `<p>${html}</p>`;
+}
+
+function extractMissingFilename(event: AgentEvent): string | undefined {
+  const question = event.data as { question?: string } | undefined;
+  const text = question?.question ?? event.message ?? "";
+  // Match patterns like "z-image_00006_.png (input media)" or "filename.png"
+  const match = text.match(/([a-zA-Z0-9_\-]+\.[a-zA-Z0-9]+)\s*\(/);
+  return match?.[1];
+}
+
 function App() {
   const api = useApi();
 
@@ -60,11 +97,12 @@ function App() {
   const [health, setHealth] = useState<HealthStatus | undefined>();
   const [preflight, setPreflight] = useState<PreflightState>({ status: "idle" });
   const [uploadError, setUploadError] = useState<string | undefined>();
+  const [uploadSuccess, setUploadSuccess] = useState<string | undefined>();
   const [questionDrafts, setQuestionDrafts] = useState<Record<string, string>>({});
   const [rightTab, setRightTab] = useState<"detail" | "artifacts">("detail");
 
   // Event stream
-  const { activities, pendingQuestions, needsRefresh, needsArtifactRefresh } =
+  const { events, activities, pendingQuestions, needsRefresh, needsArtifactRefresh } =
     useEventStream(selectedTaskId);
 
   // Derived
@@ -177,6 +215,37 @@ function App() {
     await api.answerQuestion(selectedTaskId, event.id, answer, freeform);
   }
 
+  async function uploadMedia(taskId: string, file: File) {
+    const missingName = pendingQuestions.length > 0
+      ? extractMissingFilename(pendingQuestions[0])
+      : undefined;
+    try {
+      const result = await api.uploadMedia(taskId, file, missingName);
+      setUploadError(undefined);
+
+      if (result.resolved) {
+        setUploadSuccess(`File "${result.filename}" uploaded and all gaps resolved. Continuing pipeline...`);
+        if (pendingQuestions.length > 0) {
+          const event = pendingQuestions[0];
+          // Use a predefined choice (wasFreeform=false) so the orchestrator
+          // hits isContinueDecision() instead of isActionableGateContext()
+          await api.answerQuestion(
+            taskId,
+            event.id,
+            "Continue with documented risk/gaps",
+            false
+          );
+        }
+      } else {
+        setUploadSuccess(`File "${result.filename}" uploaded. ${result.remainingGaps} item(s) still need resolution.`);
+      }
+      // Auto-clear success message after 8 seconds
+      setTimeout(() => setUploadSuccess(undefined), 8000);
+    } catch (err) {
+      setUploadError(err instanceof Error ? err.message : "Upload failed");
+    }
+  }
+
   async function openArtifact(relativePath: string) {
     if (!selectedTaskId) return;
     setSelectedArtifact(relativePath);
@@ -196,7 +265,7 @@ function App() {
           )}
         </div>
         <div className="header-actions">
-          <UploadButton onUpload={handleUpload} error={uploadError} onClearError={() => setUploadError(undefined)} />
+          <UploadButton onUpload={handleUpload} error={uploadError} success={uploadSuccess} onClearError={() => setUploadError(undefined)} onClearSuccess={() => setUploadSuccess(undefined)} />
           {selectedTask && (
             <>
               <button className="btn btn-primary" onClick={() => void api.runUntilGate(selectedTask.id)} disabled={activeStep?.status === "running"}>
@@ -235,9 +304,12 @@ function App() {
               <HumanInteraction
                 questions={pendingQuestions}
                 drafts={questionDrafts}
-                onDraftChange={(eventId, val) => setQuestionDrafts((d) => ({ ...d, [eventId]: val }))}
+                onDraftChange={(key, val) => setQuestionDrafts((d) => ({ ...d, [key]: val }))}
                 onAnswer={answerQuestion}
                 onOpenArtifact={openArtifact}
+                onUploadMedia={uploadMedia}
+                decisions={decisions}
+                allEvents={events}
               />
             )}
 
@@ -261,6 +333,7 @@ function App() {
                 taskId={selectedTaskId}
                 onRunStep={(stepId) => selectedTaskId && void api.runStep(selectedTaskId, stepId)}
                 onResumeStep={(stepId) => selectedTaskId && void api.resumeStep(selectedTaskId, stepId)}
+                onRerunStep={(stepId) => selectedTaskId && void api.rerunStep(selectedTaskId, stepId)}
               />
             ) : (
               <ArtifactBrowser
@@ -279,10 +352,12 @@ function App() {
 }
 
 /* ── Upload Button ── */
-function UploadButton({ onUpload, error, onClearError }: {
+function UploadButton({ onUpload, error, success, onClearError, onClearSuccess }: {
   onUpload: (f: File) => void;
   error?: string;
+  success?: string;
   onClearError: () => void;
+  onClearSuccess: () => void;
 }) {
   const ref = useRef<HTMLInputElement>(null);
   return (
@@ -294,6 +369,7 @@ function UploadButton({ onUpload, error, onClearError }: {
       }} />
       <button className="btn" onClick={() => ref.current?.click()}>Upload workflow</button>
       {error && <div className="error-toast"><span>{error}</span><button onClick={onClearError}>x</button></div>}
+      {success && <div className="success-toast"><span>{success}</span><button onClick={onClearSuccess}>x</button></div>}
     </>
   );
 }
@@ -381,7 +457,7 @@ function getStepDuration(state?: { startedAt?: string; completedAt?: string; sta
 }
 
 /* ── Step Detail ── */
-function StepDetail({ step, state, activities, narrative, taskId, onRunStep, onResumeStep }: {
+function StepDetail({ step, state, activities, narrative, taskId, onRunStep, onResumeStep, onRerunStep }: {
   step?: MigrationStepDefinition;
   state?: { status: string; summary?: string; error?: string };
   activities: ActivityLine[];
@@ -389,6 +465,7 @@ function StepDetail({ step, state, activities, narrative, taskId, onRunStep, onR
   taskId?: string;
   onRunStep: (id: string) => void;
   onResumeStep: (id: string) => void;
+  onRerunStep: (id: string) => void;
 }) {
   if (!step) return <div className="step-detail"><p className="muted">Select a step.</p></div>;
 
@@ -401,11 +478,14 @@ function StepDetail({ step, state, activities, narrative, taskId, onRunStep, onR
         </div>
         <div className="step-detail-actions">
           <StatusBadge status={state?.status ?? "pending"} />
-          {state?.status !== "running" && (
+          {state?.status === "pending" && (
             <button className="btn" onClick={() => onRunStep(step.id)}>Run</button>
           )}
           {state?.status === "waiting_for_human" && (
             <button className="btn btn-primary" onClick={() => onResumeStep(step.id)}>Resume</button>
+          )}
+          {["completed", "failed", "hard_stopped"].includes(state?.status ?? "") && (
+            <button className="btn" onClick={() => onRerunStep(step.id)}>Re-run</button>
           )}
         </div>
       </div>
@@ -466,17 +546,74 @@ function AgentActivity({ activities, isRunning }: { activities: ActivityLine[]; 
 }
 
 /* ── Human Interaction ── */
-function HumanInteraction({ questions, drafts, onDraftChange, onAnswer, onOpenArtifact }: {
+function HumanInteraction({ questions, drafts, onDraftChange, onAnswer, onOpenArtifact, onUploadMedia, decisions, allEvents }: {
   questions: AgentEvent[];
   drafts: Record<string, string>;
   onDraftChange: (eventId: string, val: string) => void;
   onAnswer: (event: AgentEvent, answer: string, freeform: boolean) => void;
   onOpenArtifact: (path: string) => void;
+  onUploadMedia: (taskId: string, file: File) => void;
+  decisions: HumanDecision[];
+  allEvents: AgentEvent[];
 }) {
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [uploadEventId, setUploadEventId] = useState<string>("");
+  const chatEndRef = useRef<HTMLDivElement>(null);
+
+  const handleFileSelect = (eventId: string) => {
+    setUploadEventId(eventId);
+    fileInputRef.current?.click();
+  };
+
+  // Auto-scroll chat to bottom when new messages arrive
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [questions, decisions]);
+
   return (
     <div className="human-interaction">
+      <input
+        ref={fileInputRef}
+        type="file"
+        style={{ display: "none" }}
+        onChange={(e) => {
+          const file = e.target.files?.[0];
+          if (file && uploadEventId) {
+            const event = questions.find((q) => q.id === uploadEventId);
+            if (event) onUploadMedia(event.taskId ?? "", file);
+          }
+          e.target.value = "";
+        }}
+      />
       {questions.map((event) => {
         const question = event.data as HumanQuestion | undefined;
+        const isSdkChat = !question?.choices?.length || (question?.choices?.length === 0 && question?.allowFreeform !== false);
+        const hasMissingMedia = question?.blockingReason === "missing_asset";
+        const stepId = event.stepId ?? "?";
+
+        if (isSdkChat) {
+          // Chat-style interaction for SDK agent questions
+          // Key by stepId so component persists across multi-round questions
+          // Draft also keyed by stepId to survive question ID changes
+          const chatDraftKey = `chat-${stepId}`;
+          return (
+            <InteractiveChat
+              key={chatDraftKey}
+              event={event}
+              stepId={stepId}
+              decisions={decisions}
+              allEvents={allEvents}
+              draft={drafts[chatDraftKey] ?? ""}
+              onDraftChange={(val) => onDraftChange(chatDraftKey, val)}
+              onAnswer={(answer) => onAnswer(event, answer, true)}
+              onUploadMedia={() => handleFileSelect(event.id)}
+              hasMissingMedia={hasMissingMedia}
+              chatEndRef={chatEndRef}
+            />
+          );
+        }
+
+        // Original card-style for deterministic gate questions
         const artifactPath = isRecord(event.data) ? stringValue(event.data.artifactPath) : undefined;
         const relPath = artifactPath?.includes("artifacts/")
           ? "artifacts/" + artifactPath.split("artifacts/").pop()
@@ -486,7 +623,7 @@ function HumanInteraction({ questions, drafts, onDraftChange, onAnswer, onOpenAr
           <div key={event.id} className="question-card">
             <div className="question-header">
               <span className="question-badge">{question?.blockingReason ?? "question"}</span>
-              <span className="muted">{event.stepId ? `Step ${event.stepId}` : ""}</span>
+              <span className="muted">{stepId ? `Step ${stepId}` : ""}</span>
             </div>
             <p className="question-text">{question?.question ?? event.message}</p>
             {question?.decisionContext && (
@@ -509,6 +646,11 @@ function HumanInteraction({ questions, drafts, onDraftChange, onAnswer, onOpenAr
                   {choice}
                 </button>
               ))}
+              {hasMissingMedia && (
+                <button className="btn" onClick={() => handleFileSelect(event.id)}>
+                  Upload missing file
+                </button>
+              )}
               {question?.allowFreeform !== false && (
                 <div className="freeform-row">
                   <textarea
@@ -526,6 +668,118 @@ function HumanInteraction({ questions, drafts, onDraftChange, onAnswer, onOpenAr
           </div>
         );
       })}
+    </div>
+  );
+}
+
+/* ── Interactive Chat for SDK agent questions ── */
+function InteractiveChat({ event, stepId, decisions, allEvents, draft, onDraftChange, onAnswer, onUploadMedia, hasMissingMedia, chatEndRef }: {
+  event: AgentEvent;
+  stepId: string;
+  decisions: HumanDecision[];
+  allEvents: AgentEvent[];
+  draft: string;
+  onDraftChange: (val: string) => void;
+  onAnswer: (answer: string) => void;
+  onUploadMedia: () => void;
+  hasMissingMedia: boolean;
+  chatEndRef: React.RefObject<HTMLDivElement | null>;
+}) {
+  // Build multi-round conversation history from all questions + decisions for this step
+  const messages = useMemo(() => {
+    const msgs: Array<{ role: "agent" | "human"; text: string; time: string }> = [];
+
+    // Collect all human_question events for this step, sorted chronologically
+    const stepQuestions = allEvents
+      .filter((e) => e.type === "human_question" && e.stepId === stepId)
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+
+    // Collect all decisions for this step
+    const stepDecisions = decisions
+      .filter((d) => d.stepId === stepId)
+      .sort((a, b) => a.decidedAt.localeCompare(b.decidedAt));
+
+    // Interleave questions and decisions chronologically
+    const allItems: Array<{ type: "q" | "d"; time: string; text: string }> = [];
+    for (const q of stepQuestions) {
+      const qData = q.data as HumanQuestion | undefined;
+      allItems.push({ type: "q", time: q.createdAt, text: qData?.question ?? q.message });
+    }
+    for (const d of stepDecisions) {
+      allItems.push({ type: "d", time: d.decidedAt, text: d.answer });
+    }
+    allItems.sort((a, b) => a.time.localeCompare(b.time));
+
+    for (const item of allItems) {
+      msgs.push({
+        role: item.type === "q" ? "agent" : "human",
+        text: item.text,
+        time: item.time
+      });
+    }
+    return msgs;
+  }, [allEvents, decisions, stepId]);
+
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+
+  // Auto-focus input when component mounts or new agent message arrives
+  useEffect(() => {
+    // Small delay to ensure DOM is updated after render
+    const timer = setTimeout(() => inputRef.current?.focus(), 100);
+    return () => clearTimeout(timer);
+  }, [messages.length]);
+
+  const handleSend = () => {
+    const text = draft.trim();
+    if (!text) return;
+    onAnswer(text);
+    onDraftChange("");
+    // Keep focus on input after sending
+    setTimeout(() => inputRef.current?.focus(), 50);
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      handleSend();
+    }
+  };
+
+  return (
+    <div className="chat-container">
+      <div className="chat-header">
+        <span className="chat-badge">Interactive Review</span>
+        <span className="muted">Step {stepId}</span>
+      </div>
+      <div className="chat-messages">
+        {messages.map((msg, i) => (
+          <div key={i} className={`chat-msg ${msg.role}`}>
+            <div className="chat-msg-role">{msg.role === "agent" ? "Agent" : "You"}</div>
+            <div className="chat-msg-text" dangerouslySetInnerHTML={{ __html: renderMarkdown(msg.text) }} />
+            <div className="chat-msg-time">{msg.time.slice(11, 19)}</div>
+          </div>
+        ))}
+        <div ref={chatEndRef} />
+      </div>
+      <div className="chat-input-area">
+        {hasMissingMedia && (
+          <button className="btn chat-action-btn" onClick={onUploadMedia} title="Upload file">
+            Attach
+          </button>
+        )}
+        <textarea
+          ref={inputRef}
+          rows={2}
+          className="chat-input"
+          placeholder="Type your response... (Enter to send, Shift+Enter for new line)"
+          value={draft}
+          onChange={(e) => onDraftChange(e.currentTarget.value)}
+          onKeyDown={handleKeyDown}
+        />
+        <button className="btn btn-primary chat-send-btn" onClick={handleSend} disabled={!draft.trim()}>
+          Send
+        </button>
+      </div>
     </div>
   );
 }

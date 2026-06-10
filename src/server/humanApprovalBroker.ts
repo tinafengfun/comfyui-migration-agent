@@ -39,4 +39,12 @@ export class HumanApprovalBroker {
   pendingCount(): number {
     return this.waiters.size;
   }
+
+  cancelAllForStep(stepId: string, reason: string): void {
+    for (const [eventId, waiter] of this.waiters.entries()) {
+      clearTimeout(waiter.timer);
+      this.waiters.delete(eventId);
+      waiter.reject(new Error(`Cancelled: ${reason}`));
+    }
+  }
 }

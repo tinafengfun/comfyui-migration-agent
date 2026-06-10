@@ -6,7 +6,7 @@ interface WorkflowNode {
   id?: number | string;
   type?: string;
   properties?: Record<string, unknown>;
-  widgets_values?: unknown[];
+  widgets_values?: unknown[] | Record<string, unknown>;
   inputs?: Array<{ link?: number | null }>;
   outputs?: Array<{ links?: Array<number | null> | null }>;
 }
@@ -23,6 +23,7 @@ export interface AssetPrepResult {
   modelCount: number;
   customNodeCount: number;
   gapCount: number;
+  gapDetails: Array<{ name: string; kind: string; action: string }>;
 }
 
 export async function ensureAssetPrep(input: {
@@ -36,31 +37,51 @@ export async function ensureAssetPrep(input: {
   const nodes = Array.isArray(workflow.nodes) ? workflow.nodes : [];
   const modelRoots = uniquePaths([...input.modelRoots, path.join(input.comfyuiRoot, "models")]);
   const models = extractModels(nodes);
+  const mediaAssets = extractInputMedia(nodes);
   const modelIndex = await indexModels(modelRoots);
   const customRows = await customNodeRows(nodes, path.join(input.comfyuiRoot, "custom_nodes"));
-  const assetRows = models.map((model) => {
-    const exact = exactModelMatches(model.name, modelIndex);
-    const aliases = findAliases(model.name, modelIndex);
-    const state = exact.length ? "staged" : aliases.length ? "alias staged" : "source unknown";
-    const bestMatch = exact[0] ?? aliases[0] ?? "";
-    return {
-      asset_name: model.name,
-      requested_name: model.name,
-      resolved_path: bestMatch,
-      source: exact[0] ? "local model root exact match" : aliases.length ? aliases.slice(0, 3).join("; ") : "not found",
-      state,
-      staged_path: exact[0] ?? "",
+  const assetRows = [
+    ...models.map((model) => {
+      const exact = exactModelMatches(model.name, modelIndex);
+      const aliases = findAliases(model.name, modelIndex);
+      const state = exact.length ? "staged" : aliases.length ? "alias staged" : "source unknown";
+      const bestMatch = exact[0] ?? aliases[0] ?? "";
+      return {
+        asset_name: model.name,
+        requested_name: model.name,
+        resolved_path: bestMatch,
+        source: exact[0] ? "local model root exact match" : aliases.length ? aliases.slice(0, 3).join("; ") : "not found",
+        state,
+        staged_path: exact[0] ?? "",
+        custom_node_repo: "",
+        custom_node_cache_path: "",
+        wrapper_source_evidence: model.node,
+        commit: "",
+        install_status: exact[0] ? "present" : aliases.length ? "alias candidate" : "missing",
+        acquisition_status: exact[0] ? "complete" : aliases.length ? "alias matched, pending source verification" : "unresolved",
+        mirror_used: "none",
+        credential_recorded: "false",
+        gap: exact[0] ? "" : aliases.length ? "alias available, not source-identical" : "source-identical asset not staged"
+      };
+    }),
+    ...mediaAssets.map((media) => ({
+      asset_name: media.name,
+      requested_name: media.name,
+      resolved_path: "",
+      source: "input media — not a model file",
+      state: "source unknown" as string,
+      staged_path: "",
       custom_node_repo: "",
       custom_node_cache_path: "",
-      wrapper_source_evidence: model.node,
+      wrapper_source_evidence: media.node,
       commit: "",
-      install_status: exact[0] ? "present" : aliases.length ? "alias candidate" : "missing",
-      acquisition_status: exact[0] ? "complete" : aliases.length ? "alias matched, pending source verification" : "unresolved",
+      install_status: "missing",
+      acquisition_status: "unresolved",
       mirror_used: "none",
       credential_recorded: "false",
-      gap: exact[0] ? "" : aliases.length ? "alias available, not source-identical" : "source-identical asset not staged"
-    };
-  });
+      gap: "input media file not staged — requires human upload or source confirmation"
+    }))
+  ];
   const assetsPath = path.join(input.task.artifactPath, `${stepId}-assets.csv`);
   const customNodesPath = path.join(input.task.artifactPath, `${stepId}-custom-nodes.md`);
   await fs.writeFile(assetsPath, csv(assetRows), "utf8");
@@ -69,21 +90,36 @@ export async function ensureAssetPrep(input: {
     customNodesMarkdown(input.task, input.comfyuiRoot, customRows, stepId),
     "utf8"
   );
-  const gapCount =
-    assetRows.filter((row) => row.gap && !row.gap.includes("alias available")).length + customRows.filter((row) => row.state !== "source known").length;
+  const gapRows = assetRows.filter((row) => row.gap && !row.gap.includes("alias available"));
+  const gapCustomNodes = customRows.filter((row) => row.state !== "source known");
+  const gapCount = gapRows.length + gapCustomNodes.length;
+  const gapDetails = [
+    ...gapRows.map((row) => ({
+      name: row.asset_name,
+      kind: row.source === "input media — not a model file" ? "input media" : "model",
+      action: row.gap
+    })),
+    ...gapCustomNodes.map((row) => ({
+      name: row.nodeType,
+      kind: "custom node",
+      action: row.state === "source unknown" ? "Provide the custom-node source package." : `Directory issue: ${row.evidence}`
+    }))
+  ];
   return {
     assetsPath,
     customNodesPath,
     modelCount: models.length,
     customNodeCount: customRows.length,
-    gapCount
+    gapCount,
+    gapDetails
   };
 }
 
 function extractModels(nodes: WorkflowNode[]): Array<{ name: string; node: string }> {
   const rows = new Map<string, { name: string; node: string }>();
   for (const node of nodes) {
-    for (const value of node.widgets_values ?? []) {
+    const values = iterWidgetValues(node.widgets_values);
+    for (const value of values) {
       if (typeof value !== "string" || !modelPattern.test(value)) continue;
       rows.set(`${value}\0${node.id}`, { name: value, node: `${node.id ?? "?"}:${node.type ?? "(unknown)"}` });
     }
@@ -155,8 +191,10 @@ async function customNodeRows(nodes: WorkflowNode[], customNodeRoot: string) {
   for (const node of nodes) {
     const type = node.type ?? "(unknown)";
     const hint = packageHint(node);
-    if (!hint || hint === "comfy-core") continue;
-    const evidence = findEvidence(hint, type, allDirNames);
+    if (hint === "comfy-core") continue;
+    // Skip core built-in nodes with no package hint
+    if (!hint && isCoreBuiltin(type)) continue;
+    const evidence = findEvidence(hint || type, type, allDirNames);
     const matchedDir = evidence.length ? evidence[0] : "";
     const hasContent = matchedDir ? (dirHasContent.get(matchedDir) ?? false) : false;
     const state = matchedDir && hasContent ? "source known" : matchedDir && !hasContent ? "environment gap" : "source known";
@@ -384,4 +422,37 @@ function uniquePaths(paths: string[]): string[] {
 
 function cell(value: string): string {
   return value.replace(/\|/g, "\\|").replace(/\n/g, "<br>");
+}
+
+const mediaPattern = /\.(png|jpe?g|webp|gif|mp4|mov|webm|avi|mkv|wav|mp3|flac)$/i;
+
+function extractInputMedia(nodes: WorkflowNode[]): Array<{ name: string; node: string }> {
+  const result = new Map<string, { name: string; node: string }>();
+  for (const node of nodes) {
+    const type = String(node.type ?? "").toLowerCase();
+    if (!type.includes("load") && !type.includes("input")) continue;
+    for (const value of iterWidgetValues(node.widgets_values)) {
+      if (typeof value === "string" && (mediaPattern.test(value) || value.startsWith("http"))) {
+        result.set(value, { name: value, node: `${node.id ?? "?"}:${node.type ?? "(unknown)"}` });
+      }
+    }
+  }
+  return [...result.values()];
+}
+
+function iterWidgetValues(widgetsValues: unknown): unknown[] {
+  if (Array.isArray(widgetsValues)) return widgetsValues;
+  if (widgetsValues && typeof widgetsValues === "object") return Object.values(widgetsValues as Record<string, unknown>);
+  return [];
+}
+
+const CORE_BUILTIN_TYPES = new Set([
+  "CLIPLoader", "CLIPTextEncode", "EmptySD3LatentImage", "EmptyLatentImage",
+  "ImageScaleToTotalPixels", "KSampler", "LoraLoaderModelOnly", "Note",
+  "PreviewImage", "SaveImage", "UNETLoader", "VAEDecode", "VAELoader",
+  "VAEEncode", "LoadImage", "ModelSamplingAuraFlow"
+]);
+
+function isCoreBuiltin(type: string): boolean {
+  return CORE_BUILTIN_TYPES.has(type);
 }

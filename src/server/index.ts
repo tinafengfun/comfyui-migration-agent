@@ -1,8 +1,25 @@
 import express from "express";
 import fs from "node:fs/promises";
 import path from "node:path";
+// Enable global proxy for all HTTP/HTTPS requests (including Node.js native fetch)
+// so Copilot SDK works behind corporate proxies (e.g. child-prc.intel.com:912).
+const proxyUrl = process.env.https_proxy || process.env.HTTPS_PROXY;
+if (proxyUrl) {
+  try {
+    const { bootstrap } = await import("global-agent");
+    bootstrap();
+  } catch { /* ignore */ }
+  try {
+    const { setGlobalDispatcher, ProxyAgent } = await import("undici");
+    setGlobalDispatcher(new ProxyAgent(proxyUrl));
+    console.log(`[proxy] Global proxy enabled: ${proxyUrl}`);
+  } catch {
+    console.warn(`[proxy] undici not available, native fetch() may not route through proxy`);
+  }
+}
 import type { CreateTaskRequest, MigrationTask } from "../shared/types";
 import { classifyArtifact, listArtifactFiles, readArtifactText } from "./artifacts";
+import { processUploadedReplacement, FileValidationError } from "./assetReplacement";
 import { loadConfig } from "./config";
 import { ensureDir, safeJoin } from "./fsUtils";
 import { MigrationOrchestrator } from "./orchestrator";
@@ -163,6 +180,17 @@ app.post("/api/tasks/:taskId/steps/:stepId/resume", async (req, res, next) => {
   }
 });
 
+app.post("/api/tasks/:taskId/steps/:stepId/rerun", async (req, res, next) => {
+  try {
+    void orchestrator.rerunStep(req.params.taskId, req.params.stepId).catch((error) => {
+      console.error(`[step-rerun] ${req.params.taskId} step ${req.params.stepId} failed:`, error instanceof Error ? error.message : error);
+    });
+    res.status(202).json({ accepted: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.post("/api/tasks/:taskId/run-until-gate", async (req, res, next) => {
   try {
     void orchestrator.runUntilGate(req.params.taskId).catch((error) => {
@@ -239,9 +267,16 @@ app.post("/api/tasks/:taskId/human-decisions", async (req, res, next) => {
       res.status(400).json({ error: "questionEventId and answer are required" });
       return;
     }
+    // If stepId not provided, resolve it from the question event
+    let stepId = body.stepId;
+    if (!stepId) {
+      const events = await store.listEvents(req.params.taskId);
+      const questionEvent = events.find((e) => e.id === body.questionEventId);
+      stepId = questionEvent?.stepId;
+    }
     const result = await orchestrator.recordHumanDecision({
       taskId: req.params.taskId,
-      stepId: body.stepId,
+      stepId,
       questionEventId: body.questionEventId,
       answer: body.answer,
       wasFreeform: body.wasFreeform ?? true
@@ -309,6 +344,35 @@ app.post("/api/tasks/:taskId/run-report", async (req, res, next) => {
     await orchestrator.generateRunReport(req.params.taskId);
     res.status(201).json({ generated: true });
   } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/tasks/:taskId/upload-media", async (req, res, next) => {
+  try {
+    const task = await store.getTask(req.params.taskId);
+    if (!task) {
+      res.status(404).json({ error: "Task not found" });
+      return;
+    }
+    const { filename, contentBase64, targetFilename } = req.body as { filename?: string; contentBase64?: string; targetFilename?: string };
+    if (!filename || !contentBase64) {
+      res.status(400).json({ error: "filename and contentBase64 are required" });
+      return;
+    }
+    const result = await processUploadedReplacement({
+      task,
+      filename,
+      targetFilename: targetFilename || filename,
+      contentBase64,
+      comfyuiRoot: config.comfyuiRoot
+    });
+    res.status(201).json(result);
+  } catch (error) {
+    if (error instanceof FileValidationError) {
+      res.status(400).json({ error: error.message });
+      return;
+    }
     next(error);
   }
 });

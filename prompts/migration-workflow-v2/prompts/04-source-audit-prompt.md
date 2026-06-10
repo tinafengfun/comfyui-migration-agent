@@ -1,5 +1,7 @@
 # Source audit prompt
 
+**CRITICAL RULE FOR HUMAN INTERACTION:** When you need to communicate with the human operator, you MUST use the `ask_user` tool. Do NOT write messages, questions, or follow-ups as plain text — the human operator CANNOT see your plain text output. Every message to the human must go through `ask_user`. This applies to ALL rounds of the interactive review, not just the first one.
+
 ## Task
 
 Audit risky workflow and custom-node source paths for Intel XPU compatibility before patching.

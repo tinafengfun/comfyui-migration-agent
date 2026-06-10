@@ -126,11 +126,23 @@ export function useEventStream(taskId: string | undefined) {
     return () => source.close();
   }, [taskId]);
 
-  const pendingQuestions = events.filter(
-    (e) => e.type === "human_question" && !events.some(
-      (d) => d.type === "step_completed" && d.stepId === e.stepId && d.createdAt > e.createdAt
-    )
-  );
+  // Pending questions: only the latest unanswered question per step
+  const pendingQuestions = (() => {
+    const unanswered = events.filter(
+      (e) => e.type === "human_question" && !events.some(
+        (d) => (d.type === "step_completed" || d.type === "step_failed" || d.type === "hard_stop") && d.stepId === e.stepId && d.createdAt > e.createdAt
+      )
+    );
+    // Deduplicate: keep only the latest per stepId
+    const latest = new Map<string, AgentEvent>();
+    for (const e of unanswered) {
+      const key = e.stepId ?? e.id;
+      if (!latest.has(key) || (e.createdAt > (latest.get(key)?.createdAt ?? ""))) {
+        latest.set(key, e);
+      }
+    }
+    return [...latest.values()];
+  })();
 
   return { events, activities, pendingQuestions, needsRefresh, needsArtifactRefresh };
 }

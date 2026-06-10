@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { execFile, spawn } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
 import type {
@@ -278,7 +279,7 @@ export class MigrationOrchestrator {
         data: prep
       });
       if (prep.gapCount > 0) {
-        const summary = `Step 01 asset/custom-node resolution found ${prep.gapCount} gap(s). Gaps are documented in ledgers — proceeding to SDK agent processing for resolution.`;
+        const summary = `Step 01 deterministic prep found ${prep.gapCount} gap(s). Gaps documented in ledgers — SDK agent will validate and attempt resolution.`;
         await this.emit({
           taskId,
           stepId,
@@ -293,21 +294,21 @@ export class MigrationOrchestrator {
             ]
           }
         });
-        // Do NOT return — allow SDK agent to attempt resolution
-      }
-
-      // Write gate-signal.json if there are hard gaps (missing models with no alias)
-      if (prep.gapCount > 0) {
-        const gateSignalPath = path.join(task.artifactPath, "01-gate-signal.json");
-        await fs.writeFile(gateSignalPath, JSON.stringify({
+        // Write detailed gate signal for post-SDK validation, but do NOT block SDK agent.
+        // The gate will be checked AFTER the SDK agent finishes (line ~494).
+        const gapItems = prep.gapDetails ?? [];
+        await fs.writeFile(path.join(task.artifactPath, "01-gate-signal.json"), JSON.stringify({
           stepId: "01",
           gated: true,
           category: "missing_asset",
           trigger: "deterministic",
-          reason: `Step 01 found ${prep.gapCount} unresolved asset gap(s) requiring human decision or SDK resolution.`,
-          items: []
+          reason: gapItems.length > 0
+            ? `Missing assets require human decision: ${gapItems.map((g: { name: string; kind: string; action: string }) => `${g.name} (${g.kind})`).join("; ")}`
+            : `Step 01 found ${prep.gapCount} unresolved asset gap(s).`,
+          items: gapItems
         }, null, 2), "utf8");
       }
+
       await this.emit({
         taskId,
         stepId,
@@ -450,6 +451,38 @@ export class MigrationOrchestrator {
 
     if (await this.pauseIfArtifactHumanGate(task, step)) return;
 
+    const stepNum = parseInt(stepId, 10);
+
+    // Auto-start ComfyUI before steps that need a running instance (05+).
+    // This ensures correct CWD (ComfyUI root) and XPU flags (--disable-dynamic-vram).
+    // The comfyApiUrl is injected into the step context so the agent knows ComfyUI
+    // is already running and doesn't try to launch it via bash.
+    if (stepNum >= 5) {
+      try {
+        const comfyApiUrl = await this.startComfyUIForTask(task);
+        resumeContext = { ...resumeContext, comfyApiUrl };
+        await this.emit({
+          taskId,
+          stepId,
+          type: "progress",
+          message: `ComfyUI started by orchestrator at ${comfyApiUrl}.`
+        });
+      } catch (e) {
+        const errMsg = e instanceof Error ? e.message : String(e);
+        await this.emit({
+          taskId,
+          stepId,
+          type: "progress",
+          message: `ComfyUI auto-start failed: ${errMsg}. Agent will attempt manual start.`
+        });
+      }
+    }
+
+    // Sync input-media files to running ComfyUI before steps that submit prompts (07+)
+    if (stepNum >= 7) {
+      await this.syncInputMediaToComfyUI(task);
+    }
+
     if (preRunArtifactCompletion.complete) {
       const summary = `Step ${stepId} completed from existing required artifact. ${preRunArtifactCompletion.reason}`;
       await this.store.updateStep(taskId, stepId, "completed", { summary, error: undefined });
@@ -495,13 +528,38 @@ export class MigrationOrchestrator {
           return replayResult;
         }
         if (options.pauseOnHumanGate) {
-          throw new HumanGatePauseError(stepId);
+          // All steps support multi-round human-agent interaction.
+          // Keep the SDK session alive so the agent can process the answer
+          // and continue or write final artifacts.
+          const decision = await this.approvalBroker.waitForDecision(event);
+          await this.store.updateStep(taskId, stepId, "running");
+          return decision;
         }
         const decision = await this.approvalBroker.waitForDecision(event);
         await this.store.updateStep(taskId, stepId, "running");
         return decision;
       });
       const summary = result.summary ?? "Copilot SDK session completed without a final assistant summary.";
+
+      // For Step 01: re-evaluate gaps after SDK agent may have resolved them.
+      // Remove the deterministic gate signal, then check if gaps remain.
+      if (stepId === "01") {
+        const detGatePath = path.join(task.artifactPath, "01-gate-signal.json");
+        await fs.unlink(detGatePath).catch(() => {});
+        // Re-check assets.csv for remaining unresolved gaps
+        const remainingGaps = await this.collectAssetGaps(task);
+        if (remainingGaps.length > 0) {
+          await fs.writeFile(detGatePath, JSON.stringify({
+            stepId: "01",
+            gated: true,
+            category: "missing_asset",
+            trigger: "post_sdk_validation",
+            reason: `After SDK validation, ${remainingGaps.length} asset(s) still require human decision: ${remainingGaps.map((g: { name: string; kind: string }) => `${g.name} (${g.kind})`).join("; ")}`,
+            items: remainingGaps
+          }, null, 2), "utf8");
+        }
+      }
+
       if (await this.pauseIfArtifactHumanGate(task, step)) return;
       const postRunArtifactCompletion = await checkRequiredArtifactCompletion(task, step, { skipScaffoldCheck: true });
       if (!postRunArtifactCompletion.complete) {
@@ -520,11 +578,24 @@ export class MigrationOrchestrator {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (error instanceof HumanGatePauseError) {
+        await this.store.updateStep(taskId, stepId, "waiting_for_human");
         await this.emit({
           taskId,
           stepId,
           type: "progress",
           message: `Auto-run paused at Step ${stepId} for human input.`
+        });
+        return;
+      }
+      // SDK session.idle timeout — agent was waiting for human but session expired.
+      // Set to waiting_for_human so the step can be rerun/resumed.
+      if (error instanceof Error && (error as Error & { isSessionIdleTimeout?: boolean }).isSessionIdleTimeout) {
+        await this.store.updateStep(taskId, stepId, "waiting_for_human", { error: message });
+        await this.emit({
+          taskId,
+          stepId,
+          type: "progress",
+          message: `Step ${stepId} paused for human input: ${message}`
         });
         return;
       }
@@ -796,6 +867,7 @@ export class MigrationOrchestrator {
       await this.emitContextBudgetAlert(taskId, finalBudget, contextBudget);
       await this.assertPhase1SessionReachedTerminalState(taskId);
       const exposedGate = await this.emitPhase1HumanGateIfNeeded(taskId);
+      await this.promotePhase1Artifacts(taskId);
       await this.emit({
         taskId,
         stepId: "phase1",
@@ -842,6 +914,36 @@ export class MigrationOrchestrator {
     } finally {
       if (phase1SyncTimer) clearInterval(phase1SyncTimer);
       this.activeStepRuns.delete(runKey);
+    }
+  }
+
+  /**
+   * Copy key artifacts from phase1-context/ to the root artifacts directory
+   * so that subsequent steps (e.g., Step 02) can find them at the expected paths.
+   */
+  private async promotePhase1Artifacts(taskId: string): Promise<void> {
+    const task = await this.store.getTask(taskId);
+    if (!task) return;
+    const phase1Dir = path.join(task.artifactPath, "phase1-context");
+    const artifactDir = task.artifactPath;
+    // Artifacts that downstream steps expect at the root level
+    const artifactsToPromote = [
+      "00-intake-preflight.md",
+      "00-node-scan.csv",
+      "01-assets.csv",
+      "01-custom-nodes.md",
+      "01-node-dependency-scan.csv",
+      "02-feasibility.md"
+    ];
+    for (const name of artifactsToPromote) {
+      const src = path.join(phase1Dir, name);
+      const dest = path.join(artifactDir, name);
+      try {
+        await fs.access(src);
+        await fs.copyFile(src, dest);
+      } catch {
+        // Source doesn't exist, skip
+      }
     }
   }
 
@@ -918,11 +1020,13 @@ export class MigrationOrchestrator {
     };
     await this.store.appendDecision(decision);
     const phase1RunActive = this.activeStepRuns.has(this.stepRunKey(input.taskId, "phase1"));
-    const deterministicGateHandled = phase1RunActive
-      ? false
-      : await this.applyDeterministicGateDecision(rawDecision);
-    const resumedLiveSession =
-      deterministicGateHandled || this.approvalBroker.resolveDecision(rawDecision);
+    // First, try to deliver the decision to an active SDK session via the broker.
+    // This handles interactive steps (like Step 02) where the SDK agent asked the question.
+    const sdkResumed = this.approvalBroker.resolveDecision(rawDecision);
+    const deterministicGateHandled = !sdkResumed && !phase1RunActive
+      ? await this.applyDeterministicGateDecision(rawDecision)
+      : false;
+    const resumedLiveSession = sdkResumed || deterministicGateHandled;
     await this.emit({
       taskId: input.taskId,
       stepId: input.stepId,
@@ -1244,6 +1348,91 @@ export class MigrationOrchestrator {
     return question;
   }
 
+  async rerunStep(taskId: string, stepId: string): Promise<void> {
+    const task = await this.store.getTask(taskId);
+    if (!task) throw new Error(`Task not found: ${taskId}`);
+    const step = this.steps.find((s) => s.id === stepId);
+    if (!step) throw new Error(`Step not found: ${stepId}`);
+
+    // 0. Cancel any active SDK session / waiting broker for this step
+    const runKey = this.stepRunKey(taskId, stepId);
+    this.activeStepRuns.delete(runKey);
+    this.approvalBroker.cancelAllForStep(stepId, `Re-run requested for step ${stepId}`);
+
+    // 0a. Kill ComfyUI processes referencing this task's workspace (Step 05+ side effects)
+    const killed = await this.killComfyUIProcessesForTask(task);
+    if (killed > 0) {
+      await this.emit({
+        taskId,
+        stepId,
+        type: "progress",
+        message: `Killed ${killed} ComfyUI process(es) for re-run cleanup.`
+      });
+    }
+
+    // 0b. Reset task status if needed
+    if (["waiting_for_human", "failed"].includes(task.status)) {
+      await this.store.updateTaskStatus(taskId, "running");
+    }
+
+    // 1. Reset step state to pending
+    await this.store.updateStep(taskId, stepId, "pending", { summary: undefined, error: undefined });
+
+    // 2. Clean artifacts produced by this step
+    await this.cleanStepArtifacts(task.artifactPath, stepId);
+
+    // 3. Also reset any downstream steps that depend on this step's output
+    const stepIndex = this.steps.findIndex((s) => s.id === stepId);
+    for (let i = stepIndex + 1; i < this.steps.length; i++) {
+      const ds = this.steps[i];
+      const dsState = task.steps.find((s) => s.id === ds.id);
+      if (dsState && dsState.status !== "pending") {
+        await this.store.updateStep(taskId, ds.id, "pending", { summary: undefined, error: undefined });
+        await this.cleanStepArtifacts(task.artifactPath, ds.id);
+      }
+    }
+
+    await this.emit({
+      taskId,
+      stepId,
+      type: "progress",
+      message: `Step ${stepId} reset to pending. Artifacts cleaned. Re-running.`
+    });
+
+    // 4. Re-run the step
+    await this.runStep(taskId, stepId);
+  }
+
+  private async cleanStepArtifacts(artifactPath: string, stepId: string): Promise<void> {
+    const prefix = `${stepId}-`;
+    try {
+      const entries = await fs.readdir(artifactPath);
+      for (const entry of entries) {
+        if (entry.startsWith(prefix)) {
+          const fullPath = path.join(artifactPath, entry);
+          const stat = await fs.stat(fullPath);
+          if (stat.isFile()) {
+            await fs.unlink(fullPath);
+          }
+        }
+      }
+      // Also clean from phase1-context if present
+      const phase1Dir = path.join(artifactPath, "phase1-context");
+      try {
+        const p1Entries = await fs.readdir(phase1Dir);
+        for (const entry of p1Entries) {
+          if (entry.startsWith(prefix)) {
+            await fs.unlink(path.join(phase1Dir, entry));
+          }
+        }
+      } catch {
+        // No phase1-context dir
+      }
+    } catch {
+      // Artifact dir doesn't exist
+    }
+  }
+
   async resumeStep(taskId: string, stepId: string): Promise<void> {
     const decisions = await this.store.listDecisions(taskId);
     await this.runStep(taskId, stepId, {
@@ -1265,7 +1454,26 @@ export class MigrationOrchestrator {
 
     if (decision.stepId !== "00") {
       const artifactGate = await checkRequiredArtifactGate(task, stepDefinition);
-      if (!artifactGate.gated) return false;
+      if (!artifactGate.gated) {
+        // Gate was already resolved (e.g., by file upload that deleted gate-signal).
+        // If the decision is a continue/approve, complete the step directly.
+        if (isContinueDecision(decision.answer)) {
+          const summary = `Step ${decision.stepId} completed; gate was already resolved (assets provided).`;
+          await this.store.updateStep(decision.taskId, decision.stepId, "completed", {
+            summary,
+            error: undefined
+          });
+          await this.emit({
+            taskId: decision.taskId,
+            stepId: decision.stepId,
+            type: "step_completed",
+            message: summary,
+            data: { decision: { ...decision, answer: redactSensitiveText(decision.answer) } }
+          });
+          return true;
+        }
+        return false;
+      }
     }
 
     if (isStopDecision(decision.answer)) {
@@ -1777,24 +1985,101 @@ export class MigrationOrchestrator {
       summary: message,
       error: detail
     });
+
+    // Build specific question with actionable items from gate signal
+    const gateItems = await this.readGateSignalItems(task, step.id);
+    const itemList = gateItems.length > 0
+      ? gateItems.map((item: { name: string; kind: string; action: string }) => `  - ${item.name} (${item.kind}): ${item.action}`).join("\n")
+      : "See gate-signal.json for details.";
+    const questionText = gateItems.length > 0
+      ? `Step ${step.id} requires human decision on the following:\n\n${itemList}\n\nHow would you like to proceed?`
+      : `${message} How should validation continue?`;
+
+    const choices = gateItems.length > 0
+      ? [
+          `Provide the missing files/sources and continue`,
+          `Approve smoke-only aliases and continue with reduced fidelity claims`,
+          `Skip these items and continue at my own risk`,
+          `Stop at this gate`
+        ]
+      : [
+          "Continue with documented risk/gaps",
+          "Stop at this gate",
+          "Provide missing context before continuing"
+        ];
+
     await this.emit({
       taskId: task.id,
       stepId: step.id,
       type: "human_question",
       message,
       data: {
-        question: `${message} How should validation continue?`,
-        choices: [
-          "Continue with documented risk/gaps",
-          "Stop at this gate",
-          "Provide missing context before continuing"
-        ],
+        question: questionText,
+        choices,
         allowFreeform: true,
-        blockingReason: step.id === "01" ? "capacity_policy" : "quality_review",
-        artifactPath: gate.matchedPath
+        blockingReason: step.id === "01" ? "missing_asset" : "quality_review",
+        artifactPath: gate.matchedPath,
+        decisionContext: gateItems.length > 0 ? {
+          formatVersion: "human-gate-v1" as const,
+          backgroundReasonScene: `Step ${step.id} found ${gateItems.length} unresolved asset(s) that cannot be automatically resolved. Each item below needs either a source file, a human-approved substitute, or an explicit skip.`,
+          terminology: [
+            { term: "source-identical", explanation: "The exact file referenced in the workflow, with matching filename and content hash." },
+            { term: "smoke-only alias", explanation: "A similar but not identical file that can produce output but may differ in quality or behavior." }
+          ],
+          consequencesAndFollowUp: [
+            { choice: "Provide files", consequence: "Pipeline continues with full fidelity claims.", followUp: "Upload files to the task workspace and re-run." },
+            { choice: "Approve aliases", consequence: "Pipeline continues with downgraded fidelity claims.", followUp: "Smoke test results will note the substitution." },
+            { choice: "Skip items", consequence: "Pipeline may fail at runtime when the missing asset is needed.", followUp: "Error will be caught at smoke test step." },
+            { choice: "Stop", consequence: "Pipeline halts. No further steps will run.", followUp: "Manually resolve issues and restart." }
+          ]
+        } : undefined
       }
     });
     return true;
+  }
+
+  private async readGateSignalItems(task: MigrationTask, stepId: string): Promise<Array<{ name: string; kind: string; action: string }>> {
+    const signalPath = path.join(task.artifactPath, `${stepId}-gate-signal.json`);
+    try {
+      const content = await fs.readFile(signalPath, "utf8");
+      const signal = JSON.parse(content) as { items?: Array<{ name?: string; kind?: string; action?: string; asset?: string; needsHumanAction?: string }> };
+      return (signal.items ?? []).map((item) => ({
+        name: item.name ?? item.asset ?? "unknown",
+        kind: item.kind ?? "asset",
+        action: item.action ?? item.needsHumanAction ?? "requires resolution"
+      }));
+    } catch {
+      return [];
+    }
+  }
+
+  private async collectAssetGaps(task: MigrationTask): Promise<Array<{ name: string; kind: string; action: string }>> {
+    const csvPath = path.join(task.artifactPath, "01-assets.csv");
+    const mdPath = path.join(task.artifactPath, "01-custom-nodes.md");
+    const gaps: Array<{ name: string; kind: string; action: string }> = [];
+    try {
+      const csvContent = await fs.readFile(csvPath, "utf8");
+      for (const line of csvContent.split("\n").slice(1)) {
+        if (!line.trim()) continue;
+        const fields = line.split(",").map((f) => f.replace(/^"|"$/g, "").trim());
+        const state = fields[4] ?? "";
+        const gap = fields[14] ?? "";
+        if (state === "source unknown" || (gap && !gap.includes("alias available"))) {
+          const name = fields[0] ?? "unknown";
+          const kind = /\.(png|jpe?g|webp|gif|mp4|mov)$/i.test(name) ? "input media" : "model";
+          gaps.push({ name, kind, action: gap || `Provide ${kind === "input media" ? "source media file" : "source-identical model file"}` });
+        }
+      }
+    } catch { /* ignore */ }
+    try {
+      const mdContent = await fs.readFile(mdPath, "utf8");
+      const cnRegex = /\|\s*(\S[^|]*?)\s*\|\s*(\S[^|]*?)\s*\|\s*(\S[^|]*?)\s*\|\s*source unknown\s*\|/g;
+      let match;
+      while ((match = cnRegex.exec(mdContent)) !== null) {
+        gaps.push({ name: match[1].trim(), kind: "custom node", action: "Provide the custom-node source package." });
+      }
+    } catch { /* ignore */ }
+    return gaps;
   }
 
   /**
@@ -2126,6 +2411,132 @@ export class MigrationOrchestrator {
     throw new Error(
       `${action} cannot continue while another migration step is actively running in this API process.`
     );
+  }
+
+  /**
+   * Sync input-media files to the running ComfyUI instance via its upload API.
+   * Ensures LoadImage nodes can see uploaded images even when ComfyUI uses
+   * a custom --input-directory that doesn't include ComfyUI/input/.
+   */
+  private async syncInputMediaToComfyUI(task: MigrationTask): Promise<void> {
+    const apiUrl = await this.getComfyUIApiUrl(task);
+    if (!apiUrl) return;
+
+    const inputMediaDir = path.join(task.artifactPath, "input-media");
+    let files: string[];
+    try {
+      files = await fs.readdir(inputMediaDir);
+    } catch {
+      return; // No input-media dir
+    }
+
+    const imageFiles = files.filter((f) =>
+      /\.(png|jpe?g|webp|gif|bmp|tiff|mp4|mov|webm)$/i.test(f)
+    );
+
+    for (const file of imageFiles) {
+      const filePath = path.join(inputMediaDir, file);
+      try {
+        const url = new URL("/upload/image", apiUrl);
+        const args = ["-s", "-X", "POST", "-F", `image=@${filePath}`, "-F", "overwrite=true", url.toString()];
+        await new Promise<void>((resolve, reject) => {
+          execFile("curl", args, { timeout: 30_000 }, (err, stdout) => {
+            if (err) reject(new Error(`curl upload failed: ${err.message}`));
+            else resolve();
+          });
+        });
+      } catch (err) {
+        console.warn(`[syncInputMedia] Failed to upload ${file} to ComfyUI: ${err instanceof Error ? err.message : err}`);
+      }
+    }
+  }
+
+  /**
+   * Get the ComfyUI API URL from task's Step 05 completion signals.
+   */
+  private async getComfyUIApiUrl(task: MigrationTask): Promise<string | undefined> {
+    try {
+      const statePath = path.join(task.workspacePath, "task-state.json");
+      const state = JSON.parse(await fs.readFile(statePath, "utf8"));
+      const apiUrl = state?.steps?.["05"]?.completion_signals?.api_url;
+      if (typeof apiUrl === "string" && apiUrl.startsWith("http")) return apiUrl;
+    } catch { /* ignore */ }
+    return undefined;
+  }
+
+  /**
+   * Start a ComfyUI instance for a task with correct CWD and XPU flags.
+   * Returns the API base URL once the server responds to /system_stats.
+   * Managed by the orchestrator so the agent doesn't need to launch via bash.
+   */
+  async startComfyUIForTask(task: MigrationTask, port: number = 8188): Promise<string> {
+    await this.killComfyUIProcessesForTask(task);
+
+    const workspace = task.workspacePath;
+    const comfyRoot = this.config.comfyuiRoot;
+    const venvPython = path.join(comfyRoot, ".venv-xpu", "bin", "python3");
+    const modelPathsConfig = path.join(workspace, "artifacts", "05-extra-model-paths.yaml");
+
+    const args = [
+      "main.py",
+      "--listen", "127.0.0.1",
+      "--port", String(port),
+      "--disable-auto-launch",
+      "--disable-dynamic-vram",
+      "--output-directory", path.join(workspace, "outputs"),
+      "--input-directory", path.join(workspace, "inputs"),
+    ];
+    // Add extra model paths config if it exists
+    try {
+      await fs.access(modelPathsConfig);
+      args.push("--extra-model-paths-config", modelPathsConfig);
+    } catch { /* no model paths config yet */ }
+
+    console.log(`[orchestrator] Starting ComfyUI: ${venvPython} ${args.join(" ")} (cwd=${comfyRoot})`);
+
+    const child = spawn(venvPython, args, {
+      cwd: comfyRoot,
+      detached: true,
+      stdio: "ignore",
+    });
+    child.unref();
+
+    const baseUrl = `http://127.0.0.1:${port}`;
+    for (let i = 0; i < 30; i++) {
+      await new Promise((r) => setTimeout(r, 2000));
+      try {
+        const resp = await fetch(`${baseUrl}/system_stats`);
+        if (resp.ok) {
+          console.log(`[orchestrator] ComfyUI ready at ${baseUrl}`);
+          return baseUrl;
+        }
+      } catch { /* not ready yet */ }
+    }
+    throw new Error(`ComfyUI failed to start on port ${port} within 60s`);
+  }
+
+  /**
+   * Kill ComfyUI processes whose command line references the task's workspace path.
+   * Used during rerunStep to clean up before restarting.
+   */
+  private async killComfyUIProcessesForTask(task: MigrationTask): Promise<number> {
+    return new Promise((resolve) => {
+      execFile("pgrep", ["-f", `main.py.*${task.workspacePath}`], (err, stdout) => {
+        if (err || !stdout.trim()) {
+          resolve(0);
+          return;
+        }
+        const pids = stdout.trim().split("\n").map(Number).filter((n) => n > 0 && !isNaN(n));
+        let killed = 0;
+        for (const pid of pids) {
+          try {
+            process.kill(pid, "SIGTERM");
+            killed++;
+          } catch { /* process already gone */ }
+        }
+        resolve(killed);
+      });
+    });
   }
 }
 

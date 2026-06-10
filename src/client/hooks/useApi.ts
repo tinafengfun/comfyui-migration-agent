@@ -24,10 +24,12 @@ export function useApi() {
   }, []);
 
   const createTask = useCallback(async (file: File): Promise<MigrationTask> => {
-    const form = new FormData();
-    form.append("workflowJson", file);
-    form.append("workflowFileName", file.name);
-    const res = await fetch("/api/tasks", { method: "POST", body: form });
+    const workflowJson = JSON.parse(await file.text());
+    const res = await fetch("/api/tasks", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ workflowFileName: file.name, workflowJson }),
+    });
     if (!res.ok) throw new Error(await res.text());
     const data = await res.json();
     return data.task;
@@ -50,6 +52,11 @@ export function useApi() {
 
   const resumeStep = useCallback(async (taskId: string, stepId: string): Promise<void> => {
     const res = await fetch(`/api/tasks/${taskId}/steps/${stepId}/resume`, { method: "POST" });
+    if (!res.ok) throw new Error(await res.text());
+  }, []);
+
+  const rerunStep = useCallback(async (taskId: string, stepId: string): Promise<void> => {
+    const res = await fetch(`/api/tasks/${taskId}/steps/${stepId}/rerun`, { method: "POST" });
     if (!res.ok) throw new Error(await res.text());
   }, []);
 
@@ -126,10 +133,35 @@ export function useApi() {
     return res.json();
   }, []);
 
+  const uploadMedia = useCallback(async (taskId: string, file: File, targetFilename?: string): Promise<{
+    uploaded: boolean;
+    filename: string;
+    originalName: string;
+    resolved: boolean;
+    remainingGaps: number;
+    placedPaths: string[];
+  }> => {
+    const contentBase64 = await new Promise<string>((resolve) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const dataUrl = reader.result as string;
+        resolve(dataUrl.split(",", 2)[1]);
+      };
+      reader.readAsDataURL(file);
+    });
+    const res = await fetch(`/api/tasks/${taskId}/upload-media`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ filename: file.name, contentBase64, targetFilename })
+    });
+    if (!res.ok) throw new Error(await res.text());
+    return res.json();
+  }, []);
+
   return {
     fetchSteps, fetchTasks, createTask, deleteTask,
-    runUntilGate, runStep, resumeStep, hardStop,
-    answerQuestion, fetchArtifacts, fetchArtifactContent,
+    runUntilGate, runStep, resumeStep, rerunStep, hardStop,
+    answerQuestion, uploadMedia, fetchArtifacts, fetchArtifactContent,
     fetchDecisions, fetchSubJobs, fetchProgressNarrative,
     fetchHealth, runPreflight, generateRunReport
   };

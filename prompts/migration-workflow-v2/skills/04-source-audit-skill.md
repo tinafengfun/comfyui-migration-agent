@@ -1,5 +1,17 @@
 # Source audit skill
 
+### CRITICAL: ask_user for ALL human communication
+
+You MUST use the `ask_user` tool for EVERY message to the human operator. The human CANNOT see your plain text output. If you write follow-up questions as plain text instead of calling `ask_user`, the step will end prematurely. Call `ask_user` for each round of the discussion.
+
+This includes:
+- Presenting audit findings and human gate items
+- Asking for approval on classifications (CPU fallback, feature-development gap, etc.)
+- Confirming whether to proceed to Step 05 environment readiness probe
+- Any follow-up questions about audit results
+
+**Maximum 15 `ask_user` rounds.** After round 15, apply your best judgment for any remaining open items and proceed.
+
 ## Use when
 
 Use before patching custom nodes or declaring XPU support.

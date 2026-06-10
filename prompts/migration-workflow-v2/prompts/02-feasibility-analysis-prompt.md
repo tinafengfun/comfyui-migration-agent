@@ -1,8 +1,10 @@
 # Feasibility analysis prompt
 
+**CRITICAL RULE FOR HUMAN INTERACTION:** When you need to communicate with the human operator, you MUST use the `ask_user` tool. Do NOT write messages, questions, or follow-ups as plain text — the human operator CANNOT see your plain text output. Every message to the human must go through `ask_user`. This applies to ALL rounds of the interactive risk review, not just the first one.
+
 Use this prompt before changing code, installing dependencies, or running expensive jobs.
 
-The backend may create a deterministic `02-feasibility.md` precheck before invoking this prompt. Treat that file as input evidence, not as proof that Step 02 is complete. Step 02 is complete only after the feasibility agent has consumed Step 00 and Step 01 artifacts and returned either a final route or a precise human gate.
+The backend may create a deterministic `02-feasibility.md` precheck before invoking this prompt. Treat that file as input evidence, not as proof that Step 02 is complete. Step 02 is complete only after the feasibility agent has consumed Step 00 and Step 01 artifacts, performed interactive risk review with the human operator when needed, and returned either a final route or a hard stop.
 
 ## Task
 
@@ -84,12 +86,121 @@ Step 02 may produce a human-gated feasibility report when coverage evidence is i
 6. Identify critical custom nodes that may be CUDA-only, unregistered, version-mismatched, staged-but-not-installed, or only present in an artifact cache.
 7. Classify the initial route and terminal state.
 
+## Interactive risk review protocol (CRITICAL)
+
+After completing the analysis above but BEFORE writing the final report, you MUST engage the human operator in an interactive discussion when any of the following conditions exist:
+
+- There are risks that could affect the migration outcome
+- Human intervention is needed for factual gaps (fidelity tier, hardware, policy decisions)
+- Assumptions need verification
+- Compatibility or capacity concerns exist
+
+### CRITICAL: ask_user tool for ALL human communication
+
+You MUST use the `ask_user` tool for EVERY message you send to the human operator. This includes:
+- Presenting findings and risks
+- Asking follow-up questions
+- Answering the human's questions
+- Presenting updated decision trackers
+- Convergence recommendations
+- Final confirmation
+
+**The human operator CANNOT see your plain text output.** If you write follow-up questions as plain text instead of calling `ask_user`, the human will never see them and the step will end prematurely. You MUST call `ask_user` for each and every round of the interactive review.
+
+Pattern for multi-round interaction:
+1. Call `ask_user` with your findings + tracker → human answers
+2. Process answer → call `ask_user` AGAIN with updated tracker + follow-up → human answers
+3. Repeat until all decisions are confirmed
+4. Write final artifacts
+
+### Decision tracker (mandatory state machine)
+
+You MUST maintain a decision tracker across all rounds. Every `ask_user` call must include the current tracker state so the human can see what has been decided and what remains open.
+
+```text
+Decision Tracker:
+  [ ] D1: Fidelity tier — smoke / production / custom
+  [ ] D2: Hardware confirmation — device + VRAM / auto-detect
+  [ ] D3: Resource policy — offload allowed / not allowed / as needed
+  [ ] D4: Risk acceptance — per-risk accept/reject/conditional
+  ✓  D5: XPU migration contract — accepted (if confirmed) / pending
+```
+
+Replace items as appropriate for the actual risks found. Each item starts as `[ ]` (open) and moves to `✓` when a decision is recorded.
+
+### Phase 1: Present findings (round 1)
+
+Use `ask_user` to present a structured summary:
+- Numbered risks with severity and recommended option
+- Decision tracker with all open items
+- Clear numbering so the human can reference specific items
+
+Example format:
+```
+Before writing the final report, I need your decisions on these items:
+
+**Decision Tracker:**
+  [ ] D1: Fidelity tier (see details below)
+  [ ] D2: Hardware confirmation
+  [ ] D3: Resource offload policy
+  [ ] D4: GGUF quantized model risk acceptance
+
+**Details:**
+1. **D1 — Fidelity tier**: Which tier? smoke / production / custom
+2. **D2 — Hardware**: ...
+3. ...
+
+You can ask questions about any item before deciding. Please provide decisions for any items you're ready to decide on.
+```
+
+### Phase 2: Discussion (rounds 2-N)
+
+The human may:
+- Ask clarifying questions ("What does GGUF Q6_K actually mean for quality?")
+- Challenge a recommendation ("Why is ModelSamplingAuraFlow high risk?")
+- Provide partial decisions ("D1=smoke, but I need more info on D4")
+- Request investigation ("Can you check if there's an FP16 version?")
+
+**Your responsibilities during discussion:**
+- Answer questions factually and concisely
+- Update the tracker: mark items `✓` when the human gives a clear decision
+- **IMPORTANT:** After each answer, you MUST call `ask_user` again with the updated tracker and any follow-up. Do NOT output your response as plain text.
+- If a follow-up question reveals new risks, add them to the tracker as `D5`, `D6`, etc.
+- Never add more than 8 items total to the tracker
+
+### Phase 3: Convergence (mandatory after 5 rounds)
+
+**Maximum 15 `ask_user` rounds.** After 15 rounds, you MUST:
+
+1. Call `ask_user` to re-present the tracker with all items
+2. For any still-open items, state your recommended default:
+   ```
+   After our discussion, here is the status:
+   ✓ D1: smoke (decided)
+   ✓ D2: Intel Arc B70 32GB (decided)
+   [ ] D3: Resource policy — recommending: both CPU/model offload allowed
+   [ ] D4: GGUF risk — recommending: accept for smoke tier
+
+   Please confirm D3 and D4, or I will apply the recommendations and proceed.
+   ```
+3. If the human doesn't respond to a specific item in the next round, apply the recommendation and mark it `✓`
+
+### Phase 4: Finalize (all items ✓)
+
+Once all tracker items are `✓`:
+1. Present a one-sentence summary of all decisions for final confirmation
+2. Write artifacts:
+   - `02-decisions.json` — structured decision record (see schema below)
+   - Update `02-feasibility.md` to include `## Human decisions` section
+   - Ensure `step03_context` reflects the confirmed decisions
+
+**When to skip interaction:** If the analysis finds zero risks, zero human interventions needed, and zero unverified assumptions, proceed directly to writing the final report without asking the human.
+
 ## Output
 
 Write the final report as `02-feasibility.md` with:
 
 ```text
-orchestrator_status: complete / human_gate_reached / hard_stop
 workflow:
 workflow_sha256:
 input_evidence:
@@ -107,6 +218,7 @@ risks:
 hard_stops:
 human_intervention_needed:
 assumptions_to_verify:
+## Human decisions (if interactive review was conducted)
 step03_context:
 toolization:
 completion_decision:
@@ -137,15 +249,51 @@ When Step 02 touches node scope, also write `02-node-feasibility-accounting.csv`
 - preliminary route;
 - human decisions already made or still required.
 
+### 02-decisions.json schema
+
+When human decisions were collected, write `02-decisions.json`:
+
+```json
+{
+  "stepId": "02",
+  "decidedAt": "ISO-8601",
+  "fidelity_tier": "smoke | production | custom",
+  "fidelity_tier_notes": "optional explanation",
+  "hardware_confirmation": {
+    "device": "e.g. Intel Arc B70",
+    "vram_gb": 32,
+    "source": "human_confirmed | auto_detect_pending"
+  },
+  "resource_policy": {
+    "cpu_offload": "allowed | not_allowed | as_needed",
+    "model_offload": "allowed | not_allowed | as_needed",
+    "notes": "optional"
+  },
+  "risk_acceptance": [
+    {
+      "risk": "description",
+      "accepted": true,
+      "conditions": "optional conditions"
+    }
+  ],
+  "alias_approvals": [
+    {
+      "original": "expected asset name",
+      "substitute": "actual asset name",
+      "approved": true,
+      "reason": "e.g. quantized GGUF acceptable for smoke tier"
+    }
+  ],
+  "human_notes": "any additional notes from the discussion"
+}
+```
+
 ## Success criteria
 
 Step 02 is successful only when one of these terminal states is reached:
 
-1. `complete`: the report consumed Step 00 and Step 01 evidence, verified scan/dependency coverage, stated target budget/fidelity, classified the route, and provided `step03_context`.
-2. `human_gate_reached`: the report names every unresolved dependency, scan-coverage gap, asset alias, private-access issue, capacity/fidelity ambiguity, or missing hardware decision that blocks a normal route, and states what a human must decide.
-3. `hard_stop`: the report names the condition that makes safe continuation impossible without changing the requirement.
-
-Do not mark Step 02 complete only because a deterministic precheck has no source-identical asset blockers. Conversely, if Step 01 is still waiting for human input, Step 02 may still produce a blocked feasibility report, but it must not route as normal migration.
+1. `complete`: the report consumed Step 00 and Step 01 evidence, verified scan/dependency coverage, stated target budget/fidelity, classified the route, conducted interactive risk review when needed, and provided `step03_context`.
+2. `hard_stop`: the report names the condition that makes safe continuation impossible without changing the requirement.
 
 For `complete`, the minimum checked criteria are:
 
@@ -156,10 +304,11 @@ For `complete`, the minimum checked criteria are:
 - Asset/custom-node readiness is current and preserves non-source-identical boundaries.
 - Hardware budget is measured or the missing budget is named as a human gate.
 - `step03_context` is sufficient for a fresh Step 03 session.
+- If risks/interventions existed, interactive review was conducted and decisions recorded in `02-decisions.json`.
 
 ## Human intervention standards
 
-Ask for human direction when:
+Engage the human interactively when:
 
 - source-identical assets, input media, hidden runtime assets, or custom-node sources are unresolved or access-blocked;
 - a compatibility alias or smoke-only substitute would affect fidelity claims;
@@ -171,7 +320,7 @@ Ask for human direction when:
 
 ## Hard stops
 
-Stop and write `orchestrator_status: hard_stop` when:
+Stop and write `hard_stop` when:
 
 - the requirement is not a ComfyUI workflow migration and cannot be reframed safely;
 - the user requires strict source-identical delivery but critical source-identical assets are unavailable or inaccessible;
@@ -196,8 +345,11 @@ Dasiwa showed that capacity and branch structure must be considered before full-
 ## Example output shape
 
 ```text
-orchestrator_status: human_gate_reached
-Initial class: dependency/integration gate first; capacity risk deferred
-Reason: Step 01 still has source-identical asset gaps and smoke-only aliases. Step 00/01 coverage fields are incomplete, so normal migration cannot be routed honestly.
-Next step: human provides exact assets, approves bounded smoke-only continuation, or stops at dependency gate. If bounded continuation is approved, pass Step 03 the unresolved asset list and coverage-gap status.
+Status: complete
+Initial class: XPU migration, smoke tier confirmed via interactive review
+Fidelity: smoke (human confirmed)
+Hardware: Intel Arc B70 32GB (human confirmed)
+Risks: GGUF quantized model accepted for smoke tier; ModelSamplingAuraFlow XPU compat untested
+Human decisions: recorded in 02-decisions.json
+Next step: Step 03 workflow inventory
 ```
