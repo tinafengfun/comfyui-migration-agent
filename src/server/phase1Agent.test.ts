@@ -18,7 +18,9 @@ function testConfig(root: string): AppConfig {
     draftDocRoot: testDraftDocRoot(),
     comfyuiRoot: path.join(root, "ComfyUI"),
     modelRoots: [path.join(root, "models")],
-    autoApproveAgentPermissions: false
+    autoApproveAgentPermissions: false,
+      comfyuiVenv: "/tmp/comfy/.venv-xpu",
+      comfyuiPython: "/tmp/comfy/.venv-xpu/bin/python3",
   };
 }
 

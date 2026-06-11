@@ -276,7 +276,7 @@ function usage(): never {
       "  npm run asset:sources -- download --asset <filename> [--verify-sha]",
       "Options:",
       "  --model-repo <path>   default: ../model_repo",
-      "  --target-root <path>  default: /home/intel/hf_models",
+      "  --target-root <path>  default: MODEL_ROOTS env var or ./models",
       "  --source-context <path> extra source notes, one option per file",
       "  --asset-file <path>   newline-separated filenames",
       "  --no-provider-search  only search local roots and SSH remotes",

@@ -111,7 +111,8 @@ export class MigrationOrchestrator {
     const layout = await createTaskWorkspace({
       workspaceRootPath: this.config.workspaceRoot,
       taskId,
-      workflowFileName: input.workflowFileName
+      workflowFileName: input.workflowFileName,
+      modelStorageRoot: this.config.modelRoots[0] ?? ""
     });
     await fs.writeFile(layout.workflowPath, `${JSON.stringify(input.workflowJson, null, 2)}\n`, "utf8");
 
@@ -2474,7 +2475,7 @@ export class MigrationOrchestrator {
 
     const workspace = task.workspacePath;
     const comfyRoot = this.config.comfyuiRoot;
-    const venvPython = path.join(comfyRoot, ".venv-xpu", "bin", "python3");
+    const venvPython = this.config.comfyuiPython;
     const modelPathsConfig = path.join(workspace, "artifacts", "05-extra-model-paths.yaml");
 
     const args = [

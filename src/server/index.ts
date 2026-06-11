@@ -48,11 +48,12 @@ app.use(express.json({ limit: "200mb" }));
 app.get("/api/health", (_req, res) => {
   res.json({
     ok: true,
-      workspaceRoot: config.workspaceRoot,
-      draftDocRoot: config.draftDocRoot,
-      comfyuiRoot: config.comfyuiRoot,
-      modelRoots: config.modelRoots,
-      autoApproveAgentPermissions: config.autoApproveAgentPermissions
+    workspaceRoot: config.workspaceRoot,
+    draftDocRoot: config.draftDocRoot,
+    comfyuiRoot: config.comfyuiRoot,
+    comfyuiPython: config.comfyuiPython,
+    modelRoots: config.modelRoots,
+    autoApproveAgentPermissions: config.autoApproveAgentPermissions
   });
 });
 

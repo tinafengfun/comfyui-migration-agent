@@ -26,6 +26,7 @@ export async function createTaskWorkspace(input: {
   workspaceRootPath: string;
   taskId: string;
   workflowFileName: string;
+  modelStorageRoot: string;
 }): Promise<TaskWorkspaceLayout> {
   const layout = getTaskWorkspaceLayout(input);
   assertInsideWorkspaceRoot(input.workspaceRootPath, layout.root);
@@ -40,7 +41,7 @@ export async function createTaskWorkspace(input: {
     fs.mkdir(layout.logsDir, { recursive: true }),
     fs.mkdir(layout.packageDir, { recursive: true })
   ]);
-  await writePackageManifest(layout);
+  await writePackageManifest(layout, input.modelStorageRoot);
   return layout;
 }
 
@@ -122,7 +123,7 @@ export async function deleteTaskWorkspace(
   await fs.rm(resolved, { recursive: true, force: true });
 }
 
-async function writePackageManifest(layout: TaskWorkspaceLayout): Promise<void> {
+async function writePackageManifest(layout: TaskWorkspaceLayout, modelStorageRoot: string): Promise<void> {
   const manifest = {
     manifestVersion: "migration-workspace-v1",
     taskId: layout.taskId,
@@ -145,7 +146,7 @@ async function writePackageManifest(layout: TaskWorkspaceLayout): Promise<void> 
     },
     packagingPolicy: {
       includeLargeModels: false,
-      modelStorageRoot: "/home/intel/hf_models",
+      modelStorageRoot,
       note: "Bundle task evidence and reports only; reference large model files by path and digest instead of copying them."
     }
   };

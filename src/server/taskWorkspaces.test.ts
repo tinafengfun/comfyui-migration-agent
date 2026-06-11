@@ -3,13 +3,16 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { createTaskWorkspace, deleteTaskWorkspace, getLayoutForTask } from "./taskWorkspaces";
 
+const testModelRoot = "/tmp/test-models";
+
 describe("task workspace layout", () => {
   it("creates a clean task workspace with fixed source, artifact, cache, output, log, and package paths", async () => {
     const workspaceRoot = path.join(process.cwd(), ".demo-state", "tests", `workspace-layout-${Date.now()}`);
     const layout = await createTaskWorkspace({
       workspaceRootPath: workspaceRoot,
       taskId: "task-clean",
-      workflowFileName: "../unsafe workflow.json"
+      workflowFileName: "../unsafe workflow.json",
+      modelStorageRoot: testModelRoot
     });
 
     expect(layout.root).toBe(path.join(workspaceRoot, "task-clean"));
@@ -34,7 +37,7 @@ describe("task workspace layout", () => {
     expect(manifest.layout.sourceWorkflow).toBe("source/unsafe_workflow.json");
     expect(manifest.layout.bundle).toBe("package/migration-bundle.zip");
     expect(manifest.packagingPolicy.includeLargeModels).toBe(false);
-    expect(manifest.packagingPolicy.modelStorageRoot).toBe("/home/intel/hf_models");
+    expect(manifest.packagingPolicy.modelStorageRoot).toBe(testModelRoot);
   });
 
   it("reconstructs layout from a persisted task and refuses deletion outside the workspace root", async () => {
@@ -42,7 +45,8 @@ describe("task workspace layout", () => {
     const layout = await createTaskWorkspace({
       workspaceRootPath: workspaceRoot,
       taskId: "task-delete",
-      workflowFileName: "workflow.json"
+      workflowFileName: "workflow.json",
+      modelStorageRoot: testModelRoot
     });
     const reconstructed = getLayoutForTask({
       id: "task-delete",

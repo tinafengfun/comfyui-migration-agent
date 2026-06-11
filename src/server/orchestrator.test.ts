@@ -17,7 +17,9 @@ describe("migration orchestrator", () => {
       draftDocRoot: root,
       comfyuiRoot: "/tmp/comfy",
       modelRoots: ["/home/intel/hf_models"],
-      autoApproveAgentPermissions: false
+      autoApproveAgentPermissions: false,
+      comfyuiVenv: "/tmp/comfy/.venv-xpu",
+      comfyuiPython: "/tmp/comfy/.venv-xpu/bin/python3",
     };
     await ensureDir(config.workspaceRoot);
     const store = new StateStore(config);
@@ -84,7 +86,9 @@ describe("migration orchestrator", () => {
       draftDocRoot: root,
       comfyuiRoot: "/tmp/comfy",
       modelRoots: ["/home/intel/hf_models"],
-      autoApproveAgentPermissions: false
+      autoApproveAgentPermissions: false,
+      comfyuiVenv: "/tmp/comfy/.venv-xpu",
+      comfyuiPython: "/tmp/comfy/.venv-xpu/bin/python3",
     };
     await ensureDir(config.workspaceRoot);
     const store = new StateStore(config);
@@ -127,7 +131,9 @@ describe("migration orchestrator", () => {
       draftDocRoot: root,
       comfyuiRoot,
       modelRoots: [modelRoot],
-      autoApproveAgentPermissions: false
+      autoApproveAgentPermissions: false,
+      comfyuiVenv: path.join(comfyuiRoot, ".venv-xpu"),
+      comfyuiPython: path.join(comfyuiRoot, ".venv-xpu", "bin", "python3"),
     };
     await ensureDir(config.workspaceRoot);
     await ensureDir(path.join(modelRoot, "vae"));
@@ -202,7 +208,9 @@ describe("migration orchestrator", () => {
       draftDocRoot: root,
       comfyuiRoot: path.join(root, "ComfyUI"),
       modelRoots: [path.join(root, "models")],
-      autoApproveAgentPermissions: false
+      autoApproveAgentPermissions: false,
+      comfyuiVenv: "/tmp/comfy/.venv-xpu",
+      comfyuiPython: "/tmp/comfy/.venv-xpu/bin/python3",
     };
     await ensureDir(config.workspaceRoot);
     await ensureDir(path.join(config.comfyuiRoot, "custom_nodes"));
@@ -264,7 +272,9 @@ describe("migration orchestrator", () => {
       draftDocRoot: root,
       comfyuiRoot: path.join(root, "ComfyUI"),
       modelRoots: [path.join(root, "models")],
-      autoApproveAgentPermissions: false
+      autoApproveAgentPermissions: false,
+      comfyuiVenv: "/tmp/comfy/.venv-xpu",
+      comfyuiPython: "/tmp/comfy/.venv-xpu/bin/python3",
     };
     await ensureDir(config.workspaceRoot);
     await ensureDir(path.join(root, "models"));
@@ -330,7 +340,9 @@ describe("migration orchestrator", () => {
       draftDocRoot: root,
       comfyuiRoot: path.join(root, "ComfyUI"),
       modelRoots: [modelRoot],
-      autoApproveAgentPermissions: false
+      autoApproveAgentPermissions: false,
+      comfyuiVenv: "/tmp/comfy/.venv-xpu",
+      comfyuiPython: "/tmp/comfy/.venv-xpu/bin/python3",
     };
     await ensureDir(config.workspaceRoot);
     await ensureDir(modelRoot);
@@ -402,7 +414,9 @@ describe("migration orchestrator", () => {
       draftDocRoot: root,
       comfyuiRoot: path.join(root, "ComfyUI"),
       modelRoots: [path.join(root, "models")],
-      autoApproveAgentPermissions: false
+      autoApproveAgentPermissions: false,
+      comfyuiVenv: "/tmp/comfy/.venv-xpu",
+      comfyuiPython: "/tmp/comfy/.venv-xpu/bin/python3",
     };
     await ensureDir(config.workspaceRoot);
     await ensureDir(path.join(config.comfyuiRoot, "custom_nodes"));
@@ -461,7 +475,9 @@ describe("migration orchestrator", () => {
       draftDocRoot: root,
       comfyuiRoot: path.join(root, "ComfyUI"),
       modelRoots: [path.join(root, "models")],
-      autoApproveAgentPermissions: false
+      autoApproveAgentPermissions: false,
+      comfyuiVenv: "/tmp/comfy/.venv-xpu",
+      comfyuiPython: "/tmp/comfy/.venv-xpu/bin/python3",
     };
     await ensureDir(config.workspaceRoot);
     await ensureDir(path.join(config.comfyuiRoot, "custom_nodes"));
@@ -538,7 +554,9 @@ describe("migration orchestrator", () => {
       draftDocRoot: root,
       comfyuiRoot: path.join(root, "ComfyUI"),
       modelRoots: [initialModelRoot],
-      autoApproveAgentPermissions: false
+      autoApproveAgentPermissions: false,
+      comfyuiVenv: "/tmp/comfy/.venv-xpu",
+      comfyuiPython: "/tmp/comfy/.venv-xpu/bin/python3",
     };
     await ensureDir(config.workspaceRoot);
     await ensureDir(path.join(config.comfyuiRoot, "custom_nodes"));
@@ -602,7 +620,9 @@ describe("migration orchestrator", () => {
       draftDocRoot: root,
       comfyuiRoot: path.join(root, "ComfyUI"),
       modelRoots: [path.join(root, "models")],
-      autoApproveAgentPermissions: false
+      autoApproveAgentPermissions: false,
+      comfyuiVenv: "/tmp/comfy/.venv-xpu",
+      comfyuiPython: "/tmp/comfy/.venv-xpu/bin/python3",
     };
     await ensureDir(config.workspaceRoot);
     const store = new StateStore(config);
@@ -653,7 +673,9 @@ describe("migration orchestrator", () => {
       draftDocRoot: root,
       comfyuiRoot: "/tmp/comfy",
       modelRoots: ["/home/intel/hf_models"],
-      autoApproveAgentPermissions: false
+      autoApproveAgentPermissions: false,
+      comfyuiVenv: "/tmp/comfy/.venv-xpu",
+      comfyuiPython: "/tmp/comfy/.venv-xpu/bin/python3",
     };
     await ensureDir(config.workspaceRoot);
     const store = new StateStore(config);
@@ -696,7 +718,9 @@ describe("migration orchestrator", () => {
       draftDocRoot: root,
       comfyuiRoot: "/tmp/comfy",
       modelRoots: ["/home/intel/hf_models"],
-      autoApproveAgentPermissions: false
+      autoApproveAgentPermissions: false,
+      comfyuiVenv: "/tmp/comfy/.venv-xpu",
+      comfyuiPython: "/tmp/comfy/.venv-xpu/bin/python3",
     };
     await ensureDir(config.workspaceRoot);
     const store = new StateStore(config);
@@ -736,7 +760,9 @@ describe("migration orchestrator", () => {
       draftDocRoot: root,
       comfyuiRoot: "/tmp/comfy",
       modelRoots: ["/home/intel/hf_models"],
-      autoApproveAgentPermissions: false
+      autoApproveAgentPermissions: false,
+      comfyuiVenv: "/tmp/comfy/.venv-xpu",
+      comfyuiPython: "/tmp/comfy/.venv-xpu/bin/python3",
     };
     await ensureDir(config.workspaceRoot);
     const store = new StateStore(config);
@@ -796,7 +822,9 @@ describe("migration orchestrator", () => {
       draftDocRoot: root,
       comfyuiRoot: "/tmp/comfy",
       modelRoots: ["/home/intel/hf_models"],
-      autoApproveAgentPermissions: false
+      autoApproveAgentPermissions: false,
+      comfyuiVenv: "/tmp/comfy/.venv-xpu",
+      comfyuiPython: "/tmp/comfy/.venv-xpu/bin/python3",
     };
     await ensureDir(config.workspaceRoot);
     const store = new StateStore(config);
@@ -858,7 +886,9 @@ describe("migration orchestrator", () => {
       draftDocRoot: root,
       comfyuiRoot: "/tmp/comfy",
       modelRoots: ["/home/intel/hf_models"],
-      autoApproveAgentPermissions: false
+      autoApproveAgentPermissions: false,
+      comfyuiVenv: "/tmp/comfy/.venv-xpu",
+      comfyuiPython: "/tmp/comfy/.venv-xpu/bin/python3",
     };
     await ensureDir(config.workspaceRoot);
     const store = new StateStore(config);
@@ -919,7 +949,9 @@ describe("migration orchestrator", () => {
       draftDocRoot: root,
       comfyuiRoot: "/tmp/comfy",
       modelRoots: ["/home/intel/hf_models"],
-      autoApproveAgentPermissions: false
+      autoApproveAgentPermissions: false,
+      comfyuiVenv: "/tmp/comfy/.venv-xpu",
+      comfyuiPython: "/tmp/comfy/.venv-xpu/bin/python3",
     };
     await ensureDir(config.workspaceRoot);
     const store = new StateStore(config);
@@ -968,7 +1000,9 @@ describe("migration orchestrator", () => {
       draftDocRoot: root,
       comfyuiRoot: "/tmp/comfy",
       modelRoots: ["/home/intel/hf_models"],
-      autoApproveAgentPermissions: false
+      autoApproveAgentPermissions: false,
+      comfyuiVenv: "/tmp/comfy/.venv-xpu",
+      comfyuiPython: "/tmp/comfy/.venv-xpu/bin/python3",
     };
     await ensureDir(config.workspaceRoot);
     const store = new StateStore(config);
@@ -1043,7 +1077,9 @@ describe("migration orchestrator", () => {
       draftDocRoot: root,
       comfyuiRoot: "/tmp/comfy",
       modelRoots: ["/home/intel/hf_models"],
-      autoApproveAgentPermissions: false
+      autoApproveAgentPermissions: false,
+      comfyuiVenv: "/tmp/comfy/.venv-xpu",
+      comfyuiPython: "/tmp/comfy/.venv-xpu/bin/python3",
     };
     await ensureDir(config.workspaceRoot);
     const store = new StateStore(config);
@@ -1094,7 +1130,9 @@ describe("migration orchestrator", () => {
       draftDocRoot: root,
       comfyuiRoot: path.join(root, "ComfyUI"),
       modelRoots: [path.join(root, "models")],
-      autoApproveAgentPermissions: false
+      autoApproveAgentPermissions: false,
+      comfyuiVenv: "/tmp/comfy/.venv-xpu",
+      comfyuiPython: "/tmp/comfy/.venv-xpu/bin/python3",
     };
     await ensureDir(config.workspaceRoot);
     const store = new StateStore(config);
@@ -1142,7 +1180,9 @@ describe("migration orchestrator", () => {
       draftDocRoot: root,
       comfyuiRoot: path.join(root, "ComfyUI"),
       modelRoots: [path.join(root, "models")],
-      autoApproveAgentPermissions: false
+      autoApproveAgentPermissions: false,
+      comfyuiVenv: "/tmp/comfy/.venv-xpu",
+      comfyuiPython: "/tmp/comfy/.venv-xpu/bin/python3",
     };
     await ensureDir(config.workspaceRoot);
     const store = new StateStore(config);

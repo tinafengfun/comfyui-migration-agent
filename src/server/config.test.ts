@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { demoModelRoot, loadConfig } from "./config";
+import { loadConfig } from "./config";
 
 describe("server config", () => {
   const originalModelRoot = process.env.MODEL_ROOT;
@@ -10,14 +10,14 @@ describe("server config", () => {
     restoreEnv("MODEL_ROOTS", originalModelRoots);
   });
 
-  it("keeps the demo hf_models root in search and storage roots even when model roots are overridden", () => {
-    process.env.MODEL_ROOTS = "/tmp/custom-models";
+  it("uses MODEL_ROOTS env var for model search paths", () => {
+    process.env.MODEL_ROOTS = "/tmp/custom-models:/tmp/other";
     delete process.env.MODEL_ROOT;
 
     const config = loadConfig();
 
-    expect(config.modelRoots[0]).toBe(demoModelRoot);
     expect(config.modelRoots).toContain("/tmp/custom-models");
+    expect(config.modelRoots).toContain("/tmp/other");
   });
 });
 
