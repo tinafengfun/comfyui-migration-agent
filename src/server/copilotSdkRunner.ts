@@ -85,12 +85,7 @@ export class CopilotSdkRunner {
     const sessionId = `task-${job.taskId}`;
     // Determine if this is the first SDK step for this task (create) or a continuation (resume)
     // Deterministic steps (00, 03) don't use SDK, so the first SDK step may vary
-    // NOTE: resumeSession replays conversation history. Custom providers (e.g. DeepSeek)
-    // strictly validate tool_calls→tool response ordering and reject malformed history.
-    // When using a custom provider, always create a new session to avoid 400 errors.
-    const customProvider = this.resolveCustomProvider();
-    const shouldAvoidResume = !!customProvider.provider;
-    const isResume = !shouldAvoidResume && await this.hasPriorSdkSession(job.artifactPath);
+    const isResume = await this.hasPriorSdkSession(job.artifactPath);
     // All steps support multi-round human-agent interaction, so use the longer
     // timeout universally since any step may pause waiting for human answers.
     const defaultTimeout = 30 * 60 * 1000;
@@ -106,11 +101,11 @@ export class CopilotSdkRunner {
         ? process.env.MIGRATION_AGENT_PHASE1_MAX_MS ??
             process.env.MIGRATION_AGENT_STEP_MAX_MS ??
             6 * 60 * 60 * 1000
-        : process.env.MIGRATION_AGENT_STEP_MAX_MS ?? 4 * 60 * 60 * 1000  // 4 hours — 15+ ask_user rounds possible
+        : process.env.MIGRATION_AGENT_STEP_MAX_MS ?? 30 * 60 * 1000
     );
     const sdkIdleTimeoutMs = Number(
       process.env.MIGRATION_AGENT_SDK_IDLE_TIMEOUT_MS ??
-        String(4 * 60 * 60 * 1000)  // 4 hours — must exceed total human interaction time
+        String(maxRuntimeMs || Math.max(noProgressTimeoutMs * 12, 2 * 60 * 60 * 1000))
     );
     const watchdog = createProgressWatchdog({
       stepId: job.stepId,
@@ -141,6 +136,7 @@ export class CopilotSdkRunner {
       rejectObserverFailure = reject;
     });
     try {
+      const customProvider = this.resolveCustomProvider();
       const sessionConfig = {
         clientName: "comfy-xpu-migration-demo",
         gitHubToken,
@@ -206,10 +202,6 @@ export class CopilotSdkRunner {
             message: request.question,
             data: question
           });
-          // Mark progress to prevent watchdog from killing the step while
-          // waiting for the human to answer. The agent has reached a valid
-          // pause point — this is not a stalled step.
-          watchdog.markProgress(`waiting_for_human: ${(request.question || "").slice(0, 60)}`);
           if (waitForDecision) {
             const decision = await waitForDecision(event);
             return {
@@ -311,12 +303,6 @@ export class CopilotSdkRunner {
       };
     } catch (error) {
       await recorder.recordError(error);
-      // SDK "session.idle" timeout — agent was likely waiting for human input.
-      // Re-throw with a recognizable marker so the orchestrator can set
-      // waiting_for_human instead of failed.
-      if (error instanceof Error && error.message.includes("waiting for session.idle")) {
-        (error as Error & { isSessionIdleTimeout?: boolean }).isSessionIdleTimeout = true;
-      }
       throw error;
     } finally {
       await recorder.finalize(runStatus);
@@ -339,17 +325,12 @@ export class CopilotSdkRunner {
   }
 
   private createClient(cwd: string, gitHubToken?: string): CopilotClient {
-    // onListModels: bypass SDK's internal fetch("/models") which fails behind
-    // corporate proxies (e.g. Fortinet TLS interception). Return empty array —
-    // the model is always specified via sessionConfig.model or env vars.
-    const onListModels = async () => [];
     return new CopilotClient({
       cwd,
       cliPath: this.config.copilotCliPath,
       logLevel: "error",
       gitHubToken,
-      useLoggedInUser: gitHubToken ? false : true,
-      onListModels
+      useLoggedInUser: gitHubToken ? false : true
     });
   }
 

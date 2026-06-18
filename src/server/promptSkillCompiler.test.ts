@@ -39,9 +39,7 @@ describe("prompt skill compiler", () => {
       draftDocRoot: root,
       comfyuiRoot: "/tmp/comfy",
       modelRoots: ["/home/intel/hf_models"],
-      autoApproveAgentPermissions: false,
-      comfyuiVenv: "/tmp/comfy/.venv-xpu",
-      comfyuiPython: "/tmp/comfy/.venv-xpu/bin/python3",
+      autoApproveAgentPermissions: false
     };
 
     const job = await compileStepJob({
@@ -91,9 +89,7 @@ describe("prompt skill compiler", () => {
       draftDocRoot: root,
       comfyuiRoot: "/tmp/comfy",
       modelRoots: ["/home/intel/hf_models"],
-      autoApproveAgentPermissions: false,
-      comfyuiVenv: "/tmp/comfy/.venv-xpu",
-      comfyuiPython: "/tmp/comfy/.venv-xpu/bin/python3",
+      autoApproveAgentPermissions: false
     };
 
     const job = await compileStepJob({
@@ -150,9 +146,7 @@ describe("prompt skill compiler", () => {
       draftDocRoot: root,
       comfyuiRoot: "/tmp/comfy",
       modelRoots: ["/home/intel/hf_models"],
-      autoApproveAgentPermissions: false,
-      comfyuiVenv: "/tmp/comfy/.venv-xpu",
-      comfyuiPython: "/tmp/comfy/.venv-xpu/bin/python3",
+      autoApproveAgentPermissions: false
     };
 
     const job = await compileStepJob({

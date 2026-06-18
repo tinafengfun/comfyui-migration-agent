@@ -1,11 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 
-// Default model root — can be overridden via MODEL_ROOTS env var.
-// Kept as a constant for backward compat with assetAcquisition and assetSourceCli.
-export const demoModelRoot = process.env.MODEL_ROOTS?.split(":")[0]
-  || process.env.MODEL_ROOT
-  || "/opt/models";
+export const demoModelRoot = "/home/intel/hf_models";
 
 export interface AppConfig {
   port: number;
@@ -14,8 +10,6 @@ export interface AppConfig {
   stateRoot: string;
   draftDocRoot: string;
   comfyuiRoot: string;
-  comfyuiVenv: string;          // Python venv directory (e.g. /opt/ComfyUI/.venv-xpu)
-  comfyuiPython: string;        // Full path to python3 binary inside venv
   modelRoots: string[];
   copilotCliPath?: string;
   autoApproveAgentPermissions: boolean;
@@ -28,23 +22,11 @@ function resolveFromProject(value: string): string {
 }
 
 export function loadConfig(): AppConfig {
-  // ComfyUI root — REQUIRED. Must point to a ComfyUI checkout with main.py.
-  const comfyuiRoot = resolveFromProject(
-    process.env.COMFYUI_ROOT ?? defaultComfyUiRoot()
-  );
-
-  // ComfyUI Python venv — defaults to .venv-xpu inside ComfyUI root
-  const comfyuiVenv = process.env.COMFYUI_VENV
-    ? resolveFromProject(process.env.COMFYUI_VENV)
-    : path.join(comfyuiRoot, ".venv-xpu");
-  const comfyuiPython = path.join(comfyuiVenv, "bin", "python3");
-
-  // Model roots — no hardcoded default; must be configured via env
-  const configuredModelRoots = (process.env.MODEL_ROOTS ?? process.env.MODEL_ROOT ?? "")
+  const comfyuiRoot = resolveFromProject(process.env.COMFYUI_ROOT ?? defaultComfyUiRoot());
+  const configuredModelRoots = (process.env.MODEL_ROOTS ?? process.env.MODEL_ROOT ?? demoModelRoot)
     .split(":")
     .filter(Boolean)
     .map(resolveFromProject);
-
   return {
     port: Number(process.env.PORT ?? "3001"),
     projectRoot,
@@ -55,9 +37,7 @@ export function loadConfig(): AppConfig {
       process.env.DRAFT_DOC_ROOT ?? defaultDraftDocRoot(comfyuiRoot)
     ),
     comfyuiRoot,
-    comfyuiVenv,
-    comfyuiPython,
-    modelRoots: uniquePaths(configuredModelRoots),
+    modelRoots: uniquePaths([demoModelRoot, ...configuredModelRoots]),
     copilotCliPath: process.env.COPILOT_CLI_PATH,
     autoApproveAgentPermissions: process.env.MIGRATION_AGENT_AUTO_APPROVE !== "0"
   };
@@ -68,14 +48,11 @@ function uniquePaths(values: string[]): string[] {
 }
 
 function defaultComfyUiRoot(): string {
-  // Try sibling ComfyUI directory (agent-demo sits inside ComfyUI checkout)
-  const siblingCheckout = resolveFromProject("..");
-  if (fs.existsSync(path.join(siblingCheckout, "main.py"))) return siblingCheckout;
-  // Try parent of agent-demo's parent (ComfyUI/agent-demo → ComfyUI)
-  const parentCheckout = resolveFromProject("../..");
-  if (fs.existsSync(path.join(parentCheckout, "main.py"))) return parentCheckout;
-  // Fallback: assume current directory
-  return projectRoot;
+  const siblingCheckout = resolveFromProject("../ComfyUI");
+  if (fs.existsSync(path.join(siblingCheckout, "docs/draft"))) return siblingCheckout;
+  const parentCheckout = resolveFromProject("..");
+  if (fs.existsSync(path.join(parentCheckout, "docs/draft"))) return parentCheckout;
+  return siblingCheckout;
 }
 
 function defaultDraftDocRoot(comfyuiRoot: string): string {

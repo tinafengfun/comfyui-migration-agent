@@ -1,22 +1,6 @@
 import express from "express";
 import fs from "node:fs/promises";
 import path from "node:path";
-// Enable global proxy for all HTTP/HTTPS requests (including Node.js native fetch)
-// so Copilot SDK works behind corporate proxies (e.g. child-prc.intel.com:912).
-const proxyUrl = process.env.https_proxy || process.env.HTTPS_PROXY;
-if (proxyUrl) {
-  try {
-    const { bootstrap } = await import("global-agent");
-    bootstrap();
-  } catch { /* ignore */ }
-  try {
-    const { setGlobalDispatcher, ProxyAgent } = await import("undici");
-    setGlobalDispatcher(new ProxyAgent(proxyUrl));
-    console.log(`[proxy] Global proxy enabled: ${proxyUrl}`);
-  } catch {
-    console.warn(`[proxy] undici not available, native fetch() may not route through proxy`);
-  }
-}
 import type { CreateTaskRequest, MigrationTask } from "../shared/types";
 import { classifyArtifact, listArtifactFiles, readArtifactText } from "./artifacts";
 import { processUploadedReplacement, FileValidationError } from "./assetReplacement";
@@ -48,12 +32,11 @@ app.use(express.json({ limit: "200mb" }));
 app.get("/api/health", (_req, res) => {
   res.json({
     ok: true,
-    workspaceRoot: config.workspaceRoot,
-    draftDocRoot: config.draftDocRoot,
-    comfyuiRoot: config.comfyuiRoot,
-    comfyuiPython: config.comfyuiPython,
-    modelRoots: config.modelRoots,
-    autoApproveAgentPermissions: config.autoApproveAgentPermissions
+      workspaceRoot: config.workspaceRoot,
+      draftDocRoot: config.draftDocRoot,
+      comfyuiRoot: config.comfyuiRoot,
+      modelRoots: config.modelRoots,
+      autoApproveAgentPermissions: config.autoApproveAgentPermissions
   });
 });
 

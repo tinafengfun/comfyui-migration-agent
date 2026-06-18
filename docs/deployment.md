@@ -145,22 +145,9 @@ agent-demo/
 
 ### "Failed to list models"
 
-GitHub Copilot API 被 Intel 代理阻断。**必须使用 `proxy.ims.intel.com:911`**：
-
-```bash
-# 在 env 文件中设置
-export https_proxy=http://proxy.ims.intel.com:911
-export HTTPS_PROXY=http://proxy.ims.intel.com:911
-```
-
-**不要使用 `child-prc.intel.com:912`** — 该代理的 Fortinet DPI 会掐断所有 `*.github.com` 的 TLS 握手（CONNECT 隧道建好后 RST），导致 Copilot CLI 子进程内部 `fetch("https://api.githubcopilot.com/models")` 失败。
-
-如果切换代理后仍报错，先手动验证代理可达性：
-```bash
-curl -x http://proxy.ims.intel.com:911 -s -o /dev/null -w "%{http_code}\n" \
-  https://api.githubcopilot.com/models
-# 期望返回 400 (说明网络通，只是缺 auth header)
-```
+GitHub Copilot API 被代理/防火墙阻断。解决方案：
+1. 配置 HTTP 代理让 `api.githubcopilot.com` 通过
+2. 切换到其他 provider profile（Intel AI Demo / vLLM / Anthropic）
 
 ### Step 报 IPEX dependency error
 

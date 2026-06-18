@@ -24,8 +24,6 @@ describe("Copilot CLI worker", () => {
       stateRoot: root,
       draftDocRoot: root,
       comfyuiRoot: "/tmp/comfy",
-      comfyuiVenv: "/tmp/comfy/.venv-xpu",
-      comfyuiPython: "/tmp/comfy/.venv-xpu/bin/python3",
       modelRoots: ["/home/intel/hf_models"],
       copilotCliPath: fakeCli,
       autoApproveAgentPermissions: false

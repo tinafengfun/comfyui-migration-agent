@@ -62,7 +62,7 @@ Items start as `[ ]` and move to `✓` when decided. Max 8 items total.
 ### Multi-round with convergence
 
 1. **Round 1**: Call `ask_user` with findings + numbered items + tracker (all `[ ]`)
-2. **Rounds 2-14**: Human asks questions → call `ask_user` again with answer + updated tracker
+2. **Rounds 2-4**: Human asks questions → call `ask_user` again with answer + updated tracker
    - Mark `✓` for any item the human clearly decides
    - Add new items (D5, D6...) only if discussion reveals new risks
    - **IMPORTANT:** Every response to the human MUST go through `ask_user`, NOT plain text
@@ -74,7 +74,7 @@ Items start as `[ ]` and move to `✓` when decided. Max 8 items total.
    ```
 4. **Finalize**: All items `✓` → write `02-decisions.json` + update `02-feasibility.md`
 
-**Maximum 15 `ask_user` rounds.** After round 15, apply recommendations for any remaining open items and proceed.
+**Maximum 5 `ask_user` rounds.** After round 5, apply recommendations for any remaining open items and proceed.
 
 **Skip interaction only when:** zero risks, zero interventions needed, zero unverified assumptions.
 

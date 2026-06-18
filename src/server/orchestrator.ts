@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import { execFile, spawn } from "node:child_process";
+import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
 import type {
@@ -111,8 +111,7 @@ export class MigrationOrchestrator {
     const layout = await createTaskWorkspace({
       workspaceRootPath: this.config.workspaceRoot,
       taskId,
-      workflowFileName: input.workflowFileName,
-      modelStorageRoot: this.config.modelRoots[0] ?? ""
+      workflowFileName: input.workflowFileName
     });
     await fs.writeFile(layout.workflowPath, `${JSON.stringify(input.workflowJson, null, 2)}\n`, "utf8");
 
@@ -452,34 +451,8 @@ export class MigrationOrchestrator {
 
     if (await this.pauseIfArtifactHumanGate(task, step)) return;
 
-    const stepNum = parseInt(stepId, 10);
-
-    // Auto-start ComfyUI before steps that need a running instance (05+).
-    // This ensures correct CWD (ComfyUI root) and XPU flags (--disable-dynamic-vram).
-    // The comfyApiUrl is injected into the step context so the agent knows ComfyUI
-    // is already running and doesn't try to launch it via bash.
-    if (stepNum >= 5) {
-      try {
-        const comfyApiUrl = await this.startComfyUIForTask(task);
-        resumeContext = { ...resumeContext, comfyApiUrl };
-        await this.emit({
-          taskId,
-          stepId,
-          type: "progress",
-          message: `ComfyUI started by orchestrator at ${comfyApiUrl}.`
-        });
-      } catch (e) {
-        const errMsg = e instanceof Error ? e.message : String(e);
-        await this.emit({
-          taskId,
-          stepId,
-          type: "progress",
-          message: `ComfyUI auto-start failed: ${errMsg}. Agent will attempt manual start.`
-        });
-      }
-    }
-
     // Sync input-media files to running ComfyUI before steps that submit prompts (07+)
+    const stepNum = parseInt(stepId, 10);
     if (stepNum >= 7) {
       await this.syncInputMediaToComfyUI(task);
     }
@@ -579,24 +552,11 @@ export class MigrationOrchestrator {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (error instanceof HumanGatePauseError) {
-        await this.store.updateStep(taskId, stepId, "waiting_for_human");
         await this.emit({
           taskId,
           stepId,
           type: "progress",
           message: `Auto-run paused at Step ${stepId} for human input.`
-        });
-        return;
-      }
-      // SDK session.idle timeout — agent was waiting for human but session expired.
-      // Set to waiting_for_human so the step can be rerun/resumed.
-      if (error instanceof Error && (error as Error & { isSessionIdleTimeout?: boolean }).isSessionIdleTimeout) {
-        await this.store.updateStep(taskId, stepId, "waiting_for_human", { error: message });
-        await this.emit({
-          taskId,
-          stepId,
-          type: "progress",
-          message: `Step ${stepId} paused for human input: ${message}`
         });
         return;
       }
@@ -2463,57 +2423,6 @@ export class MigrationOrchestrator {
       if (typeof apiUrl === "string" && apiUrl.startsWith("http")) return apiUrl;
     } catch { /* ignore */ }
     return undefined;
-  }
-
-  /**
-   * Start a ComfyUI instance for a task with correct CWD and XPU flags.
-   * Returns the API base URL once the server responds to /system_stats.
-   * Managed by the orchestrator so the agent doesn't need to launch via bash.
-   */
-  async startComfyUIForTask(task: MigrationTask, port: number = 8188): Promise<string> {
-    await this.killComfyUIProcessesForTask(task);
-
-    const workspace = task.workspacePath;
-    const comfyRoot = this.config.comfyuiRoot;
-    const venvPython = this.config.comfyuiPython;
-    const modelPathsConfig = path.join(workspace, "artifacts", "05-extra-model-paths.yaml");
-
-    const args = [
-      "main.py",
-      "--listen", "127.0.0.1",
-      "--port", String(port),
-      "--disable-auto-launch",
-      "--disable-dynamic-vram",
-      "--output-directory", path.join(workspace, "outputs"),
-      "--input-directory", path.join(workspace, "inputs"),
-    ];
-    // Add extra model paths config if it exists
-    try {
-      await fs.access(modelPathsConfig);
-      args.push("--extra-model-paths-config", modelPathsConfig);
-    } catch { /* no model paths config yet */ }
-
-    console.log(`[orchestrator] Starting ComfyUI: ${venvPython} ${args.join(" ")} (cwd=${comfyRoot})`);
-
-    const child = spawn(venvPython, args, {
-      cwd: comfyRoot,
-      detached: true,
-      stdio: "ignore",
-    });
-    child.unref();
-
-    const baseUrl = `http://127.0.0.1:${port}`;
-    for (let i = 0; i < 30; i++) {
-      await new Promise((r) => setTimeout(r, 2000));
-      try {
-        const resp = await fetch(`${baseUrl}/system_stats`);
-        if (resp.ok) {
-          console.log(`[orchestrator] ComfyUI ready at ${baseUrl}`);
-          return baseUrl;
-        }
-      } catch { /* not ready yet */ }
-    }
-    throw new Error(`ComfyUI failed to start on port ${port} within 60s`);
   }
 
   /**

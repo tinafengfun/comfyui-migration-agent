@@ -10,7 +10,7 @@ This includes:
 - Confirming whether to proceed to Step 05 environment readiness probe
 - Any follow-up questions about audit results
 
-**Maximum 15 `ask_user` rounds.** After round 15, apply your best judgment for any remaining open items and proceed.
+**Maximum 5 `ask_user` rounds.** After round 5, apply your best judgment for any remaining open items and proceed.
 
 ## Use when
 

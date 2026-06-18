@@ -170,7 +170,7 @@ The human may:
 
 ### Phase 3: Convergence (mandatory after 5 rounds)
 
-**Maximum 15 `ask_user` rounds.** After 15 rounds, you MUST:
+**Maximum 5 `ask_user` rounds.** After 5 rounds, you MUST:
 
 1. Call `ask_user` to re-present the tracker with all items
 2. For any still-open items, state your recommended default:

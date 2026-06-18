@@ -1,6 +1,6 @@
 ### CRITICAL: ask_user for ALL human communication
 
-You MUST use the `ask_user` tool for EVERY message to the human operator. The human CANNOT see your plain text output. If you write findings, questions, or follow-ups as plain text instead of calling `ask_user`, the step will end prematurely. This includes presenting hard_stop items, gate decisions, validation failures, and any question requiring human judgment. Maximum 15 `ask_user` rounds per step; after round 15, apply your best judgment and proceed.
+You MUST use the `ask_user` tool for EVERY message to the human operator. The human CANNOT see your plain text output. If you write findings, questions, or follow-ups as plain text instead of calling `ask_user`, the step will end prematurely. This includes presenting hard_stop items, gate decisions, validation failures, and any question requiring human judgment. Maximum 5 `ask_user` rounds per step; after round 5, apply your best judgment and proceed.
 
 # Environment deployment skill
 
@@ -38,7 +38,7 @@ Use to create a reproducible Intel XPU ComfyUI baseline.
     - record skipped packages, such as `bitsandbytes`, `flash-attn`, `sageattention`, or `onnxruntime-gpu`, and the affected optional paths
 6. Configure model roots or symlink staged assets, and retain a source-to-destination mapping. Prefer a separate Step 05 extra-model-paths config over editing the canonical ComfyUI config when running an isolated validation.
 7. Apply required registration patches or workflow runtime policies only with explicit approval, and keep them separate from runtime validation claims.
-8. Launch with conservative Intel XPU flags (see **Launch command** section below).
+8. Launch with conservative Intel XPU flags.
 9. Verify startup and backend node registration through `/system_stats` and `/object_info`.
 10. For frontend-only LiteGraph nodes, record source evidence from web extension registration code instead of requiring `/object_info`.
 11. Preserve logs and API evidence before moving to prompt validation.
@@ -82,46 +82,8 @@ Record actual versions from the target machine. Do not invent versions.
 
 If a version is unknown, write `unknown` and mark it as an environment gap until verified. Do not replace unknowns with guessed "known good" versions.
 
-## Launch command
-
-The ComfyUI server MUST be launched from the ComfyUI repository root as CWD and include the following flags for Intel XPU:
-
-```bash
-cd <ComfyUI-root>
-.venv-xpu/bin/python main.py \
-  --listen 127.0.0.1 \
-  --port <port> \
-  --disable-auto-launch \
-  --disable-dynamic-vram \
-  --extra-model-paths-config <workspace>/artifacts/05-extra-model-paths.yaml \
-  --output-directory <workspace>/outputs \
-  --input-directory <workspace>/inputs
-```
-
-### Mandatory rules
-
-1. **Use `main.py`, NOT `server.py`**. `server.py` is an alternative entry point that has a fragile `from utils.install_util import ...` dependency. When launched from a non-ComfyUI working directory (which is the case when the Copilot SDK agent's shell CWD is the task workspace), this import fails with `ModuleNotFoundError: No module named 'utils.install_util'; 'utils' is not a package`. `main.py` does not have this dependency and sets up `sys.path` correctly.
-
-2. **Always include `--disable-dynamic-vram`**. Without this flag, ComfyUI's dynamic VRAM management may trigger CUDA-specific code paths (e.g. `torch.cuda.mem_get_info`) that fail or return incorrect values on Intel XPU, causing startup errors or incorrect device detection.
-
-3. **Always `cd` to the ComfyUI root before launching**. The agent's shell CWD is the task workspace, not the ComfyUI directory. A bare `python main.py` without `cd` will fail because `sys.path[0]` will not contain the ComfyUI root.
-
-4. **Do NOT use `--normalvram`, `--lowvram`, or `--highvram`** alongside `--disable-dynamic-vram`. These flags are mutually exclusive with dynamic VRAM disabling and may cause unexpected behavior.
-
-### Known startup pitfalls
-
-| Symptom | Cause | Fix |
-|---------|-------|-----|
-| `ModuleNotFoundError: No module named 'utils.install_util'` | Used `server.py` or CWD is not ComfyUI/ | Use `main.py` + `cd` to ComfyUI root |
-| `torch.cuda` errors on XPU host | Missing `--disable-dynamic-vram` | Add the flag |
-| `intel_extension_for_pytorch` import error | IPEX incompatible with PyTorch 2.11+ | `pip uninstall intel-extension-for-pytorch` |
-| Server hangs with zero output (no log) | ComfyUI node scanning takes long on first run | Wait up to 60s; not an error |
-| `pip install` pulls CUDA torch wheels | Unpinned requirements on XPU host | Pin to `--index-url https://pytorch-extension.intel.com/release-whl/stable/xpu/cn/` |
-
 ## Common failure signatures
 
-- launching with `server.py` instead of `main.py` causes `utils.install_util` import error when CWD ≠ ComfyUI root
-- launching without `--disable-dynamic-vram` triggers CUDA VRAM APIs on XPU host
 - package imports fail before registration
 - node installed after server start but not registered
 - wrong model root hides available assets

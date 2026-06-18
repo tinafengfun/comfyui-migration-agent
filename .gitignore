@@ -1,14 +1,26 @@
+# Dependencies
 node_modules/
-dist/
-workspaces/
-.demo-state/
-logs/
-*.env
-.env
-sdk-sessions/
-__pycache__/
 
-# Python
-__pycache__/
-*.pyc
-*.pyo
+# Build output
+dist/
+
+# Runtime state
+.demo-state/
+.vite/
+
+# Task workspaces (per-run data)
+workspaces/
+workspaces*/
+
+# Logs
+*.log
+
+# Environment secrets (use env.example as template)
+.env
+.env.local
+.env.*.local
+download.env
+
+# OS files
+.DS_Store
+Thumbs.db

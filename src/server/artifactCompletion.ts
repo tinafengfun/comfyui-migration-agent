@@ -88,8 +88,6 @@ export function expectedArtifactGroups(step: MigrationStepDefinition): string[][
     case "06":
       return stepMentionsOnlyOneRequiredArtifact(step, ["06-prompt-validation.json", "06-prompt.json"]) ?? [
         ["06-prompt-validation.json", "06-prompt.json"],
-        ["06-prompt-validation.md", "06-prompt.json"],
-        ["06-prompt-validation-summary.json", "06-prompt.json"],
         ["06-prompt-validation-summary.json", "06-source-preserving-prompt.json"]
       ];
     case "07":
