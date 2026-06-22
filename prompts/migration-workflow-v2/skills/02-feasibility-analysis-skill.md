@@ -151,6 +151,78 @@ For Dasiwa-style Wan video branches, expect activation peak to dominate once the
 
 Use `../templates/intel-xpu-hardware-reference.md` to fill the hardware side of the estimate. If the target is called "B70" or another local environment name, measure the actual GPU and usable VRAM instead of inferring it from the label.
 
+## FP8 quantized weights on XPU — patch vs CPU offload gate
+
+### Background
+
+FP8 quantized text encoders (e.g. `qwen_2.5_vl_7b_fp8_scaled.safetensors`, Qwen3-VL FP8, HunyuanImage TE) hit a known segfault when ComfyUI moves them onto Intel XPU. Root cause: `comfy_kitchen`'s `QTensor.clone()` implementation segfaults during `Module.to("xpu")` while rewrapping FP8 weights. Verified on `comfy_kitchen` ≤ 0.2.8 on Intel Arc [0xe211] with torch 2.12.1+xpu.
+
+### Two resolution paths
+
+| Path | Mechanism | Cost |
+| --- | --- | --- |
+| **A. ops.py dequant patch** (preferred when VRAM allows) | Patch `comfy/ops.py::_quantized_apply` to dequantize FP8 → bf16 *before* moving to XPU. See `xpu-bug-investigation/0001-xpu-fp8-fallback-dequantize-before-move-to-xpu.patch` in the ComfyUI repo. | Doubles weight memory (FP8 → bf16). Precision verified: min cosine 0.99998 vs CPU native (see `clip_fp8_precision_report.md`). |
+| **B. CPU offload** (fallback when VRAM tight) | Set CLIPLoader widget `device=cpu`. Bypasses the XPU segfault entirely; text encode runs on CPU. | Slow text encoding (CPU). No memory pressure on XPU. This is the prior `XPU-CLIP-01` workaround. |
+
+### Decision gate (MANDATORY for any FP8 TE in scope)
+
+Compute before recommending either path. The patch is **only** safe if the dequantized weight footprint fits inside the VRAM headroom already budgeted by the `estimated_peak_vram` template above.
+
+```text
+# 1. Measure FP8 size from the actual checkpoint (do not infer from filename)
+fp8_bytes = sum(t.numel() * t.element_size() for t in sd.values()
+                if t is FP8-quantized and used by the TE architecture)
+# Rule out unused buckets before counting (see optimization below):
+#   - visual.*            (ViT encoder — unused when TE is text-only)
+#   - lm_head.*           (TE reads hidden state before lm_head)
+#   - merger/connector/*  (VL bridge — unused for text-only)
+
+# 2. Project bf16 size on XPU after patch dequantizes
+bf16_bytes_on_xpu = fp8_bytes * 2        # FP8 (1 byte) → bf16 (2 bytes)
+bf16_bytes_on_xpu += fp8_bytes * 0.05    # +5% for dequant scale/bias overhead
+
+# 3. Compute headroom from the VRAM estimate template
+free_xpu_vram_bytes = measured_total_xpu_vram - estimated_peak_vram - safety_margin
+
+# 4. Decide
+if bf16_bytes_on_xpu < free_xpu_vram_bytes:
+    → recommend Path A (apply ops.py patch, keep TE on XPU)
+else:
+    → recommend Path B (CLIPLoader device=cpu, document as XPU-CLIP-XX patch)
+    → OR run the strip-checkpoint optimization below and re-evaluate
+```
+
+Apply the gate per FP8 TE in the workflow. A workflow with one FP8 TE and a large GGUF/Q6_K diffusion model will usually fail this gate on 22 GB-class XPU; the same workflow on 48 GB will usually pass.
+
+### Strip-checkpoint optimization (lowers both paths' cost)
+
+Many TE checkpoints ship the full VL model even though ComfyUI's TE class (e.g. `Qwen25_7BVLI`) is text-only. The unused weights still get loaded into the state_dict and dequantized before `load_state_dict(strict=False)` filters them out. For `qwen_2.5_vl_7b_fp8_scaled.safetensors`:
+
+| Bucket | Tensors | FP8 size | Status |
+| --- | --- | --- | --- |
+| `model.*` (LLM body) | 730 | 7.09 GB | USED |
+| `visual.*` (ViT) | 714 | 0.63 GB | unused |
+| `lm_head.weight` | 1 | 1.02 GB | unused (no tied embeddings) |
+| **Total wasted** | | **1.65 GB (18.8%)** | |
+
+Stripping the unused keys before deployment reduces the FP8 footprint and (under Path A) the on-XPU bf16 footprint by ~3.3 GB. Recommend producing a `<name>_text_only.safetensors` via a strip script during Step 01 acquisition when:
+
+- The TE filename suggests a VL model (`vl`, `vision`, `image` in the name) **and**
+- The TE class registered for the workflow's CLIPType is text-only (check `comfy/text_encoders/<arch>.py`)
+
+Verify the stripped checkpoint produces bit-identical TE outputs to the original by running the precision test against both (they must match exactly — the discarded weights are not in the compute graph).
+
+### Handoff
+
+Whichever path is chosen, record in the `step03_context`:
+
+- `fp8_te_present: true/false`
+- `fp8_te_path_chosen: "ops_py_patch" | "cpu_offload" | "n/a"`
+- `fp8_te_vram_gate_passed: true/false`
+- `fp8_te_checkpoint_stripped: true/false`
+- `fp8_te_patch_file: "<path-to-patch-or-none>"` (Step 05 will apply this)
+- `fp8_te_precision_evidence: "<path-to-test-output-or-pending>"` (Step 08 will produce this)
+
 ## Evidence standard
 
 Use workflow structure, model sizes, source hints, Step 01 acquisition evidence, and documented target requirements. Do not rely on optimism.

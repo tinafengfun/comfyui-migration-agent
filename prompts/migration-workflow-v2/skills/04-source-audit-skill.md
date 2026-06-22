@@ -39,6 +39,7 @@ Use before patching custom nodes or declaring XPU support.
    - whether dtype choices are safe for the target XPU class; do not assume `fp16` and `bf16` behave the same on every Intel GPU
    - whether ONNX Runtime providers are hard-coded to CUDA-only providers instead of OpenVINO, DML, CPU, or another validated provider
    - whether the installed PyTorch, IPEX, Level Zero, and driver versions are compatible with the expected `torch.xpu` behavior
+   - **whether any text-encoder / CLIP checkpoint is FP8-quantized** (filename patterns: `_fp8`, `fp8_e4m3fn`, `fp8_scaled`, `qwen_*_vl_*_fp8*`). If yes, flag for the Step 02 FP8-on-XPU decision gate (see `02-feasibility-analysis-skill.md § FP8 quantized weights on XPU`). The default XPU path segfaults during `Module.to("xpu")` and requires either the `ops.py` dequant patch or `CLIPLoader device=cpu` offload — Step 02 picks which based on the VRAM gate.
 4. Link each risk to workflow criticality. Package-level CUDA hits in optional or disconnected code are retained as package risk, but they are not critical blockers unless the workflow branch uses them.
 5. Classify the patch type.
 6. Decide whether to patch, keep CPU fallback, mark integration gap, or mark feature-development gap.

@@ -38,6 +38,9 @@ Use to create a reproducible Intel XPU ComfyUI baseline.
     - record skipped packages, such as `bitsandbytes`, `flash-attn`, `sageattention`, or `onnxruntime-gpu`, and the affected optional paths
 6. Configure model roots or symlink staged assets, and retain a source-to-destination mapping. Prefer a separate Step 05 extra-model-paths config over editing the canonical ComfyUI config when running an isolated validation.
 7. Apply required registration patches or workflow runtime policies only with explicit approval, and keep them separate from runtime validation claims.
+   - **If Step 02 decided `fp8_te_path_chosen: "ops_py_patch"`**, apply `xpu-bug-investigation/0001-xpu-fp8-fallback-dequantize-before-move-to-xpu.patch` to `comfy/ops.py` here (or carry the equivalent change from the upstream ComfyUI fork). Verify with `git diff comfy/ops.py` that `_quantized_apply` now contains the `_is_fp8_quantized_tensor` + `_probe_device` + `dequantize-before-move-to-xpu` block. The patch is the prerequisite for keeping FP8 TEs on XPU without segfault.
+   - **If Step 02 decided `fp8_te_path_chosen: "cpu_offload"`**, no `ops.py` patch is needed; the CLIPLoader widget `device=cpu` override is delivered as a runtime-policy JSON patch in Step 08 instead.
+   - **If Step 02 decided `fp8_te_checkpoint_stripped: true`**, ensure the stripped `<name>_text_only.safetensors` is the file referenced by the CLIPLoader widget, not the original.
 8. Launch with conservative Intel XPU flags.
 9. Verify startup and backend node registration through `/system_stats` and `/object_info`.
 10. For frontend-only LiteGraph nodes, record source evidence from web extension registration code instead of requiring `/object_info`.
