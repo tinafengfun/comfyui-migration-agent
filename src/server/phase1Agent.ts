@@ -239,6 +239,7 @@ export function normalizePhase1StepStatus(status: string): StepStatus {
     case "pending":
     case "running":
     case "waiting_for_human":
+    case "paused":
     case "hard_stopped":
     case "completed":
     case "failed":
@@ -345,6 +346,7 @@ function derivePhase1TaskStatus(steps: Array<{ status: string }>): string {
   if (steps.some((step) => step.status === "waiting_for_human" || step.status === "human_gate_reached")) {
     return "waiting_for_human";
   }
+  if (steps.some((step) => step.status === "paused")) return "paused";
   if (steps.some((step) => step.status === "failed")) return "failed";
   if (steps.some((step) => step.status === "hard_stopped" || step.status === "hard_stop")) {
     return "hard_stopped";
@@ -583,7 +585,7 @@ function findCurrentStepId(
   steps: MigrationStepDefinition[]
 ): string | undefined {
   const active = task.steps.find((step) =>
-    ["running", "waiting_for_human", "failed", "hard_stopped", "terminated"].includes(step.status)
+    ["running", "waiting_for_human", "paused", "failed", "hard_stopped", "terminated"].includes(step.status)
   );
   if (active) return active.id;
   return steps.find((step) => {

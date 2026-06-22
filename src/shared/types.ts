@@ -2,6 +2,7 @@ export type StepStatus =
   | "pending"
   | "running"
   | "waiting_for_human"
+  | "paused"
   | "hard_stopped"
   | "completed"
   | "failed"

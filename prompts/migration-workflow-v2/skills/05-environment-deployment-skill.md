@@ -41,7 +41,24 @@ Use to create a reproducible Intel XPU ComfyUI baseline.
    - **If Step 02 decided `fp8_te_path_chosen: "ops_py_patch"`**, apply `xpu-bug-investigation/0001-xpu-fp8-fallback-dequantize-before-move-to-xpu.patch` to `comfy/ops.py` here (or carry the equivalent change from the upstream ComfyUI fork). Verify with `git diff comfy/ops.py` that `_quantized_apply` now contains the `_is_fp8_quantized_tensor` + `_probe_device` + `dequantize-before-move-to-xpu` block. The patch is the prerequisite for keeping FP8 TEs on XPU without segfault.
    - **If Step 02 decided `fp8_te_path_chosen: "cpu_offload"`**, no `ops.py` patch is needed; the CLIPLoader widget `device=cpu` override is delivered as a runtime-policy JSON patch in Step 08 instead.
    - **If Step 02 decided `fp8_te_checkpoint_stripped: true`**, ensure the stripped `<name>_text_only.safetensors` is the file referenced by the CLIPLoader widget, not the original.
-8. Launch with conservative Intel XPU flags.
+8. Launch ComfyUI from the ComfyUI root, **not** from the task workspace. The SDK session's working directory is the workspace, so an unqualified `python3 main.py` inherits the wrong CWD and Python's `sys.path[0]` will not contain the ComfyUI root. Always launch with an explicit `cd`:
+
+   ```bash
+   cd "${COMFYUI_ROOT}" && \
+   python3 main.py \
+     --port "${COMFYUI_PORT:-8188}" \
+     --listen 127.0.0.1 \
+     --extra-model-paths-yaml "${WORKSPACE}/artifacts/05-extra-model-paths.yaml" \
+     --output-directory "${WORKSPACE}/outputs" \
+     <conservative Intel XPU flags, e.g. --disable-gpu --reserve-vram 1 --disable-dynamic-vram>
+   ```
+
+   Notes:
+   - `cd "${COMFYUI_ROOT}" &&` is the load-bearing part — without it, `from utils.install_util import ...` and other top-level imports can fail.
+   - Run the launch in the background (`nohup ... &` or detached shell) and poll `http://127.0.0.1:${COMFYUI_PORT}/system_stats` until it responds before claiming readiness.
+   - Record the exact launch command in the environment summary as `launch_command`. Subsequent steps (07, 08, 12) inherit this server; do not relaunch unless the process died.
+   - Conservative default flags: prefer `--reserve-vram 1` and `--disable-dynamic-vram` for smoke; widen only when Step 08 capacity evidence permits.
+   - If the workflow selected CPU-only placement (e.g. FP8 TE CPU-offload path), launch with `--cpu` and pin CLIPLoader `device=cpu` via runtime-policy JSON in Step 08 rather than relaunching.
 9. Verify startup and backend node registration through `/system_stats` and `/object_info`.
 10. For frontend-only LiteGraph nodes, record source evidence from web extension registration code instead of requiring `/object_info`.
 11. Preserve logs and API evidence before moving to prompt validation.

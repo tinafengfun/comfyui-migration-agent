@@ -83,7 +83,7 @@ export function buildProgressNarrative(input: BuildProgressNarrativeInput): Prog
 function selectCurrentTaskStep(task: MigrationTask): CandidateStep {
   return (
     task.steps.find((step) =>
-      ["running", "waiting_for_human", "failed", "hard_stopped"].includes(step.status)
+      ["running", "waiting_for_human", "paused", "failed", "hard_stopped"].includes(step.status)
     ) ??
     task.steps.find((step) => step.status === "pending") ??
     [...task.steps].reverse().find((step) => step.status === "completed")
@@ -95,7 +95,7 @@ function selectPhase1CurrentStep(state?: Phase1TaskState) {
   return (
     state.steps.find((step) => step.id === state.current_step_id) ??
     state.steps.find((step) =>
-      ["running", "waiting_for_human", "human_gate_reached", "failed", "hard_stop"].includes(
+      ["running", "waiting_for_human", "paused", "human_gate_reached", "failed", "hard_stop"].includes(
         step.status
       )
     )
@@ -126,6 +126,7 @@ function normalizeNarrativeStatus(status?: string): ProgressNarrativeStep["statu
     case "pending":
     case "running":
     case "waiting_for_human":
+    case "paused":
     case "hard_stopped":
     case "completed":
     case "failed":

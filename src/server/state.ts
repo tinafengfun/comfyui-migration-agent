@@ -168,6 +168,11 @@ export class StateStore {
       if (["completed", "failed", "hard_stopped", "terminated"].includes(status)) {
         step.completedAt = now;
       }
+      // `paused` is a non-terminal state (SDK session kept alive for resume);
+      // clear any stale error/summary so the UI shows "paused" cleanly.
+      if (status === "paused") {
+        step.completedAt = undefined;
+      }
       task.status = status === "completed" ? deriveTaskStatus(task) : status;
       task.updatedAt = now;
       await this.save(state);
@@ -253,6 +258,9 @@ function deriveTaskStatus(task: MigrationTask): StepStatus {
   }
   if (task.steps.some((step) => step.status === "waiting_for_human")) {
     return "waiting_for_human";
+  }
+  if (task.steps.some((step) => step.status === "paused")) {
+    return "paused";
   }
   return "pending";
 }

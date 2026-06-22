@@ -2,7 +2,7 @@
 
 > Status: BACKLOG — postponed until business logic is verified correct across all 14 steps.
 > Created: 2026-05-28
-> Last updated: 2026-05-28
+> Last updated: 2026-06-22 (code review)
 
 ## Background
 
@@ -45,6 +45,19 @@ One-time files: majority of tool I/O outputs, grep results, intermediate bash ou
 ---
 
 ## Backlog Items
+
+### Code review (2026-06-22)
+
+| Item | Status as of review | Notes |
+|------|---------------------|-------|
+| P0 Step Isolation | **未做** | `copilotSdkRunner.ts:85` 仍 `sessionId = task-${job.taskId}`，每步 `resumeSession` |
+| P1 Artifact Summary | **未做** | 无 `stepSummary.ts`；仅有 LLM 自产 final summary |
+| P2 Tool I/O Eviction | **部分做** | `contextRetention.ts` 已实现持久化层分类（drop/db_only/debug_only），但只控制持久化，SDK session 内部累积未处理 |
+| P3 System Dedup | **未做** | 每次 resume 带完整 systemMessage（做完 P0 自动消失） |
+| P4 Script固化 | **未做** | 无 `stepScripts/` 目录 |
+| P5 SQLite | **未做** | `package.json` 无 sqlite/drizzle 依赖 |
+
+---
 
 ### P0: Step Isolation (Context Explosion Fix)
 
@@ -107,16 +120,18 @@ Subsequent steps read the 200-token summary instead of the 50KB artifact.
 
 **Solution**: After a step completes, strip tool I/O from the session history, keeping only the final assistant message. This is complementary to P0 (step isolation) — if steps are isolated, this happens automatically.
 
+**Partial implementation (2026-06-22 review)**: `src/server/contextRetention.ts` already classifies SDK events into retention classes (`prompt_required` / `prompt_summary` / `db_only` / `debug_file_only` / `drop`) and is wired into `copilotSdkRunner.ts:448`. However, this only controls **what gets persisted** to disk and the API event stream — it does NOT truncate tool I/O inside the SDK session that the LLM sees on `resumeSession`. The actual session-context eviction still needs P0 (or SDK-level transcript editing).
+
 If step isolation is not yet done, an alternative is to truncate tool I/O in the session on resume:
 - Keep: `assistant.message` events (agent's conclusions)
 - Drop: `tool.execution_complete` output > 1KB (replace with "[output truncated, see artifact]")
 - Keep: `tool.execution_start` (shows what was attempted)
 
-**Expected impact**: ~58K tokens saved across 5 steps.
+**Expected impact**: ~58K tokens saved across 5 steps (the fraction not already handled by `contextRetention.ts`).
 
 **Files to change**:
-- `src/server/contextRetention.ts` — add tool I/O eviction rules
-- `src/server/copilotSdkRunner.ts` — apply eviction on session resume
+- `src/server/contextRetention.ts` — add tool I/O eviction rules for session resume
+- `src/server/copilotSdkRunner.ts` — apply eviction on session resume (currently only applies to recorder persistence)
 
 ---
 

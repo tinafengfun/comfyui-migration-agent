@@ -39,7 +39,7 @@ function stringValue(v: unknown): string | undefined {
   return typeof v === "string" ? v : undefined;
 }
 function isDeletableTask(task: MigrationTask) {
-  return ["completed", "failed", "hard_stopped", "terminated", "pending"].includes(task.status);
+  return ["completed", "failed", "paused", "hard_stopped", "terminated", "pending"].includes(task.status);
 }
 
 /** Lightweight markdown → HTML for chat messages */
@@ -111,7 +111,7 @@ function App() {
     [selectedTaskId, tasks]
   );
   const activeStep = useMemo(
-    () => selectedTask?.steps.find((s) => ["running", "waiting_for_human", "failed"].includes(s.status)),
+    () => selectedTask?.steps.find((s) => ["running", "waiting_for_human", "paused", "failed"].includes(s.status)),
     [selectedTask]
   );
   const selectedStepIdFinal = selectedStepId ?? activeStep?.id ?? "00";
@@ -484,6 +484,12 @@ function StepDetail({ step, state, activities, narrative, taskId, onRunStep, onR
           {state?.status === "waiting_for_human" && (
             <button className="btn btn-primary" onClick={() => onResumeStep(step.id)}>Resume</button>
           )}
+          {state?.status === "paused" && (
+            <>
+              <button className="btn btn-primary" onClick={() => onResumeStep(step.id)}>Resume</button>
+              <button className="btn" onClick={() => onRerunStep(step.id)}>Re-run</button>
+            </>
+          )}
           {["completed", "failed", "hard_stopped"].includes(state?.status ?? "") && (
             <button className="btn" onClick={() => onRerunStep(step.id)}>Re-run</button>
           )}
@@ -853,6 +859,7 @@ function StatusBadge({ status }: { status: string }) {
     running: { label: "running", cls: "badge-running" },
     completed: { label: "done", cls: "badge-done" },
     failed: { label: "failed", cls: "badge-failed" },
+    paused: { label: "paused", cls: "badge-waiting" },
     hard_stopped: { label: "stopped", cls: "badge-failed" },
     waiting_for_human: { label: "waiting", cls: "badge-waiting" },
     terminated: { label: "ended", cls: "badge-failed" }

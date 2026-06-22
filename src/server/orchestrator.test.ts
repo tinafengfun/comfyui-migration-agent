@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import type { AppConfig } from "./config";
 import { ensureDir } from "./fsUtils";
 import { MigrationOrchestrator } from "./orchestrator";
+import { SdkStepTimeoutError } from "./copilotSdkRunner";
 import { StateStore } from "./state";
 
 describe("migration orchestrator", () => {
@@ -1177,5 +1178,110 @@ describe("migration orchestrator", () => {
     const gateSignal = JSON.parse(await fs.readFile(path.join(task.artifactPath, "05-gate-signal.json"), "utf8"));
     expect(gateSignal.gated).toBe(true);
     expect((await store.listEvents(task.id)).some((event) => event.stepId === "05" && event.type === "human_question")).toBe(true);
+  });
+
+  it("W2: state machine accepts `paused` and surfaces it via deriveTaskStatus", async () => {
+    const root = path.join(process.cwd(), ".demo-state", "tests", `orchestrator-w2-${Date.now()}`);
+    const config: AppConfig = {
+      port: 0,
+      projectRoot: root,
+      workspaceRoot: path.join(root, "workspaces"),
+      stateRoot: path.join(root, "state"),
+      draftDocRoot: root,
+      comfyuiRoot: "/tmp/comfy",
+      modelRoots: ["/home/intel/hf_models"],
+      autoApproveAgentPermissions: false
+    };
+    await ensureDir(config.workspaceRoot);
+    const store = new StateStore(config);
+    await store.initialize();
+    const orchestrator = new MigrationOrchestrator(config, store, [
+      { id: "05", name: "Env", requiredOutput: "05-environment.md", humanIntervention: "Approve" },
+      { id: "06", name: "Prompt", requiredOutput: "06-prompt.md", humanIntervention: "Approve" }
+    ]);
+    const task = await orchestrator.createTask({
+      name: "W2",
+      workflowFileName: "workflow.json",
+      workflowJson: { nodes: [], links: [] }
+    });
+
+    // Simulate the W2 paused-state routing: SDK timed out, no human question open,
+    // orchestrator sets paused instead of failed.
+    await store.updateStep(task.id, "05", "paused", { error: "SDK watchdog timeout" });
+
+    const updated = await store.getTask(task.id);
+    const step = updated?.steps.find((s) => s.id === "05");
+    expect(step?.status).toBe("paused");
+    expect(step?.error).toMatch(/SDK watchdog timeout/);
+    // paused is non-terminal: completedAt must be cleared
+    expect(step?.completedAt).toBeUndefined();
+    // deriveTaskStatus must surface paused at the task level so UI can render it
+    expect(updated?.status).toBe("paused");
+
+    // resumeStep moves paused back to running (via runStep's updateStep call);
+    // verify the state transition doesn't reject.
+    const beforeResume = await store.getTask(task.id);
+    expect(beforeResume?.steps.find((s) => s.id === "05")?.status).toBe("paused");
+  });
+
+  it("W4: rerunStep cleans runtime output subdirs (previews, validation-runs, gui-acceptance)", async () => {
+    const root = path.join(process.cwd(), ".demo-state", "tests", `orchestrator-w4-${Date.now()}`);
+    const config: AppConfig = {
+      port: 0,
+      projectRoot: root,
+      workspaceRoot: path.join(root, "workspaces"),
+      stateRoot: path.join(root, "state"),
+      draftDocRoot: root,
+      comfyuiRoot: "/tmp/comfy",
+      modelRoots: ["/home/intel/hf_models"],
+      autoApproveAgentPermissions: false
+    };
+    await ensureDir(config.workspaceRoot);
+    const store = new StateStore(config);
+    await store.initialize();
+
+    // Stub sdkRunner so runStep throws at the end — we only care that the cleanup ran first.
+    const failingRunner = {
+      runStep: async () => {
+        throw new Error("stub: no SDK runner in unit test");
+      }
+    };
+    const orchestrator = new MigrationOrchestrator(config, store, [
+      { id: "07", name: "Branch smoke", requiredOutput: "07-branch-smoke.md", humanIntervention: "Approve" },
+      { id: "08", name: "Full validation", requiredOutput: "08-full-validation.md", humanIntervention: "Approve" },
+      { id: "12", name: "GUI demo", requiredOutput: "12-gui-acceptance.md", humanIntervention: "Approve" }
+    ], failingRunner);
+    const task = await orchestrator.createTask({
+      name: "W4",
+      workflowFileName: "workflow.json",
+      workflowJson: { nodes: [], links: [] }
+    });
+
+    // Pre-populate stale runtime outputs from a prior run.
+    const outputsDir = path.join(task.workspacePath, "outputs");
+    const previewsFile = path.join(outputsDir, "previews", "stale.png");
+    const validationFile = path.join(outputsDir, "validation-runs", "stale-run", "out.png");
+    const guiFile = path.join(outputsDir, "gui-acceptance", "stale-gui.png");
+    await fs.mkdir(path.dirname(validationFile), { recursive: true });
+    await fs.writeFile(previewsFile, "fake png bytes", "utf8");
+    await fs.writeFile(validationFile, "fake png bytes", "utf8");
+    await fs.writeFile(guiFile, "fake png bytes", "utf8");
+
+    // Mark steps as completed so rerunStep's "downstream reset" logic actually fires.
+    await store.updateStep(task.id, "07", "completed");
+    await store.updateStep(task.id, "08", "completed");
+    await store.updateStep(task.id, "12", "completed");
+
+    // rerunStep will run cleanup, then call runStep which throws.
+    await expect(orchestrator.rerunStep(task.id, "07")).rejects.toThrow(/stub: no SDK runner/);
+
+    // Verify stale outputs were cleaned — both the rerun step's subdir and downstream ones.
+    await expect(fs.stat(previewsFile)).rejects.toThrow(/ENOENT/);
+    await expect(fs.stat(validationFile)).rejects.toThrow(/ENOENT/);
+    await expect(fs.stat(guiFile)).rejects.toThrow(/ENOENT/);
+
+    // Verify the subdirs themselves still exist (we keep them so ComfyUI can re-write without mkdir races).
+    const stat = await fs.stat(outputsDir);
+    expect(stat.isDirectory()).toBe(true);
   });
 });

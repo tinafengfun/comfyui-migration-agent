@@ -46,6 +46,17 @@ pkill -f "tsx src/server/index.ts" 2>/dev/null && echo "    backend stopped" || 
 pkill -f "vite --host" 2>/dev/null && echo "    frontend stopped" || echo "    no frontend running"
 pkill -f "tsx src/server/deepseekProxy.ts" 2>/dev/null && echo "    proxy stopped" || true
 
+# Kill any leaked ComfyUI processes from prior migration runs.
+# These are spawned by agents via bash and don't always get cleaned up when
+# the agent or task finishes. They hold GPU VRAM and ports (8188, 8189, ...).
+LEAKED_COMFY=$(pgrep -f "python3.*main\.py" 2>/dev/null || true)
+if [ -n "$LEAKED_COMFY" ]; then
+  echo "$LEAKED_COMFY" | xargs -r kill 2>/dev/null
+  echo "    killed leaked ComfyUI processes: $(echo "$LEAKED_COMFY" | tr '\n' ' ')"
+else
+  echo "    no leaked ComfyUI processes"
+fi
+
 sleep 1
 
 # ── Start services ──

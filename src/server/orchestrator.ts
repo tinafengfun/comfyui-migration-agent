@@ -54,7 +54,7 @@ import { compileStepJob } from "./promptSkillCompiler";
 import { ensureSourceAuditCheckpoint } from "./sourceAuditCheckpoint";
 import type { StateStore } from "./state";
 import { ensureStepArtifactScaffold } from "./stepArtifactScaffold";
-import { createTaskWorkspace, deleteTaskWorkspace } from "./taskWorkspaces";
+import { createTaskWorkspace, deleteTaskWorkspace, getLayoutForTask } from "./taskWorkspaces";
 import { ensureWorkflowInventory } from "./workflowInventory";
 
 type EventListener = (event: AgentEvent) => void;
@@ -64,6 +64,17 @@ type QuestionEventData = Record<string, unknown> & {
   allowFreeform: boolean;
   blockingReason: string;
   decisionContext?: HumanDecisionContext;
+};
+
+/**
+ * Maps a step that runs ComfyUI to the outputs/ subdir its results land in.
+ * Used by rerunStep to clean stale runtime outputs so the agent doesn't read
+ * expired images/logs from the previous run.
+ */
+const STEP_OUTPUT_SUBDIR: Record<string, string> = {
+  "07": "previews",         // branch smoke validation
+  "08": "validation-runs",  // full validation
+  "12": "gui-acceptance"    // GUI acceptance demo
 };
 
 class HumanGatePauseError extends Error {
@@ -601,6 +612,18 @@ export class MigrationOrchestrator {
           stepId,
           type: "progress",
           message: `Step ${stepId} paused for human input: ${message}`
+        });
+      } else if (error instanceof SdkStepTimeoutError) {
+        // SDK watchdog timed out but the underlying SDK session may still be
+        // alive — keep the step in `paused` so the user can resume without
+        // losing prior agent context. rerunStep remains available as the
+        // heavier "start over" option.
+        await this.store.updateStep(taskId, stepId, "paused", { error: message });
+        await this.emit({
+          taskId,
+          stepId,
+          type: "progress",
+          message: `Step ${stepId} paused after SDK timeout. Use resume to continue with the existing session, or re-run to start over. Reason: ${message}`
         });
       } else {
         await this.store.updateStep(taskId, stepId, "failed", { error: message });
@@ -1353,6 +1376,17 @@ export class MigrationOrchestrator {
       }
     }
 
+    // 4. Clean runtime outputs produced by the rerun step and any downstream step.
+    //    Without this, agent sees stale images/logs from the previous run.
+    const layout = getLayoutForTask(task);
+    const cleanTargets = new Set<string>();
+    for (let i = stepIndex; i < this.steps.length; i++) {
+      const sid = this.steps[i].id;
+      const subdir = STEP_OUTPUT_SUBDIR[sid];
+      if (subdir) cleanTargets.add(path.join(layout.outputsDir, subdir));
+    }
+    await this.cleanRuntimeOutputs(cleanTargets);
+
     await this.emit({
       taskId,
       stepId,
@@ -1391,6 +1425,26 @@ export class MigrationOrchestrator {
       }
     } catch {
       // Artifact dir doesn't exist
+    }
+  }
+
+  /**
+   * Remove every file in the given output subdirs (e.g. outputs/previews/).
+   * Called during rerun to prevent the agent from reading stale ComfyUI outputs
+   * from a previous run. Keeps the subdir itself so ComfyUI can write into it
+   * again without mkdir races.
+   */
+  private async cleanRuntimeOutputs(targets: Set<string>): Promise<void> {
+    for (const dir of targets) {
+      try {
+        const entries = await fs.readdir(dir);
+        for (const entry of entries) {
+          const fullPath = path.join(dir, entry);
+          await fs.rm(fullPath, { recursive: true, force: true }).catch(() => {});
+        }
+      } catch {
+        // Dir doesn't exist yet — nothing to clean
+      }
     }
   }
 

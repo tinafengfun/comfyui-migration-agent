@@ -2,7 +2,7 @@
 
 > Status: BACKLOG — 问题的根因已定位，方案待后续统一重构。
 > Created: 2026-06-03
-> Last updated: 2026-06-08
+> Last updated: 2026-06-22 (code review)
 
 ## Background
 
@@ -12,6 +12,19 @@
 ---
 
 ## 问题清单（按严重程度排序）
+
+### 代码 review 状态（2026-06-22）
+
+| 项 | 当前状态 | 备注 |
+|---|---|---|
+| W0 CWD 问题 | **规范化（方案 B）** | Skill 05 step 8 加显式 `cd "${COMFYUI_ROOT}" && python3 main.py` 模板，包含端口、extra-model-paths、output-directory、conservative flags；保留 `server.py:8-12` sys.path shim 作为防御性兜底（Python 入口标准做法）。orchestrator-managed launch（方案 A）保留为未来架构演进 |
+| W1 进程泄漏 | **已修复** | `killComfyUIProcessesForTask()`（`orchestrator.ts:2432`）rerun 时杀当前 task；`restart.sh` 启动时全局 `pgrep -f "python3.*main\.py"` 清残留 |
+| W2 状态卡死 | **已修复** | `shared/types.ts` StepStatus 加 `paused`；`orchestrator.ts:563-613` SDK 超时（无 open human question）路由到 `paused` 保留 session，可 Resume 或 Re-run；前端 StatusBadge/按钮已识别 |
+| W3 生命周期 | **部分做** | 有 `deleteTaskWorkspace`（删除），但没有 `active/completed/archived` 三态，没有 7 天归档 |
+| W4 Rerun clean slate | **已修复** | `rerunStep`（`orchestrator.ts:1323`）：杀进程、reset step、clean `${stepId}-*` artifacts、reset 下游 steps、清理 `outputs/{previews,validation-runs,gui-acceptance}` 子目录（按 STEP_OUTPUT_SUBDIR 映射） |
+| W5 源码隔离 | **未做** | 没有 git worktree 逻辑 |
+
+---
 
 ### W0: Agent shell CWD 是 task workspace，不是 ComfyUI root
 
@@ -138,11 +151,19 @@ W5 (源码隔离) ─── 低优先，短期用 git stash 即可
 
 ---
 
-## 已完成的临时修复
+## 已完成的修复（2026-06-22）
 
-| 问题 | 临时修复 | 文件 |
+| 问题 | 修复 | 文件 |
+|------|------|------|
+| W1 进程泄漏 | restart.sh 启动时全局清理 leaked ComfyUI 进程；`killComfyUIProcessesForTask` 在 rerun 时清理当前 task | `scripts/restart.sh`, `src/server/orchestrator.ts:2432` |
+| W2 状态卡死 | StepStatus 联合类型加 `paused`；orchestrator SDK 超时（无 open human question）路由到 `paused`；前端 StatusBadge + Resume/Re-run 按钮识别 paused；state.ts `deriveTaskStatus` 处理 paused | `src/shared/types.ts`, `src/server/orchestrator.ts:617-630`, `src/server/state.ts:168-171,247-258`, `src/server/phase1Agent.ts`, `src/server/progressNarrative.ts`, `src/client/main.tsx` |
+| W4 Rerun clean slate | `rerunStep` 增加 `cleanRuntimeOutputs`：按 `STEP_OUTPUT_SUBDIR` 映射清理 `outputs/{previews,validation-runs,gui-acceptance}` | `src/server/orchestrator.ts:1380-1397,1450-1470` |
+| W0 CWD 规范化（方案 B） | Skill 05 step 8 加显式 `cd "${COMFYUI_ROOT}" && python3 main.py` 模板，含端口/extra-model-paths/output-directory/flags；保留 sys.path shim 作为防御性兜底 | `prompts/.../05-environment-deployment-skill.md` |
+
+## 仍是临时修复 / 待办
+
+| 问题 | 当前状态 | 备注 |
 |------|---------|------|
-| W0 CWD 问题 | agent 在 server.py 中添加 sys.path shim | ComfyUI `server.py`, `app/frontend_management.py` (3 commits) |
-| W0 Launch 规范 | skill 文件中规范了 `main.py` + `--disable-dynamic-vram` | `prompts/.../05-environment-deployment-skill.md` |
-| W2 状态卡死 | 手动修改 `.demo-state/state.json` | 临时 workaround，需代码修复 |
-| W1 进程泄漏 | `killComfyUIProcessesForTask()` | `src/server/orchestrator.ts` (仅当前 task) |
+| W0 架构层（方案 A） | 未来演进 | orchestrator-managed launch (`startComfyUIForTask`/`stopComfyUIForTask`) 是长期方向，当前用方案 B 兜底 |
+| W3 生命周期 | 部分 | 只有 `deleteTaskWorkspace`，没有 archive 三态 |
+| W5 源码隔离 | 未做 | git worktree 方向 |
