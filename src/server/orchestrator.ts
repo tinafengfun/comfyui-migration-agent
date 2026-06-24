@@ -55,6 +55,7 @@ import { ensureSourceAuditCheckpoint } from "./sourceAuditCheckpoint";
 import type { StateStore } from "./state";
 import { ensureStepArtifactScaffold } from "./stepArtifactScaffold";
 import { createTaskWorkspace, deleteTaskWorkspace, getLayoutForTask } from "./taskWorkspaces";
+import { STEP_OUTPUT_SUBDIR } from "./paths";
 import { ensureWorkflowInventory } from "./workflowInventory";
 
 type EventListener = (event: AgentEvent) => void;
@@ -70,12 +71,9 @@ type QuestionEventData = Record<string, unknown> & {
  * Maps a step that runs ComfyUI to the outputs/ subdir its results land in.
  * Used by rerunStep to clean stale runtime outputs so the agent doesn't read
  * expired images/logs from the previous run.
+ *
+ * The map itself is imported from paths.ts (single source of truth).
  */
-const STEP_OUTPUT_SUBDIR: Record<string, string> = {
-  "07": "previews",         // branch smoke validation
-  "08": "validation-runs",  // full validation
-  "12": "gui-acceptance"    // GUI acceptance demo
-};
 
 class HumanGatePauseError extends Error {
   constructor(readonly stepId: string) {

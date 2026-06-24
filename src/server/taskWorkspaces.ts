@@ -1,5 +1,11 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import {
+  CACHE_SUBDIRS,
+  STEP_OUTPUT_SUBDIR,
+  TASK_FILES,
+  TASK_SUBDIRS
+} from "./paths";
 
 export interface TaskWorkspaceLayout {
   taskId: string;
@@ -20,6 +26,10 @@ export interface TaskWorkspaceLayout {
   packageManifestPath: string;
   bundlePath: string;
   taskStatePath: string;
+  /** Per-task feedback events dir (design §G). */
+  feedbackDir: string;
+  /** Per-task escalation dir for opencode handoff (design §E). */
+  escalationDir: string;
 }
 
 export async function createTaskWorkspace(input: {
@@ -38,7 +48,9 @@ export async function createTaskWorkspace(input: {
     fs.mkdir(layout.validationRunsDir, { recursive: true }),
     fs.mkdir(layout.guiAcceptanceDir, { recursive: true }),
     fs.mkdir(layout.logsDir, { recursive: true }),
-    fs.mkdir(layout.packageDir, { recursive: true })
+    fs.mkdir(layout.packageDir, { recursive: true }),
+    fs.mkdir(layout.feedbackDir, { recursive: true }),
+    fs.mkdir(layout.escalationDir, { recursive: true })
   ]);
   await writePackageManifest(layout);
   return layout;
@@ -50,12 +62,12 @@ export function getTaskWorkspaceLayout(input: {
   workflowFileName: string;
 }): TaskWorkspaceLayout {
   const root = path.join(path.resolve(input.workspaceRootPath), input.taskId);
-  const sourceDir = path.join(root, "source");
-  const artifactPath = path.join(root, "artifacts");
-  const cacheDir = path.join(root, "cache");
-  const outputsDir = path.join(root, "outputs");
-  const logsDir = path.join(root, "logs");
-  const packageDir = path.join(root, "package");
+  const sourceDir = path.join(root, TASK_SUBDIRS.source);
+  const artifactPath = path.join(root, TASK_SUBDIRS.artifacts);
+  const cacheDir = path.join(root, TASK_SUBDIRS.cache);
+  const outputsDir = path.join(root, TASK_SUBDIRS.outputs);
+  const logsDir = path.join(root, TASK_SUBDIRS.logs);
+  const packageDir = path.join(root, TASK_SUBDIRS.package);
   const workflowFileName = safeWorkflowFileName(input.workflowFileName);
   return {
     taskId: input.taskId,
@@ -64,18 +76,20 @@ export function getTaskWorkspaceLayout(input: {
     workflowPath: path.join(sourceDir, workflowFileName),
     artifactPath,
     cacheDir,
-    customNodeCacheDir: path.join(cacheDir, "custom_nodes"),
-    comfyUserDir: path.join(cacheDir, "comfyui-user"),
+    customNodeCacheDir: path.join(cacheDir, CACHE_SUBDIRS.customNodes),
+    comfyUserDir: path.join(cacheDir, CACHE_SUBDIRS.comfyUser),
     outputsDir,
-    previewOutputDir: path.join(outputsDir, "previews"),
-    validationRunsDir: path.join(outputsDir, "validation-runs"),
-    guiAcceptanceDir: path.join(outputsDir, "gui-acceptance"),
+    previewOutputDir: path.join(outputsDir, STEP_OUTPUT_SUBDIR["07"]),
+    validationRunsDir: path.join(outputsDir, STEP_OUTPUT_SUBDIR["08"]),
+    guiAcceptanceDir: path.join(outputsDir, STEP_OUTPUT_SUBDIR["12"]),
     logsDir,
-    sdkLogPath: path.join(logsDir, "sdk-session.jsonl"),
+    sdkLogPath: path.join(logsDir, TASK_FILES.sdkLog),
     packageDir,
-    packageManifestPath: path.join(packageDir, "manifest.json"),
-    bundlePath: path.join(packageDir, "migration-bundle.zip"),
-    taskStatePath: path.join(root, "task-state.json")
+    packageManifestPath: path.join(packageDir, TASK_FILES.packageManifest),
+    bundlePath: path.join(packageDir, TASK_FILES.bundle),
+    taskStatePath: path.join(root, TASK_FILES.taskState),
+    feedbackDir: path.join(root, TASK_SUBDIRS.feedback),
+    escalationDir: path.join(root, TASK_SUBDIRS.escalation)
   };
 }
 
@@ -87,10 +101,10 @@ export function getLayoutForTask(task: {
 }): TaskWorkspaceLayout {
   const root = path.resolve(task.workspacePath);
   const sourceDir = path.dirname(task.workflowPath);
-  const cacheDir = path.join(root, "cache");
-  const outputsDir = path.join(root, "outputs");
-  const logsDir = path.join(root, "logs");
-  const packageDir = path.join(root, "package");
+  const cacheDir = path.join(root, TASK_SUBDIRS.cache);
+  const outputsDir = path.join(root, TASK_SUBDIRS.outputs);
+  const logsDir = path.join(root, TASK_SUBDIRS.logs);
+  const packageDir = path.join(root, TASK_SUBDIRS.package);
   return {
     taskId: task.id,
     root,
@@ -98,18 +112,20 @@ export function getLayoutForTask(task: {
     workflowPath: task.workflowPath,
     artifactPath: task.artifactPath,
     cacheDir,
-    customNodeCacheDir: path.join(cacheDir, "custom_nodes"),
-    comfyUserDir: path.join(cacheDir, "comfyui-user"),
+    customNodeCacheDir: path.join(cacheDir, CACHE_SUBDIRS.customNodes),
+    comfyUserDir: path.join(cacheDir, CACHE_SUBDIRS.comfyUser),
     outputsDir,
-    previewOutputDir: path.join(outputsDir, "previews"),
-    validationRunsDir: path.join(outputsDir, "validation-runs"),
-    guiAcceptanceDir: path.join(outputsDir, "gui-acceptance"),
+    previewOutputDir: path.join(outputsDir, STEP_OUTPUT_SUBDIR["07"]),
+    validationRunsDir: path.join(outputsDir, STEP_OUTPUT_SUBDIR["08"]),
+    guiAcceptanceDir: path.join(outputsDir, STEP_OUTPUT_SUBDIR["12"]),
     logsDir,
-    sdkLogPath: path.join(logsDir, "sdk-session.jsonl"),
+    sdkLogPath: path.join(logsDir, TASK_FILES.sdkLog),
     packageDir,
-    packageManifestPath: path.join(packageDir, "manifest.json"),
-    bundlePath: path.join(packageDir, "migration-bundle.zip"),
-    taskStatePath: path.join(root, "task-state.json")
+    packageManifestPath: path.join(packageDir, TASK_FILES.packageManifest),
+    bundlePath: path.join(packageDir, TASK_FILES.bundle),
+    taskStatePath: path.join(root, TASK_FILES.taskState),
+    feedbackDir: path.join(root, TASK_SUBDIRS.feedback),
+    escalationDir: path.join(root, TASK_SUBDIRS.escalation)
   };
 }
 
@@ -141,7 +157,9 @@ async function writePackageManifest(layout: TaskWorkspaceLayout): Promise<void> 
       logs: relative(layout, layout.logsDir),
       sdkLog: relative(layout, layout.sdkLogPath),
       packageDir: relative(layout, layout.packageDir),
-      bundle: relative(layout, layout.bundlePath)
+      bundle: relative(layout, layout.bundlePath),
+      feedback: relative(layout, layout.feedbackDir),
+      escalation: relative(layout, layout.escalationDir)
     },
     packagingPolicy: {
       includeLargeModels: false,
