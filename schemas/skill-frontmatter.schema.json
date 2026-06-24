@@ -1,0 +1,131 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/tinafengfun/comfyui-migration-agent/raw/main/schemas/skill-frontmatter.schema.json",
+  "title": "Migration-agent skill frontmatter",
+  "description": "Frontmatter parsed from the top of prompts/migration-workflow-v2/skills/*.md. Skills are markdown documents; this schema validates the YAML metadata block that tells the prompt compiler when to load them. See docs/evolution-and-memory-design.md §5.2.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["skillId", "version", "tier", "provenance"],
+  "properties": {
+    "skillId": {
+      "type": "string",
+      "description": "Stable identifier; matches the skill markdown filename without extension.",
+      "pattern": "^[a-z0-9][a-z0-9-]*$",
+      "minLength": 1,
+      "maxLength": 80
+    },
+    "version": {
+      "type": "string",
+      "description": "Semantic version; bumped on every prompt change.",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$"
+    },
+    "tier": {
+      "type": "string",
+      "enum": ["core", "on-demand", "reference"],
+      "description": "core=always loaded; on-demand=step+trigger gated; reference=indexed, agent reads on demand."
+    },
+    "trigger": {
+      "type": "object",
+      "description": "Required when tier=on-demand; ignored otherwise.",
+      "additionalProperties": false,
+      "required": ["stepId", "condition"],
+      "properties": {
+        "stepId": {
+          "type": "string",
+          "pattern": "^\\d{2}$",
+          "description": "Two-digit step id, e.g. \"02\"."
+        },
+        "condition": {
+          "type": "object",
+          "description": "Match condition. Multiple keys AND; anyOf entries OR.",
+          "minProperties": 1,
+          "additionalProperties": false,
+          "properties": {
+            "anyOf": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "assetPattern": {
+                    "type": "string",
+                    "description": "Glob matched against asset filenames in the current task."
+                  },
+                  "nodeType": {
+                    "type": "string",
+                    "description": "ComfyUI node class name."
+                  },
+                  "modelPattern": {
+                    "type": "string",
+                    "description": "Glob matched against model filenames."
+                  },
+                  "envGte": {
+                    "type": "object",
+                    "description": "Environment version floor, e.g. {\"comfy_kitchen\": \"0.3.0\"}.",
+                    "additionalProperties": { "type": "string" }
+                  }
+                }
+              }
+            },
+            "assetPattern": { "type": "string" },
+            "nodeType": { "type": "string" },
+            "modelPattern": { "type": "string" }
+          }
+        }
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "description": "Who created this skill and when; required for auditability.",
+      "additionalProperties": false,
+      "required": ["taskOrigin", "createdAt"],
+      "properties": {
+        "taskOrigin": {
+          "type": "string",
+          "description": "Task id where this skill was first proposed or derived."
+        },
+        "evidenceArtifact": {
+          "type": "string",
+          "description": "Workspace-relative path to the artifact that justifies the skill."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date",
+          "description": "ISO 8601 date (YYYY-MM-DD)."
+        },
+        "approvedBy": {
+          "type": "string",
+          "description": "GitHub username or 'auto' for agent-self-approved."
+        }
+      }
+    },
+    "retireCondition": {
+      "type": "object",
+      "description": "When this skill should be retired from active rotation.",
+      "additionalProperties": false,
+      "properties": {
+        "envGte": {
+          "type": "object",
+          "description": "Retire when env versions reach these floors.",
+          "additionalProperties": { "type": "string" }
+        },
+        "reason": {
+          "type": "string",
+          "description": "Human-readable explanation."
+        }
+      }
+    },
+    "tags": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Free-form tags for search/filtering."
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "tier": { "const": "on-demand" } }, "required": ["tier"] },
+      "then": { "required": ["trigger"] }
+    }
+  ]
+}

@@ -1,0 +1,120 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/tinafengfun/comfyui-migration-agent/raw/main/schemas/recipe.schema.json",
+  "title": "Migration-agent recipe",
+  "description": "A reusable, structured knowledge entry describing how to handle a specific ComfyUI nodeType + model pattern on Intel XPU. Recipes live in recipes/ and are auto-injected by Step 04 source audit. See docs/evolution-and-memory-design.md §5.3.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "recipeId",
+    "version",
+    "nodeType",
+    "xpuSupport",
+    "knownIssues",
+    "provenance"
+  ],
+  "properties": {
+    "recipeId": {
+      "type": "string",
+      "description": "Stable identifier, conventionally `<nodeType>-<model hint>`.",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]*$",
+      "minLength": 1,
+      "maxLength": 100
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$"
+    },
+    "nodeType": {
+      "type": "string",
+      "description": "ComfyUI node class name this recipe applies to, e.g. CLIPLoader, VAELoader."
+    },
+    "modelPattern": {
+      "type": "string",
+      "description": "Glob matched against model filenames. Absent means 'all models for this nodeType'."
+    },
+    "xpuSupport": {
+      "type": "string",
+      "enum": ["native", "patched", "cpu_offload", "unsupported", "unknown"],
+      "description": "native=works out of box; patched=needs source patch; cpu_offload=run on CPU; unsupported=no known path."
+    },
+    "patchClass": {
+      "type": "string",
+      "enum": [
+        "registration_only",
+        "functional_runtime_support",
+        "runtime_policy",
+        "none"
+      ],
+      "description": "From Step 02 required patch table."
+    },
+    "patchFile": {
+      "type": "string",
+      "description": "Repo-relative path to the patch file under patches/."
+    },
+    "knownIssues": {
+      "type": "array",
+      "description": "Concrete failure signatures, with root cause if known.",
+      "minItems": 0,
+      "items": { "type": "string" }
+    },
+    "workarounds": {
+      "type": "array",
+      "description": "Ordered steps the agent should try, most-preferred first.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["action"],
+        "properties": {
+          "action": {
+            "type": "string",
+            "description": "Concrete instruction, e.g. 'set CLIPLoader device=cpu in runtime-policy JSON'."
+          },
+          "rationale": { "type": "string" },
+          "tradeoff": {
+            "type": "string",
+            "description": "What this workaround costs (memory, accuracy, speed)."
+          }
+        }
+      }
+    },
+    "validationEvidence": {
+      "type": "string",
+      "description": "Repo-relative path to a report proving the recipe works."
+    },
+    "validatedOnWorkflows": {
+      "type": "array",
+      "description": "Task ids whose end-to-end run validated this recipe.",
+      "items": { "type": "string" }
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["taskOrigin", "createdAt"],
+      "properties": {
+        "taskOrigin": { "type": "string" },
+        "evidenceArtifact": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date" },
+        "approvedBy": { "type": "string" }
+      }
+    },
+    "retireCondition": {
+      "type": "string",
+      "description": "Human-readable condition under which this recipe is obsolete, e.g. 'comfy_kitchen >= 0.3.0 fixes QTensor.clone segfault'."
+    },
+    "efficacy": {
+      "type": "object",
+      "description": "Analytics-derived effectiveness metrics, populated by cron.",
+      "additionalProperties": false,
+      "properties": {
+        "appliedCount": { "type": "integer", "minimum": 0 },
+        "successCount": { "type": "integer", "minimum": 0 },
+        "lastAppliedAt": { "type": "string", "format": "date-time" }
+      }
+    }
+  },
+  "anyOf": [
+    { "required": ["patchFile"] },
+    { "properties": { "xpuSupport": { "enum": ["native", "cpu_offload", "unsupported", "unknown"] } } }
+  ]
+}

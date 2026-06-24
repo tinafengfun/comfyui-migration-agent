@@ -1,0 +1,104 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/tinafengfun/comfyui-migration-agent/raw/main/schemas/feedback-event.schema.json",
+  "title": "Migration-agent feedback event",
+  "description": "One line in workspaces/<taskId>/feedback/feedback-events.jsonl. Captures a single piece of feedback from a human, agent self-check, or evaluator, with enough context for Step 13 to triage and route it. See docs/evolution-and-memory-design.md §5.1.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "id",
+    "taskId",
+    "stepId",
+    "createdAt",
+    "source",
+    "type",
+    "severity",
+    "message",
+    "status"
+  ],
+  "properties": {
+    "id": {
+      "type": "string",
+      "description": "Opaque event id; recommend UUIDv4 or `${taskId}-${stepId}-${seq}`.",
+      "minLength": 1
+    },
+    "taskId": {
+      "type": "string",
+      "description": "Workspace task id."
+    },
+    "stepId": {
+      "type": "string",
+      "pattern": "^\\d{2}$",
+      "description": "Two-digit step id where the feedback originated."
+    },
+    "createdAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 timestamp."
+    },
+    "source": {
+      "type": "string",
+      "enum": ["human", "agent_self", "evaluator"],
+      "description": "Who produced the feedback."
+    },
+    "type": {
+      "type": "string",
+      "enum": [
+        "agent_bug",
+        "comfyui_bug",
+        "missing_feature",
+        "user_preference",
+        "data_gap"
+      ],
+      "description": "Feedback category. Determines routing: agent_bug→code, comfyui_bug→patch/escalation, missing_feature→ticket, user_preference→rule, data_gap→asset note."
+    },
+    "severity": {
+      "type": "string",
+      "enum": ["blocker", "degrade", "nit"],
+      "description": "blocker=must fix before proceeding; degrade=works sub-optimally; nit=polish."
+    },
+    "message": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Human-readable description of the issue."
+    },
+    "stateSnapshot": {
+      "type": "object",
+      "description": "Captured environment state at the moment of feedback, for reproducibility.",
+      "additionalProperties": false,
+      "properties": {
+        "workflowSha": { "type": "string" },
+        "comfyuiSha": { "type": "string" },
+        "agentCommitSha": { "type": "string" },
+        "failingArtifactPath": { "type": "string" },
+        "stackTracePath": { "type": "string" },
+        "extraNotes": { "type": "string" }
+      }
+    },
+    "proposedAction": {
+      "type": "string",
+      "enum": [
+        "evolve_prompt",
+        "evolve_skill",
+        "fix_code",
+        "create_ticket",
+        "escalate_opencode",
+        "record_only"
+      ],
+      "description": "Suggested routing. Step 13 may override."
+    },
+    "status": {
+      "type": "string",
+      "enum": ["open", "triaged", "resolved", "wontfix"],
+      "description": "Lifecycle. New events start as 'open'."
+    },
+    "resolvedBy": {
+      "type": "string",
+      "description": "Commit SHA, ticket URL, or 'wontfix:<reason>' when status != open."
+    },
+    "relatedRecipeId": {
+      "type": "string",
+      "description": "If this feedback led to a recipe, the recipe's recipeId."
+    }
+  }
+}
