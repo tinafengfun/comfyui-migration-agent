@@ -15,13 +15,13 @@
     "asset:sources": "tsx src/server/assetSourceCli.ts",
     "asset:sources:demo": "MIGRATION_AGENT_DOWNLOAD_PROFILE=demo tsx src/server/assetSourceCli.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run",
-    "test:e2e": "npx playwright test",
-    "test:e2e:qwen": "npx playwright test tests/qwen-full-gui-verification.spec.ts --timeout=14400000 --reporter=list"
+    "test": "vitest run"
   },
   "dependencies": {
     "@github/copilot-sdk": "^0.3.0",
     "@vitejs/plugin-react": "^5.1.1",
+    "ajv": "^8.20.0",
+    "ajv-formats": "^3.0.1",
     "express": "^5.2.1",
     "https-proxy-agent": "^9.0.0",
     "lucide-react": "^1.16.0",
@@ -37,7 +37,6 @@
     "@types/react-dom": "^19.2.3",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3",
-    "vitest": "^4.0.15",
-    "@playwright/test": "^1.55.0"
+    "vitest": "^4.0.15"
   }
 }

@@ -114,7 +114,10 @@
     }
   },
   "anyOf": [
-    { "required": ["patchFile"] },
+    {
+      "required": ["patchFile"],
+      "properties": { "patchFile": {} }
+    },
     { "properties": { "xpuSupport": { "enum": ["native", "cpu_offload", "unsupported", "unknown"] } } }
   ]
 }

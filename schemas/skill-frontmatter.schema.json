@@ -125,7 +125,10 @@
   "allOf": [
     {
       "if": { "properties": { "tier": { "const": "on-demand" } }, "required": ["tier"] },
-      "then": { "required": ["trigger"] }
+      "then": {
+        "required": ["trigger"],
+        "properties": { "trigger": {} }
+      }
     }
   ]
 }
