@@ -1,0 +1,47 @@
+{
+  "recipeId": "CLIPLoader-qwen25-vl-fp8",
+  "version": "1.0.0",
+  "nodeType": "CLIPLoader",
+  "modelPattern": "qwen_*_vl_*_fp8*.safetensors",
+  "xpuSupport": "patched",
+  "patchClass": "functional_runtime_support",
+  "patchFile": "patches/xpu-bug-investigation/0001-xpu-fp8-fallback-dequantize-before-move-to-xpu.patch",
+  "knownIssues": [
+    "comfy_kitchen QTensor.clone() segfaults on .to('xpu') when the FP8 quantized text encoder is moved to Intel XPU directly.",
+    "fp8 -> bf16 dequant roughly doubles activation memory; pair with a VRAM gate.",
+    "Without the patch, ComfyUI may appear to import and register CLIPLoader fine but segfault on first inference, so 'node registered' evidence is not sufficient."
+  ],
+  "workarounds": [
+    {
+      "action": "Apply xpu-bug-investigation/0001-xpu-fp8-fallback-dequantize-before-move-to-xpu.patch to comfy/ops.py so _quantized_apply dequantizes FP8 tensors to bf16 before moving to XPU.",
+      "rationale": "Avoids the QTensor.clone() path that triggers the segfault; bf16 tensors move cleanly to XPU.",
+      "tradeoff": "Doubles activation memory (fp8 -> bf16). Requires ~2x VRAM headroom for the text encoder; not viable on small cards."
+    },
+    {
+      "action": "If VRAM headroom is insufficient, set CLIPLoader device=cpu via runtime-policy JSON and keep the text encoder on CPU.",
+      "rationale": "Sidesteps the segfault entirely; CPU execution of the TE is correct, just slower.",
+      "tradeoff": "First-prompt latency increases by seconds-to-tens-of-seconds depending on prompt length. Throughput after cache is unaffected."
+    },
+    {
+      "action": "If the checkpoint contains unused visual/lm_head buckets (common for text-only fine-tunes of qwen2.5-vl), strip them to a *_text_only.safetensors file and point CLIPLoader at the stripped file.",
+      "rationale": "Smaller file loads faster, uses less RAM during dequant, and avoids loading buckets the text-only ComfyUI workflow never touches.",
+      "tradeoff": "One-time preprocessing step; the stripped file must be referenced consistently thereafter."
+    }
+  ],
+  "validationEvidence": "patches/xpu-bug-investigation/clip_fp8_precision_report.md",
+  "validatedOnWorkflows": [
+    "7f5cf9e4-1d1d-4429-8017-12c33b273f08"
+  ],
+  "provenance": {
+    "taskOrigin": "7f5cf9e4-1d1d-4429-8017-12c33b273f08",
+    "evidenceArtifact": "02-feasibility.md",
+    "createdAt": "2026-06-19",
+    "approvedBy": "tinafengfun"
+  },
+  "retireCondition": "comfy_kitchen >= 0.3.0 fixes QTensor.clone() segfault so the dequant-before-move patch becomes a no-op.",
+  "efficacy": {
+    "appliedCount": 1,
+    "successCount": 1,
+    "lastAppliedAt": "2026-06-19T00:00:00Z"
+  }
+}
