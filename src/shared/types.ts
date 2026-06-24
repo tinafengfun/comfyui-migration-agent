@@ -218,6 +218,8 @@ export interface StepJob {
   hardStopRules: string[];
   resumeContext?: Record<string, unknown>;
   learnedRules?: string;
+  /** Recipe library section (§L hard-injection layer). Populated for steps 02/04/05. */
+  matchedRecipes?: string;
 }
 
 export interface CreateTaskRequest {

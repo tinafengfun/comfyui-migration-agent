@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import type { MigrationStepDefinition, MigrationTask, StepJob } from "../shared/types";
 import type { AppConfig } from "./config";
+import { injectRecipesForWorkflow } from "./recipeInjector";
 import { computeWorkflowSha256, formatRulesForPrompt, loadWorkflowKnowledge } from "./workflowKnowledge";
 
 export async function compileStepJob(input: {
@@ -49,6 +50,14 @@ export async function compileStepJob(input: {
     // Knowledge injection is best-effort
   }
 
+  // Recipe library injection (§L, hard-injection layer).
+  // Best-effort: returns "" for steps that don't need recipes or when no
+  // match exists. See recipeInjector.ts and feedback memory two_layer_injection.
+  const matchedRecipesSection = await injectRecipesForWorkflow({
+    workflowPath: input.task.workflowPath,
+    stepId: input.step.id
+  }).catch(() => "");
+
   return {
     taskId: input.task.id,
     stepId: input.step.id,
@@ -92,7 +101,8 @@ export async function compileStepJob(input: {
       "Any required asset (model, LoRA, VAE, input, custom node) could not be found, downloaded, or aliased after search."
     ],
     resumeContext: input.resumeContext,
-    learnedRules: learnedRulesSection || undefined
+    learnedRules: learnedRulesSection || undefined,
+    matchedRecipes: matchedRecipesSection || undefined
   };
 }
 
@@ -138,6 +148,7 @@ export function serializeStepJobForAgent(job: StepJob): string {
     stepScopedExecutionHint(job),
     "",
     ...(job.learnedRules ? [job.learnedRules, ""] : []),
+    ...(job.matchedRecipes ? [job.matchedRecipes, ""] : []),
     job.instructions,
     "",
     "## Required final response",
