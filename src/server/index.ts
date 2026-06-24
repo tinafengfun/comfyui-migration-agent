@@ -7,6 +7,11 @@ import { processUploadedReplacement, FileValidationError } from "./assetReplacem
 import { loadConfig } from "./config";
 import { ensureDir, safeJoin } from "./fsUtils";
 import { MigrationOrchestrator } from "./orchestrator";
+import {
+  appendFeedbackEvent,
+  listFeedbackEvents,
+  type FeedbackEventInput
+} from "./feedbackLog";
 import { readPhase1TaskState } from "./phase1Agent";
 import { buildProgressNarrative } from "./progressNarrative";
 import { StateStore } from "./state";
@@ -365,6 +370,49 @@ app.get("/api/tasks/:taskId/events", async (req, res, next) => {
   try {
     await orchestrator.ensurePhase1HumanGateExposed(req.params.taskId);
     res.json({ events: await store.listEvents(req.params.taskId) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// ── Feedback event log (design §G) ─────────────────────────────────────────
+// POST: append a feedback event for this task. Body shape matches
+// FeedbackEventInput (stepId/source/type/severity/message required).
+// GET: list all events for this task, including any corrupt-line reports.
+app.post("/api/tasks/:taskId/feedback", async (req, res, next) => {
+  try {
+    const task = await store.getTask(req.params.taskId);
+    if (!task) {
+      res.status(404).json({ error: "Task not found" });
+      return;
+    }
+    const input = req.body as FeedbackEventInput;
+    if (!input?.stepId || !input?.source || !input?.type || !input?.severity || !input?.message) {
+      res.status(400).json({
+        error: "stepId, source, type, severity, message are required"
+      });
+      return;
+    }
+    const event = await appendFeedbackEvent(config.workspaceRoot, req.params.taskId, input);
+    res.status(201).json({ event });
+  } catch (error) {
+    // Schema validation errors come back as thrown Errors from assertValid.
+    if (error instanceof Error && error.message.startsWith("schemaValidate")) {
+      res.status(422).json({ error: error.message });
+      return;
+    }
+    next(error);
+  }
+});
+
+app.get("/api/tasks/:taskId/feedback", async (req, res, next) => {
+  try {
+    const task = await store.getTask(req.params.taskId);
+    if (!task) {
+      res.status(404).json({ error: "Task not found" });
+      return;
+    }
+    res.json(await listFeedbackEvents(config.workspaceRoot, req.params.taskId));
   } catch (error) {
     next(error);
   }
