@@ -30,6 +30,16 @@ type PreflightState =
   | { status: "ok"; modelsAvailable: number | null }
   | { status: "error"; error: string };
 
+type GpuNodeInfo = {
+  name: string;
+  kind: "local" | "ssh";
+  vram_gb?: number;
+  comfyui_root: string;
+  api_host: string;
+  api_port: number;
+  model_share?: "nfs_same_path" | "none";
+};
+
 const maxHumanAnswerLength = 20_000;
 
 function isRecord(v: unknown): v is Record<string, unknown> {
@@ -98,6 +108,10 @@ function App() {
   const [preflight, setPreflight] = useState<PreflightState>({ status: "idle" });
   const [uploadError, setUploadError] = useState<string | undefined>();
   const [uploadSuccess, setUploadSuccess] = useState<string | undefined>();
+  const [gpuNodes, setGpuNodes] = useState<GpuNodeInfo[]>([]);
+  const [defaultGpuNode, setDefaultGpuNode] = useState<string | undefined>();
+  const [selectedGpuNode, setSelectedGpuNode] = useState<string | undefined>();
+  const [nodeManagerOpen, setNodeManagerOpen] = useState(false);
   const [questionDrafts, setQuestionDrafts] = useState<Record<string, string>>({});
   const [rightTab, setRightTab] = useState<"detail" | "artifacts">("detail");
 
@@ -146,7 +160,37 @@ function App() {
       setSelectedTaskId(t[0]?.id);
     })();
     void api.fetchHealth().then((h) => { if (h) setHealth(h as HealthStatus); });
+    void api.fetchGpuNodes().then((reg) => {
+      const slim = reg.nodes.map((n) => ({
+        name: n.name,
+        kind: n.kind,
+        vram_gb: n.vram_gb,
+        comfyui_root: n.comfyui_root,
+        api_host: n.api_host,
+        api_port: n.api_port,
+        model_share: n.model_share
+      }));
+      setGpuNodes(slim);
+      setDefaultGpuNode(reg.default);
+      setSelectedGpuNode(reg.default);
+    }).catch(() => { /* gpu-nodes.json optional; silent fallback */ });
   }, []);
+
+  const refreshGpuNodes = useCallback(async () => {
+    const reg = await api.fetchGpuNodes();
+    const slim = reg.nodes.map((n) => ({
+      name: n.name,
+      kind: n.kind,
+      vram_gb: n.vram_gb,
+      comfyui_root: n.comfyui_root,
+      api_host: n.api_host,
+      api_port: n.api_port,
+      model_share: n.model_share
+    }));
+    setGpuNodes(slim);
+    setDefaultGpuNode(reg.default);
+    setSelectedGpuNode((cur) => cur ?? reg.default);
+  }, [api]);
 
   // Refresh on event stream signal
   useEffect(() => {
@@ -190,7 +234,7 @@ function App() {
   async function handleUpload(file: File) {
     try {
       setUploadError(undefined);
-      const task = await api.createTask(file);
+      const task = await api.createTask(file, selectedGpuNode);
       setTasks((t) => [task, ...t]);
       setSelectedTaskId(task.id);
     } catch (err) {
@@ -265,6 +309,29 @@ function App() {
           )}
         </div>
         <div className="header-actions">
+          {gpuNodes.length > 0 && (
+            <>
+              <select
+                className="gpu-node-select"
+                title="Target GPU node for the next uploaded workflow"
+                value={selectedGpuNode ?? defaultGpuNode ?? ""}
+                onChange={(e) => setSelectedGpuNode(e.currentTarget.value)}
+              >
+                {gpuNodes.map((n) => (
+                  <option key={n.name} value={n.name}>
+                    {n.name} ({n.vram_gb ?? "?"} GB, {n.kind})
+                  </option>
+                ))}
+              </select>
+              <button
+                className="btn btn-sm"
+                title="Add, edit, test, or delete GPU nodes"
+                onClick={() => setNodeManagerOpen(true)}
+              >
+                Manage
+              </button>
+            </>
+          )}
           <UploadButton onUpload={handleUpload} error={uploadError} success={uploadSuccess} onClearError={() => setUploadError(undefined)} onClearSuccess={() => setUploadSuccess(undefined)} />
           {selectedTask && (
             <>
@@ -310,6 +377,8 @@ function App() {
                 onUploadMedia={uploadMedia}
                 decisions={decisions}
                 allEvents={events}
+                taskId={selectedTaskId}
+                api={api}
               />
             )}
 
@@ -347,6 +416,13 @@ function App() {
           </div>
         </Panel>
       </Group>
+      {nodeManagerOpen && (
+        <GpuNodeManager
+          api={api}
+          onClose={() => setNodeManagerOpen(false)}
+          onChanged={() => void refreshGpuNodes()}
+        />
+      )}
     </div>
   );
 }
@@ -371,6 +447,325 @@ function UploadButton({ onUpload, error, success, onClearError, onClearSuccess }
       {error && <div className="error-toast"><span>{error}</span><button onClick={onClearError}>x</button></div>}
       {success && <div className="success-toast"><span>{success}</span><button onClick={onClearSuccess}>x</button></div>}
     </>
+  );
+}
+
+/* ── GPU Node Manager (CRUD + verify) ── */
+type GpuNodeManagerNode = {
+  name: string;
+  kind: "local" | "ssh";
+  vram_gb?: number;
+  comfyui_root: string;
+  venv_python: string;
+  model_roots: string[];
+  api_host: string;
+  api_port: number;
+  launch_flags?: string[];
+  ssh?: { host: string; user: string; port?: number; key_configured: boolean; remote_workspace_root?: string };
+  model_share?: "nfs_same_path" | "none";
+};
+
+type GpuNodeFormState = {
+  name: string;
+  kind: "local" | "ssh";
+  vram_gb: string;
+  comfyui_root: string;
+  venv_python: string;
+  model_roots: string;        // comma-separated
+  api_host: string;
+  api_port: string;
+  launch_flags: string;       // comma-separated
+  ssh_host: string;
+  ssh_user: string;
+  ssh_port: string;
+  ssh_key_path: string;
+  ssh_remote_workspace_root: string;
+  model_share: "nfs_same_path" | "none";
+};
+
+const EMPTY_FORM: GpuNodeFormState = {
+  name: "",
+  kind: "local",
+  vram_gb: "",
+  comfyui_root: "",
+  venv_python: "",
+  model_roots: "/home/intel/hf_models",
+  api_host: "127.0.0.1",
+  api_port: "8188",
+  launch_flags: "--reserve-vram 1",
+  ssh_host: "",
+  ssh_user: "",
+  ssh_port: "22",
+  ssh_key_path: "",
+  ssh_remote_workspace_root: "",
+  model_share: "nfs_same_path"
+};
+
+function formFromNode(n: GpuNodeManagerNode): GpuNodeFormState {
+  return {
+    name: n.name,
+    kind: n.kind,
+    vram_gb: n.vram_gb !== undefined ? String(n.vram_gb) : "",
+    comfyui_root: n.comfyui_root,
+    venv_python: n.venv_python,
+    model_roots: n.model_roots.join(","),
+    api_host: n.api_host,
+    api_port: String(n.api_port),
+    launch_flags: n.launch_flags?.join(" ") ?? "",
+    ssh_host: n.ssh?.host ?? "",
+    ssh_user: n.ssh?.user ?? "",
+    ssh_port: n.ssh?.port !== undefined ? String(n.ssh.port) : "22",
+    ssh_key_path: "", // never echoed back from server
+    ssh_remote_workspace_root: n.ssh?.remote_workspace_root ?? "",
+    model_share: n.model_share ?? "nfs_same_path"
+  };
+}
+
+function GpuNodeManager({ api, onClose, onChanged }: {
+  api: ReturnType<typeof useApi>;
+  onClose: () => void;
+  onChanged: () => void;
+}) {
+  const [nodes, setNodes] = useState<GpuNodeManagerNode[]>([]);
+  const [defaultName, setDefaultName] = useState<string>("");
+  const [editing, setEditing] = useState<GpuNodeFormState | null>(null);
+  const [editingOriginalName, setEditingOriginalName] = useState<string | null>(null);
+  const [error, setError] = useState<string | undefined>();
+  const [verifyResults, setVerifyResults] = useState<Record<string, { ok: boolean; detail: string } | "pending">>({});
+
+  const reload = useCallback(async () => {
+    const reg = await api.fetchGpuNodes();
+    setNodes(reg.nodes as GpuNodeManagerNode[]);
+    setDefaultName(reg.default);
+  }, [api]);
+
+  useEffect(() => { void reload(); }, [reload]);
+
+  async function handleSave(form: GpuNodeFormState, originalName: string | null): Promise<void> {
+    setError(undefined);
+    const model_roots = form.model_roots.split(",").map((s) => s.trim()).filter(Boolean);
+    const launch_flags = form.launch_flags.trim().length ? form.launch_flags.trim().split(/\s+/) : undefined;
+    const vram_gb = form.vram_gb.trim() ? Number(form.vram_gb) : undefined;
+    const api_port = Number(form.api_port) || 8188;
+    const body = {
+      name: form.name.trim(),
+      kind: form.kind,
+      ...(vram_gb !== undefined ? { vram_gb } : {}),
+      comfyui_root: form.comfyui_root.trim(),
+      venv_python: form.venv_python.trim(),
+      model_roots,
+      api_host: form.api_host.trim(),
+      api_port,
+      ...(launch_flags ? { launch_flags } : {}),
+      ...(form.kind === "ssh" ? {
+        ssh: {
+          host: form.ssh_host.trim(),
+          user: form.ssh_user.trim(),
+          port: Number(form.ssh_port) || 22,
+          ...(form.ssh_key_path.trim() ? { key_path: form.ssh_key_path.trim() } : {}),
+          ...(form.ssh_remote_workspace_root.trim() ? { remote_workspace_root: form.ssh_remote_workspace_root.trim() } : {})
+        }
+      } : {}),
+      model_share: form.model_share
+    };
+    try {
+      if (originalName && originalName !== form.name.trim()) {
+        await api.updateGpuNode(originalName, body);
+      } else if (originalName) {
+        await api.updateGpuNode(originalName, body);
+      } else {
+        await api.createGpuNode(body);
+      }
+      await reload();
+      onChanged();
+      setEditing(null);
+      setEditingOriginalName(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  async function handleDelete(name: string): Promise<void> {
+    if (!window.confirm(`Delete GPU node "${name}"? This cannot be undone.`)) return;
+    setError(undefined);
+    try {
+      await api.deleteGpuNode(name);
+      await reload();
+      onChanged();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  async function handleVerify(name: string): Promise<void> {
+    setVerifyResults((cur) => ({ ...cur, [name]: "pending" }));
+    try {
+      const result = await api.verifyGpuNode({ name });
+      setVerifyResults((cur) => ({ ...cur, [name]: result }));
+    } catch (err) {
+      setVerifyResults((cur) => ({
+        ...cur,
+        [name]: { ok: false, detail: err instanceof Error ? err.message : String(err) }
+      }));
+    }
+  }
+
+  async function handleVerifyForm(form: GpuNodeFormState): Promise<void> {
+    // Verify-before-save: serialize the form the same way handleSave does.
+    const model_roots = form.model_roots.split(",").map((s) => s.trim()).filter(Boolean);
+    const node = {
+      name: form.name.trim() || "(unsaved)",
+      kind: form.kind,
+      ...(form.vram_gb.trim() ? { vram_gb: Number(form.vram_gb) } : {}),
+      comfyui_root: form.comfyui_root.trim(),
+      venv_python: form.venv_python.trim(),
+      model_roots,
+      api_host: form.api_host.trim(),
+      api_port: Number(form.api_port) || 8188,
+      ...(form.kind === "ssh" ? {
+        ssh: {
+          host: form.ssh_host.trim(),
+          user: form.ssh_user.trim(),
+          port: Number(form.ssh_port) || 22,
+          ...(form.ssh_key_path.trim() ? { key_path: form.ssh_key_path.trim() } : {})
+        }
+      } : {})
+    };
+    setVerifyResults((cur) => ({ ...cur, [`${form.name}-form`]: "pending" }));
+    try {
+      const result = await api.verifyGpuNode({ node });
+      setVerifyResults((cur) => ({ ...cur, [`${form.name}-form`]: result }));
+    } catch (err) {
+      setVerifyResults((cur) => ({
+        ...cur,
+        [`${form.name}-form`]: { ok: false, detail: err instanceof Error ? err.message : String(err) }
+      }));
+    }
+  }
+
+  return (
+    <div className="gpu-node-manager-overlay" onClick={onClose}>
+      <div className="gpu-node-manager" onClick={(e) => e.stopPropagation()}>
+        <div className="gpu-node-manager-header">
+          <h2>Manage GPU Nodes</h2>
+          <button className="link-btn" onClick={onClose}>✕ Close</button>
+        </div>
+        {error && <div className="error-toast"><span>{error}</span><button onClick={() => setError(undefined)}>x</button></div>}
+        {editing ? (
+          <GpuNodeForm
+            initial={editing}
+            onCancel={() => { setEditing(null); setEditingOriginalName(null); }}
+            onSave={(form) => void handleSave(form, editingOriginalName)}
+            onVerify={(form) => void handleVerifyForm(form)}
+            verifyResult={editing.name ? verifyResults[`${editing.name}-form`] : undefined}
+          />
+        ) : (
+          <>
+            <button
+              className="btn btn-primary btn-sm"
+              onClick={() => { setEditing(EMPTY_FORM); setEditingOriginalName(null); }}
+            >
+              + Add new node
+            </button>
+            <div className="gpu-node-list">
+              {nodes.length === 0 && <p className="muted">No nodes registered.</p>}
+              {nodes.map((n) => {
+                const vr = verifyResults[n.name];
+                return (
+                  <div key={n.name} className={`gpu-node-card ${n.kind}`}>
+                    <div className="gpu-node-card-header">
+                      <strong>{n.name}</strong>
+                      {n.name === defaultName && <span className="tag">default</span>}
+                      <span className="muted">{n.kind} · {n.vram_gb ?? "?"} GB · {n.api_host}:{n.api_port}</span>
+                    </div>
+                    <div className="gpu-node-card-path">{n.comfyui_root}</div>
+                    {n.ssh && (
+                      <div className="gpu-node-card-path muted">ssh: {n.ssh.user}@{n.ssh.host}:{n.ssh.port ?? 22} (key {n.ssh.key_configured ? "set" : "unset"})</div>
+                    )}
+                    {n.model_share && <div className="muted">model_share: {n.model_share}</div>}
+                    {vr && vr !== "pending" && (
+                      <div className={`gpu-node-verify ${vr.ok ? "ok" : "fail"}`}>
+                        {vr.ok ? "✓ " : "✗ "}{vr.detail}
+                      </div>
+                    )}
+                    {vr === "pending" && <div className="muted">Verifying…</div>}
+                    <div className="gpu-node-card-actions">
+                      <button className="btn btn-sm" onClick={() => void handleVerify(n.name)} disabled={vr === "pending"}>Test</button>
+                      <button className="btn btn-sm" onClick={() => { setEditing(formFromNode(n)); setEditingOriginalName(n.name); }}>Edit</button>
+                      <button className="btn btn-sm btn-danger" onClick={() => void handleDelete(n.name)}>Delete</button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+            <p className="muted gpu-node-tip">
+              Tip: for full remote provisioning (ComfyUI install, SSH key, NFS), run
+              <code> npx tsx scripts/bootstrap-gpu-node.mts --help </code>
+              from the project root — it registers nodes here automatically.
+            </p>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function GpuNodeForm({ initial, onCancel, onSave, onVerify, verifyResult }: {
+  initial: GpuNodeFormState;
+  onCancel: () => void;
+  onSave: (form: GpuNodeFormState) => void;
+  onVerify: (form: GpuNodeFormState) => void;
+  verifyResult?: { ok: boolean; detail: string } | "pending";
+}) {
+  const [form, setForm] = useState<GpuNodeFormState>(initial);
+  const set = <K extends keyof GpuNodeFormState>(key: K, value: GpuNodeFormState[K]) =>
+    setForm((cur) => ({ ...cur, [key]: value }));
+
+  return (
+    <div className="gpu-node-form">
+      <h3>{initial.name ? "Edit node" : "Add node"}</h3>
+      <div className="gpu-node-form-grid">
+        <label>name<input type="text" value={form.name} onChange={(e) => set("name", e.currentTarget.value)} /></label>
+        <label>kind
+          <select value={form.kind} onChange={(e) => set("kind", e.currentTarget.value as "local" | "ssh")}>
+            <option value="local">local</option>
+            <option value="ssh">ssh</option>
+          </select>
+        </label>
+        <label>vram_gb (optional)<input type="number" step="0.1" value={form.vram_gb} onChange={(e) => set("vram_gb", e.currentTarget.value)} /></label>
+        <label>comfyui_root<input type="text" value={form.comfyui_root} onChange={(e) => set("comfyui_root", e.currentTarget.value)} /></label>
+        <label>venv_python<input type="text" value={form.venv_python} onChange={(e) => set("venv_python", e.currentTarget.value)} /></label>
+        <label>model_roots (comma-separated)<input type="text" value={form.model_roots} onChange={(e) => set("model_roots", e.currentTarget.value)} /></label>
+        <label>api_host<input type="text" value={form.api_host} onChange={(e) => set("api_host", e.currentTarget.value)} /></label>
+        <label>api_port<input type="number" value={form.api_port} onChange={(e) => set("api_port", e.currentTarget.value)} /></label>
+        <label>launch_flags (space-separated)<input type="text" value={form.launch_flags} onChange={(e) => set("launch_flags", e.currentTarget.value)} /></label>
+        <label>model_share
+          <select value={form.model_share} onChange={(e) => set("model_share", e.currentTarget.value as "nfs_same_path" | "none")}>
+            <option value="nfs_same_path">nfs_same_path</option>
+            <option value="none">none</option>
+          </select>
+        </label>
+        {form.kind === "ssh" && (
+          <>
+            <label>ssh.host<input type="text" value={form.ssh_host} onChange={(e) => set("ssh_host", e.currentTarget.value)} /></label>
+            <label>ssh.user<input type="text" value={form.ssh_user} onChange={(e) => set("ssh_user", e.currentTarget.value)} /></label>
+            <label>ssh.port<input type="number" value={form.ssh_port} onChange={(e) => set("ssh_port", e.currentTarget.value)} /></label>
+            <label>ssh.key_path (server-side path; never echoed back)<input type="text" value={form.ssh_key_path} onChange={(e) => set("ssh_key_path", e.currentTarget.value)} /></label>
+            <label>ssh.remote_workspace_root (optional)<input type="text" value={form.ssh_remote_workspace_root} onChange={(e) => set("ssh_remote_workspace_root", e.currentTarget.value)} /></label>
+          </>
+        )}
+      </div>
+      {verifyResult && verifyResult !== "pending" && (
+        <div className={`gpu-node-verify ${verifyResult.ok ? "ok" : "fail"}`}>
+          {verifyResult.ok ? "✓ " : "✗ "}{verifyResult.detail}
+        </div>
+      )}
+      <div className="gpu-node-form-actions">
+        <button className="btn btn-sm" onClick={() => onVerify(form)} disabled={verifyResult === "pending"}>Test (without saving)</button>
+        <button className="btn btn-sm" onClick={onCancel}>Cancel</button>
+        <button className="btn btn-sm btn-primary" onClick={() => onSave(form)} disabled={!form.name.trim() || !form.comfyui_root.trim() || !form.venv_python.trim()}>Save</button>
+      </div>
+    </div>
   );
 }
 
@@ -551,8 +946,255 @@ function AgentActivity({ activities, isRunning }: { activities: ActivityLine[]; 
   );
 }
 
+/* ── Asset Upload Panel (for missing_asset gates) ── */
+type GateSignalItem = { name: string; kind: string; action: string };
+type ItemStatus = "pending" | "uploading" | "resolved" | "failed";
+
+function basename(p: string): string {
+  const norm = p.replace(/\\/g, "/");
+  const parts = norm.split("/");
+  return parts[parts.length - 1] || norm;
+}
+
+function matchFileToItem(file: File, items: GateSignalItem[]): GateSignalItem | undefined {
+  const fileBase = file.name.toLowerCase();
+  // 1. Exact basename match
+  const exact = items.find((it) => basename(it.name).toLowerCase() === fileBase);
+  if (exact) return exact;
+  // 2. Item basename contained in filename (handles prefixes/suffixes)
+  return items.find((it) => fileBase.includes(basename(it.name).toLowerCase()));
+}
+
+function AssetUploadPanel({ event, taskId, api, onAnswer, onResolved }: {
+  event: AgentEvent;
+  taskId: string;
+  api: ReturnType<typeof useApi>;
+  onAnswer: (event: AgentEvent, answer: string, freeform: boolean) => void;
+  onResolved?: () => void;
+}) {
+  const stepId = event.stepId ?? "01";
+  const [items, setItems] = useState<GateSignalItem[]>([]);
+  const [statusMap, setStatusMap] = useState<Record<string, ItemStatus>>({});
+  const [errorMap, setErrorMap] = useState<Record<string, string>>({});
+  const [unmatched, setUnmatched] = useState<Array<{ file: File; targetItem?: GateSignalItem }>>([]);
+  const [bulkMsg, setBulkMsg] = useState<string>("");
+  const multiInputRef = useRef<HTMLInputElement>(null);
+  const perItemInputRef = useRef<HTMLInputElement>(null);
+  const [perItemTarget, setPerItemTarget] = useState<string>("");
+
+  // Fetch gate signal items on mount
+  const refreshItems = useCallback(async () => {
+    const signal = await api.fetchGateSignal(taskId, stepId);
+    if (signal?.items) {
+      setItems(signal.items);
+      setStatusMap((prev) => {
+        const next: Record<string, ItemStatus> = {};
+        for (const it of signal.items!) {
+          next[it.name] = prev[it.name] ?? "pending";
+        }
+        return next;
+      });
+    }
+    return signal;
+  }, [api, taskId, stepId]);
+
+  useEffect(() => {
+    void refreshItems();
+  }, [refreshItems]);
+
+  const resolvedCount = Object.values(statusMap).filter((s) => s === "resolved").length;
+  const totalCount = items.length || Object.keys(statusMap).length;
+  const allResolved = totalCount > 0 && resolvedCount === totalCount;
+
+  // Auto-advance when all resolved
+  useEffect(() => {
+    if (!allResolved) return;
+    const choices = (event.data as any)?.choices as string[] | undefined;
+    const continueChoice = choices?.find((c) => /continue/i.test(c));
+    if (continueChoice) {
+      onAnswer(event, continueChoice, false);
+    }
+    onResolved?.();
+  }, [allResolved, event, onAnswer, onResolved]);
+
+  async function uploadOne(file: File, targetName: string): Promise<boolean> {
+    setStatusMap((m) => ({ ...m, [targetName]: "uploading" }));
+    setErrorMap((m) => ({ ...m, [targetName]: "" }));
+    try {
+      const result = await api.uploadMedia(taskId, file, targetName);
+      if (result.uploaded) {
+        setStatusMap((m) => ({ ...m, [targetName]: "resolved" }));
+        // Refresh gate signal to sync with backend state
+        await refreshItems();
+        return true;
+      }
+      setStatusMap((m) => ({ ...m, [targetName]: "failed" }));
+      setErrorMap((m) => ({ ...m, [targetName]: "Upload returned not-resolved" }));
+      return false;
+    } catch (err) {
+      setStatusMap((m) => ({ ...m, [targetName]: "failed" }));
+      setErrorMap((m) => ({ ...m, [targetName]: err instanceof Error ? err.message : String(err) }));
+      return false;
+    }
+  }
+
+  // Per-item upload via dedicated button
+  function handlePerItemClick(itemName: string) {
+    setPerItemTarget(itemName);
+    perItemInputRef.current?.click();
+  }
+
+  async function handlePerItemFile(file: File | undefined) {
+    if (!file || !perItemTarget) return;
+    await uploadOne(file, perItemTarget);
+    setPerItemTarget("");
+  }
+
+  // Multi-file upload with smart matching
+  async function handleMultiFiles(files: FileList | null) {
+    if (!files || files.length === 0) return;
+    const fileArr = Array.from(files);
+    const pendingItems = items.filter((it) => statusMap[it.name] !== "resolved");
+    const matched: Array<{ file: File; item: GateSignalItem }> = [];
+    const unmatchedFiles: File[] = [];
+
+    for (const file of fileArr) {
+      const item = matchFileToItem(file, pendingItems);
+      if (item) {
+        matched.push({ file, item });
+      } else {
+        unmatchedFiles.push(file);
+      }
+    }
+
+    setUnmatched(unmatchedFiles.map((f) => ({ file: f })));
+    setBulkMsg("");
+
+    // Upload matched files sequentially (avoids race on CSV writes)
+    let okCount = 0;
+    for (const { file, item } of matched) {
+      const ok = await uploadOne(file, item.name);
+      if (ok) okCount++;
+    }
+
+    const skipCount = fileArr.length - matched.length - unmatchedFiles.length;
+    const parts: string[] = [];
+    if (okCount > 0) parts.push(`${okCount} uploaded`);
+    if (skipCount > 0) parts.push(`${skipCount} already resolved`);
+    if (unmatchedFiles.length > 0) parts.push(`${unmatchedFiles.length} unmatched`);
+    setBulkMsg(parts.join(" · ") || "No action");
+  }
+
+  // Assign an unmatched file to a specific item
+  async function assignUnmatched(file: File, itemName: string) {
+    setUnmatched((prev) => prev.filter((u) => u.file !== file));
+    await uploadOne(file, itemName);
+  }
+
+  return (
+    <div className="asset-upload-panel">
+      <div className="asset-upload-header">
+        <span className="asset-upload-badge">📁 Missing Assets</span>
+        <span className="muted">{totalCount > 0 ? `${resolvedCount}/${totalCount} resolved` : "loading…"}</span>
+      </div>
+
+      {/* Per-item rows */}
+      <div className="asset-item-list">
+        {items.map((item) => {
+          const status = statusMap[item.name] ?? "pending";
+          return (
+            <div key={item.name} className={`asset-item-row ${status}`}>
+              <span className="asset-item-status-icon">
+                {status === "resolved" ? "✅" : status === "uploading" ? "⏳" : status === "failed" ? "❌" : "⬜"}
+              </span>
+              <div className="asset-item-info">
+                <span className="asset-item-name">{basename(item.name)}</span>
+                <span className="asset-item-kind">{item.kind}</span>
+              </div>
+              {status !== "resolved" && status !== "uploading" && (
+                <button className="btn btn-sm" onClick={() => handlePerItemClick(item.name)}>
+                  Upload
+                </button>
+              )}
+              {errorMap[item.name] && (
+                <span className="asset-item-error">{errorMap[item.name]}</span>
+              )}
+            </div>
+          );
+        })}
+        {items.length === 0 && (
+          <p className="muted asset-empty">No gate signal items found. You can still use the choices below.</p>
+        )}
+      </div>
+
+      {/* Multi-file drop zone */}
+      <input
+        ref={multiInputRef}
+        type="file"
+        multiple
+        style={{ display: "none" }}
+        onChange={(e) => {
+          void handleMultiFiles(e.target.files);
+          e.target.value = "";
+        }}
+      />
+      <input
+        ref={perItemInputRef}
+        type="file"
+        style={{ display: "none" }}
+        onChange={(e) => {
+          void handlePerItemFile(e.target.files?.[0]);
+          e.target.value = "";
+        }}
+      />
+      <div className="asset-drop-zone" onClick={() => multiInputRef.current?.click()}>
+        <span className="asset-drop-icon">📎</span>
+        <span>Drop files or click to select <strong>(multiple supported)</strong></span>
+      </div>
+
+      {bulkMsg && <div className="asset-bulk-msg">{bulkMsg}</div>}
+
+      {/* Unmatched files needing manual assignment */}
+      {unmatched.length > 0 && (
+        <div className="asset-unmatched">
+          <p className="asset-unmatched-title">Unmatched files — pick target asset:</p>
+          {unmatched.map((u, i) => (
+            <div key={i} className="asset-unmatched-row">
+              <span className="asset-unmatched-name">{u.file.name}</span>
+              <select
+                defaultValue=""
+                onChange={(e) => {
+                  if (e.target.value) void assignUnmatched(u.file, e.target.value);
+                }}
+              >
+                <option value="" disabled>Select asset…</option>
+                {items.filter((it) => statusMap[it.name] !== "resolved").map((it) => (
+                  <option key={it.name} value={it.name}>{basename(it.name)}</option>
+                ))}
+              </select>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Choice buttons (fallback / partial-upload continue) */}
+      <div className="asset-choices">
+        {((event.data as any)?.choices ?? []).map((choice: string) => (
+          <button
+            key={choice}
+            className={`btn ${/continue|approve/i.test(choice) ? "btn-primary" : ""}`}
+            onClick={() => onAnswer(event, choice, false)}
+          >
+            {choice}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 /* ── Human Interaction ── */
-function HumanInteraction({ questions, drafts, onDraftChange, onAnswer, onOpenArtifact, onUploadMedia, decisions, allEvents }: {
+function HumanInteraction({ questions, drafts, onDraftChange, onAnswer, onOpenArtifact, onUploadMedia, decisions, allEvents, taskId, api }: {
   questions: AgentEvent[];
   drafts: Record<string, string>;
   onDraftChange: (eventId: string, val: string) => void;
@@ -561,6 +1203,8 @@ function HumanInteraction({ questions, drafts, onDraftChange, onAnswer, onOpenAr
   onUploadMedia: (taskId: string, file: File) => void;
   decisions: HumanDecision[];
   allEvents: AgentEvent[];
+  taskId?: string;
+  api: ReturnType<typeof useApi>;
 }) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [uploadEventId, setUploadEventId] = useState<string>("");
@@ -596,6 +1240,19 @@ function HumanInteraction({ questions, drafts, onDraftChange, onAnswer, onOpenAr
         const isSdkChat = !question?.choices?.length || (question?.choices?.length === 0 && question?.allowFreeform !== false);
         const hasMissingMedia = question?.blockingReason === "missing_asset";
         const stepId = event.stepId ?? "?";
+
+        // Dedicated multi-file upload panel for missing_asset gates
+        if (hasMissingMedia && taskId) {
+          return (
+            <AssetUploadPanel
+              key={event.id}
+              event={event}
+              taskId={taskId}
+              api={api}
+              onAnswer={onAnswer}
+            />
+          );
+        }
 
         if (isSdkChat) {
           // Chat-style interaction for SDK agent questions

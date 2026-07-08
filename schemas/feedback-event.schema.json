@@ -28,8 +28,8 @@
     },
     "stepId": {
       "type": "string",
-      "pattern": "^\\d{2}$",
-      "description": "Two-digit step id where the feedback originated."
+      "pattern": "^(\\d{2}|task)$",
+      "description": "Two-digit step id where the feedback originated, or 'task' for task-level feedback with no single step."
     },
     "createdAt": {
       "type": "string",

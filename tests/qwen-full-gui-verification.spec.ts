@@ -32,19 +32,15 @@ import { fileURLToPath } from "node:url";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const API = process.env.E2E_API_URL ?? "http://127.0.0.1:3001";
-const FRONTEND = process.env.E2E_FRONTEND_URL ?? "http://127.0.0.1:5173";
+const API = "http://127.0.0.1:3001";
+const FRONTEND = "http://172.16.114.105:5173";
 
-const DEFAULT_WORKFLOW_PATH = path.resolve(
+const WORKFLOW_PATH = path.resolve(
   __dirname,
   "../../../cartoon/Qwen-Image-2512-4步-20260320-william-单参考图.json"
 );
-const DEFAULT_FOX_IMAGE_PATH =
+const FOX_IMAGE_PATH =
   "/home/intel/hf_models/zimage_workflow/custom_nodes/ComfyUI_LayerStyle/workflow/fox_512x512.png";
-const WORKFLOW_PATH = process.env.E2E_WORKFLOW_PATH
-  ? path.resolve(process.env.E2E_WORKFLOW_PATH)
-  : DEFAULT_WORKFLOW_PATH;
-const FOX_IMAGE_PATH = process.env.E2E_REFERENCE_IMAGE ?? DEFAULT_FOX_IMAGE_PATH;
 
 // ── Timeouts ──
 const POLL_INTERVAL_MS = 30_000; // 30 seconds between status polls

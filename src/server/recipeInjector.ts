@@ -21,7 +21,10 @@
  *   the step. Soft layer (skills) will still be there.
  */
 import { readFile } from "node:fs/promises";
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import { findRecipesForNode, type Recipe } from "./recipeLibrary";
+import { GLOBAL_DIRS } from "./paths";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Public API
@@ -42,7 +45,7 @@ export interface NodeModelPair {
  * Exported for testing; production callers usually use `injectRecipesForWorkflow`.
  */
 export function extractNodeModelPairs(workflow: unknown): NodeModelPair[] {
-  const graph = workflow as { nodes?: Array<{ type?: string; widgets_values?: unknown[] }> };
+  const graph = workflow as { nodes?: Array<{ type?: string; widgets_values?: unknown }> };
   const nodes = Array.isArray(graph?.nodes) ? graph.nodes : [];
   const modelExt = /\.(safetensors|ckpt|pt|pth|onnx|gguf|bin)$/i;
   const pairs: NodeModelPair[] = [];
@@ -51,8 +54,20 @@ export function extractNodeModelPairs(workflow: unknown): NodeModelPair[] {
     const nodeType = typeof node?.type === "string" ? node.type : undefined;
     if (!nodeType) continue;
 
+    // widgets_values is usually an array, but some node types (e.g. VHS_VideoCombine)
+    // use a dict. Normalize both to a list of candidates.
+    const wv = node.widgets_values;
+    let candidates: unknown[];
+    if (Array.isArray(wv)) {
+      candidates = wv;
+    } else if (wv && typeof wv === "object") {
+      candidates = Object.values(wv);
+    } else {
+      candidates = [];
+    }
+
     const modelValues: string[] = [];
-    for (const v of node.widgets_values ?? []) {
+    for (const v of candidates) {
       if (typeof v === "string" && modelExt.test(v)) {
         modelValues.push(v);
       }
@@ -119,6 +134,50 @@ export function formatRecipesForPrompt(recipes: Recipe[]): string {
 }
 
 /**
+ * Build the patch adaptation protocol section for recipes that carry a patchFile.
+ *
+ * Data-driven: called by `injectRecipesForWorkflow` when one or more matched
+ * recipes declare `patchFile`. Reads the protocol doc from
+ * GLOBAL_DIRS.protocolsRoot (best-effort — returns "" if the file is missing,
+ * so recipe data still flows through without the protocol).
+ *
+ * The protocol doc is the single context file that defines the 3-layer
+ * adaptation pipeline (text → structural → semantic). The recipe-specific
+ * table appended below gives the agent the concrete targets.
+ */
+function formatPatchProtocol(patchRecipes: Recipe[]): string {
+  const protocolPath = path.join(
+    GLOBAL_DIRS.protocolsRoot,
+    "patch-adaptation-protocol.md"
+  );
+  let protocolBody: string;
+  try {
+    protocolBody = readFileSync(protocolPath, "utf8");
+  } catch {
+    return "";
+  }
+
+  const rows = patchRecipes
+    .map((r) => {
+      const target = r.patchTarget ?? "_(not specified)_";
+      const base = r.baseVersion ?? "_(not specified)_";
+      const validate = r.validationCommand ?? "_(not specified)_";
+      return `| ${r.recipeId} | \`${r.patchFile}\` | ${target} | ${base} | \`${validate}\` |`;
+    })
+    .join("\n");
+
+  return [
+    protocolBody,
+    "",
+    "## Recipes requiring patch adaptation",
+    "",
+    "| recipeId | patchFile | patchTarget | baseVersion | validationCommand |",
+    "|---|---|---|---|---|",
+    rows
+  ].join("\n");
+}
+
+/**
  * Top-level: read workflow, find recipes, format for prompt.
  * Returns "" (empty) when:
  *   - workflowPath can't be read
@@ -141,8 +200,40 @@ export async function injectRecipesForWorkflow(input: {
     const workflow = JSON.parse(raw);
     const pairs = extractNodeModelPairs(workflow);
     const matches = findMatchingRecipes(pairs, input.recipesRoot);
-    return formatRecipesForPrompt(matches);
+    let result = formatRecipesForPrompt(matches);
+
+    // Append patch adaptation protocol when patch-carrying recipes match at step 05.
+    // Steps 02/04 still see patchFile in the recipe data block; they don't need
+    // the full pipeline doc. Data-driven: any recipe with patchFile triggers this.
+    const patchRecipes = matches.filter((r) => r.patchFile);
+    if (patchRecipes.length > 0 && input.stepId === "05") {
+      const protocolSection = formatPatchProtocol(patchRecipes);
+      if (protocolSection) result = result + "\n\n" + protocolSection;
+    }
+
+    return result;
   } catch {
     return "";
+  }
+}
+
+/**
+ * Return the recipeIds that would be injected for the given workflow + step.
+ * Sync convenience for analytics tracking (§H) — avoids re-reading the file
+ * when the caller already has the workflow path. Returns [] on any error.
+ */
+export function getMatchedRecipeIds(
+  workflowPath: string,
+  stepId: string,
+  recipesRoot?: string
+): string[] {
+  if (!RECIPE_INJECTION_STEPS.has(stepId)) return [];
+  try {
+    const raw = readFileSync(workflowPath, "utf8");
+    const workflow = JSON.parse(raw);
+    const pairs = extractNodeModelPairs(workflow);
+    return findMatchingRecipes(pairs, recipesRoot).map((r) => r.recipeId);
+  } catch {
+    return [];
   }
 }

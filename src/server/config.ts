@@ -11,6 +11,8 @@ export interface AppConfig {
   draftDocRoot: string;
   comfyuiRoot: string;
   modelRoots: string[];
+  /** Path to gpu-nodes.json — single source of truth for ComfyUI launch targets. */
+  gpuNodesPath: string;
   copilotCliPath?: string;
   autoApproveAgentPermissions: boolean;
 }
@@ -38,6 +40,8 @@ export function loadConfig(): AppConfig {
     ),
     comfyuiRoot,
     modelRoots: uniquePaths([demoModelRoot, ...configuredModelRoots]),
+    // gpu-nodes.json at project root by default; override via GPU_NODES_PATH for tests.
+    gpuNodesPath: resolveFromProject(process.env.GPU_NODES_PATH ?? "gpu-nodes.json"),
     copilotCliPath: process.env.COPILOT_CLI_PATH,
     autoApproveAgentPermissions: process.env.MIGRATION_AGENT_AUTO_APPROVE !== "0"
   };

@@ -190,7 +190,10 @@ export async function ensureAssetAcquisitionJob(input: {
   const remoteSearch = input.remoteSearch ?? searchRemoteExactAssets;
 
   for (const row of rows) {
-    if (!row.gap) {
+    // Skip rows that are already resolved — no gap, or explicitly marked as
+    // human-provided / complete (defense-in-depth: updateAssetCsv clears the
+    // gap, but this catches any row that retains a stale gap string).
+    if (!row.gap || row.state === "human_provided" || row.acquisition_status === "complete") {
       items.push({
         assetName: row.asset_name,
         requestedName: row.requested_name || row.asset_name,

@@ -136,9 +136,11 @@ async function updateAssetCsv(
       if (fields.length > 11) {
         fields[11] = "complete";
       }
-      // Clear gap message (index 14) if present
+      // Clear gap message (index 14) — must be empty so assetAcquisition.ts
+      // skips this row on re-run (its check is `if (!row.gap)`).
+      // Audit trail is preserved in state=human_provided + staged_path.
       if (fields.length > 14) {
-        fields[14] = "resolved by human upload";
+        fields[14] = "";
       }
       updated = true;
       return fields.map((f) => (f.includes(",") || f.includes('"')) ? `"${f.replace(/"/g, '""')}"` : f).join(",");

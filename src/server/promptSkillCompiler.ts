@@ -2,8 +2,12 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import type { MigrationStepDefinition, MigrationTask, StepJob } from "../shared/types";
 import type { AppConfig } from "./config";
-import { injectRecipesForWorkflow } from "./recipeInjector";
+import { injectRecipesForWorkflow, getMatchedRecipeIds } from "./recipeInjector";
+import { injectSkillsForWorkflow, getMatchedSkillIds } from "./skillInjector";
+import { extractNodeModelPairs } from "./recipeInjector";
+import { recordRecipeApplied, recordSkillInjected } from "./analyticsDb";
 import { computeWorkflowSha256, formatRulesForPrompt, loadWorkflowKnowledge } from "./workflowKnowledge";
+import { loadGpuNodes, pickNode, renderGpuNodeBlock } from "./gpuNodes";
 
 export async function compileStepJob(input: {
   config: AppConfig;
@@ -58,6 +62,45 @@ export async function compileStepJob(input: {
     stepId: input.step.id
   }).catch(() => "");
 
+  // Skill library injection (§M, soft-injection layer).
+  // Best-effort: returns "" when no triggers match. Any step can receive
+  // skill injections — trigger evaluation handles per-step gating.
+  const matchedSkillsSection = await injectSkillsForWorkflow({
+    workflowPath: input.task.workflowPath,
+    stepId: input.step.id
+  }).catch(() => "");
+
+  // §H analytics: record what was injected (fire-and-forget, never throws).
+  try {
+    const recipeIds = getMatchedRecipeIds(input.task.workflowPath, input.step.id);
+    if (recipeIds.length > 0) recordRecipeApplied(input.task.id, input.step.id, recipeIds);
+
+    const pairs = extractNodeModelPairs(
+      JSON.parse(await fs.readFile(input.task.workflowPath, "utf8"))
+    );
+    const skillIds = getMatchedSkillIds({ stepId: input.step.id, nodeModelPairs: pairs });
+    for (const sid of skillIds) recordSkillInjected(input.task.id, input.step.id, sid, "unknown");
+  } catch { /* analytics is best-effort */ }
+
+  // GPU node lookup: override comfyuiRoot + modelRoots from the task's pinned
+  // node (so the agent sees the remote paths it actually needs), and produce a
+  // gpuNodeBlock the Step 05 skill branches on. Falls back silently to the
+  // synthesized default local node when no config exists.
+  let gpuNodeBlock: string | undefined;
+  let comfyuiRoot = input.config.comfyuiRoot;
+  let modelRoots = input.config.modelRoots;
+  try {
+    const registry = loadGpuNodes(input.config);
+    const node = pickNode(registry, input.task.gpuNode);
+    comfyuiRoot = node.comfyui_root;
+    modelRoots = node.model_roots;
+    gpuNodeBlock = renderGpuNodeBlock(node, input.task.id);
+  } catch (err) {
+    // Config error → log and fall through with defaults. The Step 05 skill
+    // will use the existing local-launch flow.
+    console.warn(`[compileStepJob] gpu-nodes.json load failed: ${(err as Error).message}`);
+  }
+
   return {
     taskId: input.task.id,
     stepId: input.step.id,
@@ -67,8 +110,8 @@ export async function compileStepJob(input: {
     workspacePath: input.task.workspacePath,
     artifactPath: input.task.artifactPath,
     workflowPath: input.task.workflowPath,
-    modelRoots: input.config.modelRoots,
-    comfyuiRoot: input.config.comfyuiRoot,
+    modelRoots,
+    comfyuiRoot,
     instructions,
     constraints: [
       "Do not modify the source workflow in place.",
@@ -83,8 +126,8 @@ export async function compileStepJob(input: {
       workflowPath: input.task.workflowPath,
       artifactPath: input.task.artifactPath,
       workspacePath: input.task.workspacePath,
-      modelRoots: input.config.modelRoots,
-      comfyuiRoot: input.config.comfyuiRoot,
+      modelRoots,
+      comfyuiRoot,
       priorArtifacts,
       recommendedInputArtifacts,
       availableInputArtifacts,
@@ -102,7 +145,9 @@ export async function compileStepJob(input: {
     ],
     resumeContext: input.resumeContext,
     learnedRules: learnedRulesSection || undefined,
-    matchedRecipes: matchedRecipesSection || undefined
+    matchedRecipes: matchedRecipesSection || undefined,
+    matchedSkills: matchedSkillsSection || undefined,
+    ...(gpuNodeBlock ? { gpuNodeBlock } : {})
   };
 }
 
@@ -149,6 +194,8 @@ export function serializeStepJobForAgent(job: StepJob): string {
     "",
     ...(job.learnedRules ? [job.learnedRules, ""] : []),
     ...(job.matchedRecipes ? [job.matchedRecipes, ""] : []),
+    ...(job.matchedSkills ? [job.matchedSkills, ""] : []),
+    ...(job.gpuNodeBlock ? [job.gpuNodeBlock, ""] : []),
     job.instructions,
     "",
     "## Required final response",

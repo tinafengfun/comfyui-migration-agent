@@ -110,6 +110,7 @@ export class StateStore {
     workspacePath: string;
     artifactPath: string;
     steps: MigrationStepDefinition[];
+    gpuNode?: string;
   }): Promise<MigrationTask> {
     return this.withWriteLock(async () => {
       const state = await this.load();
@@ -123,7 +124,8 @@ export class StateStore {
         artifactPath: input.artifactPath,
         createdAt: now,
         updatedAt: now,
-        steps: input.steps.map((step) => ({ id: step.id, status: "pending" }))
+        steps: input.steps.map((step) => ({ id: step.id, status: "pending" })),
+        ...(input.gpuNode ? { gpuNode: input.gpuNode } : {})
       };
       state.tasks.push(task);
       await this.save(state);

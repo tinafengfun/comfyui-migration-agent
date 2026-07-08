@@ -32,13 +32,16 @@ const WORKFLOW_NO_MODELS = {
 };
 
 const CLILOADER_FP8_RECIPE = {
-  recipeId: "CLIPLoader-qwen25-vl-fp8",
+  recipeId: "CLIPLoader-qwen-fp8",
   version: "1.0.0",
   nodeType: "CLIPLoader",
-  modelPattern: "qwen_*_vl_*_fp8*.safetensors",
+  modelPattern: "*qwen*fp8*.safetensors",
   xpuSupport: "patched",
   patchClass: "functional_runtime_support",
   patchFile: "patches/xpu-bug-investigation/0001-xpu-fp8-fallback.patch",
+  patchTarget: "comfy/ops.py::_quantized_apply",
+  validationCommand: "python -c \"import torch; print('FP8 OK')\"",
+  baseVersion: "comfy_kitchen@abc1234",
   knownIssues: ["QTensor.clone() segfaults on .to('xpu')"],
   workarounds: [
     {
@@ -65,7 +68,7 @@ beforeEach(async () => {
   recipesRoot = await mkdtemp(path.join(tmpdir(), "inj-recipes-"));
   await mkdir(path.join(recipesRoot, "nodes"), { recursive: true });
   await writeFile(
-    path.join(recipesRoot, "nodes", "CLIPLoader-qwen25-vl-fp8.json"),
+    path.join(recipesRoot, "nodes", "CLIPLoader-qwen-fp8.json"),
     JSON.stringify(CLILOADER_FP8_RECIPE)
   );
   await writeFile(
@@ -104,6 +107,28 @@ describe("recipeInjector.extractNodeModelPairs", () => {
     expect(extractNodeModelPairs({ nodes: "not-an-array" })).toEqual([]);
   });
 
+  it("handles dict widgets_values (e.g. VHS_VideoCombine nodes)", () => {
+    const pairs = extractNodeModelPairs({
+      nodes: [
+        {
+          id: 1,
+          type: "VHS_VideoCombine",
+          widgets_values: { frame_rate: 32, filename_prefix: "out" }
+        },
+        {
+          id: 2,
+          type: "CLIPLoader",
+          widgets_values: { model: "qwen_fp8.safetensors" }
+        }
+      ]
+    });
+    expect(pairs).toContainEqual({ nodeType: "VHS_VideoCombine" });
+    expect(pairs).toContainEqual({
+      nodeType: "CLIPLoader",
+      modelFilename: "qwen_fp8.safetensors"
+    });
+  });
+
   it("ignores widget values that don't look like model files", () => {
     const pairs = extractNodeModelPairs({
       nodes: [
@@ -119,7 +144,7 @@ describe("recipeInjector.findMatchingRecipes", () => {
     const pairs = extractNodeModelPairs(WORKFLOW_WITH_FP8_CLIP);
     const matches = findMatchingRecipes(pairs, recipesRoot);
     const ids = matches.map((r) => r.recipeId);
-    expect(ids).toContain("CLIPLoader-qwen25-vl-fp8");
+    expect(ids).toContain("CLIPLoader-qwen-fp8");
   });
 
   it("includes native recipes whose nodeType appears (no modelPattern required)", () => {
@@ -140,7 +165,7 @@ describe("recipeInjector.findMatchingRecipes", () => {
       { nodeType: "CLIPLoader", modelFilename: "qwen_2.5_vl_3b_fp8.safetensors" }
     ];
     const matches = findMatchingRecipes(pairs, recipesRoot);
-    expect(matches.filter((r) => r.recipeId === "CLIPLoader-qwen25-vl-fp8")).toHaveLength(1);
+    expect(matches.filter((r) => r.recipeId === "CLIPLoader-qwen-fp8")).toHaveLength(1);
   });
 });
 
@@ -150,7 +175,7 @@ describe("recipeInjector.formatRecipesForPrompt", () => {
     const matches = findMatchingRecipes(pairs, recipesRoot);
     const md = formatRecipesForPrompt(matches);
     expect(md).toContain("## Matched recipes");
-    expect(md).toContain("CLIPLoader-qwen25-vl-fp8");
+    expect(md).toContain("CLIPLoader-qwen-fp8");
     expect(md).toContain("QTensor.clone()"); // knownIssues content
     expect(md).toContain("workarounds (in priority order)");
   });
@@ -167,7 +192,7 @@ describe("recipeInjector.injectRecipesForWorkflow", () => {
       stepId: "04",
       recipesRoot
     });
-    expect(out).toContain("CLIPLoader-qwen25-vl-fp8");
+    expect(out).toContain("CLIPLoader-qwen-fp8");
   });
 
   it("returns empty for steps outside the injection set", async () => {
@@ -216,5 +241,55 @@ describe("recipeInjector.injectRecipesForWorkflow", () => {
 describe("recipeInjector.RECIPE_INJECTION_STEPS", () => {
   it("contains exactly 02, 04, 05", () => {
     expect([...RECIPE_INJECTION_STEPS].sort()).toEqual(["02", "04", "05"]);
+  });
+});
+
+describe("recipeInjector patch adaptation protocol", () => {
+  it("appends protocol section at step 05 when a patchFile recipe matches", async () => {
+    const out = await injectRecipesForWorkflow({
+      workflowPath,
+      stepId: "05",
+      recipesRoot
+    });
+    // Recipe data block still present
+    expect(out).toContain("## Matched recipes");
+    expect(out).toContain("CLIPLoader-qwen-fp8");
+    // Protocol doc injected
+    expect(out).toContain("Patch Adaptation Protocol");
+    expect(out).toContain("## Recipes requiring patch adaptation");
+    // Recipe-specific table row includes new fields
+    expect(out).toContain("comfy/ops.py::_quantized_apply");
+    expect(out).toContain("comfy_kitchen@abc1234");
+  });
+
+  it("does NOT append protocol at step 02 (gated to step 05)", async () => {
+    const out = await injectRecipesForWorkflow({
+      workflowPath,
+      stepId: "02",
+      recipesRoot
+    });
+    expect(out).toContain("## Matched recipes");
+    expect(out).not.toContain("## Recipes requiring patch adaptation");
+    expect(out).not.toContain("Patch Adaptation Protocol");
+  });
+
+  it("does NOT append protocol when no patchFile recipe matches", async () => {
+    // VAELoader recipe is native (no patchFile)
+    const vaeWf = path.join(path.dirname(workflowPath), "vae-only.json");
+    await writeFile(
+      vaeWf,
+      JSON.stringify({
+        nodes: [
+          { id: 1, type: "VAELoader", widgets_values: ["ae.safetensors"] }
+        ]
+      })
+    );
+    const out = await injectRecipesForWorkflow({
+      workflowPath: vaeWf,
+      stepId: "05",
+      recipesRoot
+    });
+    expect(out).toContain("## Matched recipes");
+    expect(out).not.toContain("## Recipes requiring patch adaptation");
   });
 });

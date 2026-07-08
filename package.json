@@ -24,6 +24,7 @@
     "ajv-formats": "^3.0.1",
     "express": "^5.2.1",
     "https-proxy-agent": "^9.0.0",
+    "js-yaml": "^5.1.0",
     "lucide-react": "^1.16.0",
     "react": "^19.2.1",
     "react-dom": "^19.2.1",
@@ -32,6 +33,7 @@
   },
   "devDependencies": {
     "@types/express": "^5.0.6",
+    "@types/js-yaml": "^4.0.9",
     "@types/node": "^24.10.1",
     "@types/react": "^19.2.7",
     "@types/react-dom": "^19.2.3",

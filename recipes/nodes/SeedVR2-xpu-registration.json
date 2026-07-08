@@ -1,0 +1,51 @@
+{
+  "recipeId": "SeedVR2-xpu-registration",
+  "version": "1.1.0",
+  "nodeType": "SeedVR2LoadDiTModel",
+  "modelPattern": "seedvr2*",
+  "xpuSupport": "patched",
+  "patchClass": "functional_runtime_support",
+  "patchFile": "patches/seedvr2-xpu-registration.patch",
+  "patchTarget": "src/optimization/memory_manager.py::is_xpu_available, get_gpu_backend, get_device_list, get_basic_vram_info; src/interfaces/video_upscaler.py::SeedVR2VideoUpscaler.execute",
+  "validationCommand": "python -c \"import torch; assert hasattr(torch,'xpu') and torch.xpu.is_available(); from src.optimization.memory_manager import is_xpu_available, get_gpu_backend; assert is_xpu_available(); assert get_gpu_backend()=='xpu'; print('SeedVR2 XPU OK')\"",
+  "baseVersion": "numz/ComfyUI-SeedVR2_VideoUpscaler@4490bd1",
+  "knownIssues": [
+    "memory_manager.py get_device_list() only enumerates CUDA and MPS devices — XPU cards are invisible to the SeedVR2 runtime, so all device selection defaults to CPU or fails.",
+    "video_upscaler.py output conversion checks `sample.is_cuda or sample.is_mps` but not `is_xpu`, so tensors on XPU never get moved to CPU for ComfyUI output — silent data loss or crash.",
+    "get_basic_vram_info() uses torch.cuda.mem_get_info() with no XPU branch, so VRAM checks return 'No GPU backend available' on Intel systems.",
+    "Workflow widgets hardcode `cuda:0` for SeedVR2LoadDiTModel and SeedVR2LoadVAEModel — must be changed to `xpu:0` or `cpu` via runtime policy.",
+    "compatibility.py imports FlashAttention/SageAttention unconditionally; these are NVIDIA-only and will crash on import on XPU. Must keep attention as `sdpa`.",
+    "Distributed helper basic.py falls back to CUDA/NCCL when MPS is absent — needs an XPU branch or CPU fallback."
+  ],
+  "workarounds": [
+    {
+      "action": "Apply patches/seedvr2-xpu-registration.patch to the SeedVR2 custom node package. The patch adds is_xpu_available() to memory_manager.py, adds XPU to get_device_list() and get_gpu_backend(), adds XPU VRAM query to get_basic_vram_info(), and patches video_upscaler.py output conversion to check getattr(sample, 'is_xpu', False).",
+      "rationale": "These are the minimal changes to make SeedVR2 device-aware on Intel XPU. Without them, the node cannot enumerate XPU devices, query VRAM, or correctly transfer output tensors.",
+      "tradeoff": "The patch adds ~60 lines across 2 files. Must be re-applied if the SeedVR2 custom node package is updated. The patch is against the package's own source (src/), not ComfyUI core."
+    },
+    {
+      "action": "Change workflow widget values for SeedVR2LoadDiTModel and SeedVR2LoadVAEModel from `cuda:0` to `xpu:0` (or `cpu` if VRAM is insufficient). Record this as a runtime-policy change.",
+      "rationale": "The workflow JSON hardcodes CUDA device selection. Even with the patch, the device must be explicitly set to XPU.",
+      "tradeoff": "Requires a deliberate workflow modification — do not silently edit. Must be recorded as a migration decision."
+    },
+    {
+      "action": "If VRAM headroom is insufficient for full-resolution upscaling (SeedVR2 target can be 3840×7680), run a reduced-scope branch smoke first (e.g. 256×256 input), then scale up.",
+      "rationale": "SeedVR2 DiT intermediate tensors can be 4-8× the input resolution. On XPU with <16GB VRAM, full-resolution will OOM.",
+      "tradeoff": "Slower validation cycle; full-resolution run deferred until memory math justifies it."
+    }
+  ],
+  "validationEvidence": "Zimage/04-source-audit.md",
+  "validatedOnWorkflows": [],
+  "provenance": {
+    "taskOrigin": "Zimage",
+    "evidenceArtifact": "04-source-audit.md",
+    "createdAt": "2026-06-25",
+    "approvedBy": "tinafengfun"
+  },
+  "retireCondition": "SeedVR2 custom node package adds native XPU device enumeration, VRAM query, and output tensor conversion upstream. Track ComfyUI-SeedVR2_VideoUpscaler releases.",
+  "efficacy": {
+    "appliedCount": 1,
+    "successCount": 0,
+    "lastAppliedAt": "2026-06-25T00:00:00Z"
+  }
+}

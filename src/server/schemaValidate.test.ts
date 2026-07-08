@@ -41,7 +41,7 @@ const SKILL_CORE = {
 };
 
 const RECIPE_CLIP_FP8 = {
-  recipeId: "CLIPLoader-qwen25-vl-fp8",
+  recipeId: "CLIPLoader-qwen-fp8",
   version: "1.0.0",
   nodeType: "CLIPLoader",
   modelPattern: "qwen_*_vl_*_fp8*",

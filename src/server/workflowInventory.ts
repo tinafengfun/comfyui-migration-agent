@@ -141,13 +141,20 @@ function extractModelWidgets(nodes: WorkflowNode[]): Array<{ node: string; value
   const modelPattern = /\.(safetensors|ckpt|pt|pth|onnx|gguf|bin)$/i;
   const rows: Array<{ node: string; value: string }> = [];
   for (const node of nodes) {
-    for (const value of node.widgets_values ?? []) {
+    for (const value of iterWidgetValues(node.widgets_values)) {
       if (typeof value === "string" && modelPattern.test(value)) {
         rows.push({ node: formatNodeRef(node), value });
       }
     }
   }
   return rows.sort((a, b) => a.node.localeCompare(b.node));
+}
+
+/** Normalize widgets_values to an iterable array — handles both array and dict formats. */
+function iterWidgetValues(widgetsValues: unknown): unknown[] {
+  if (Array.isArray(widgetsValues)) return widgetsValues;
+  if (widgetsValues && typeof widgetsValues === "object") return Object.values(widgetsValues as Record<string, unknown>);
+  return [];
 }
 
 function isOutputNode(type?: string): boolean {

@@ -18,6 +18,7 @@ function testConfig(root: string): AppConfig {
     draftDocRoot: testDraftDocRoot(),
     comfyuiRoot: path.join(root, "ComfyUI"),
     modelRoots: [path.join(root, "models")],
+    gpuNodesPath: path.join(root, "gpu-nodes.json"),
     autoApproveAgentPermissions: false
   };
 }

@@ -20,6 +20,19 @@ workspaces*/
 .env.local
 .env.*.local
 download.env
+# The real config file sourced by scripts/restart.sh (contains the Copilot token)
+/env
+
+# GPU node registry — machine-specific paths + ssh key_path.
+# Copy gpu-nodes.example.json → gpu-nodes.json and edit locally.
+gpu-nodes.json
+
+# Python bytecode
+__pycache__/
+*.pyc
+
+# Test/playwright artifacts
+test-results/
 
 # OS files
 .DS_Store

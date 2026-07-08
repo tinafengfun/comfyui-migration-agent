@@ -5,7 +5,9 @@ import type {
   ArtifactRecord,
   HumanDecision,
   SubJob,
-  ProgressNarrative
+  ProgressNarrative,
+  GpuNodeWriteRequest,
+  GpuNodeVerifyResult
 } from "../../shared/types";
 
 export type ArtifactListItem = Pick<ArtifactRecord, "relativePath" | "kind" | "path">;
@@ -23,12 +25,16 @@ export function useApi() {
     return data.tasks;
   }, []);
 
-  const createTask = useCallback(async (file: File): Promise<MigrationTask> => {
+  const createTask = useCallback(async (file: File, gpuNode?: string): Promise<MigrationTask> => {
     const workflowJson = JSON.parse(await file.text());
     const res = await fetch("/api/tasks", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ workflowFileName: file.name, workflowJson }),
+      body: JSON.stringify({
+        workflowFileName: file.name,
+        workflowJson,
+        ...(gpuNode ? { gpuNode } : {})
+      }),
     });
     if (!res.ok) throw new Error(await res.text());
     const data = await res.json();
@@ -158,11 +164,86 @@ export function useApi() {
     return res.json();
   }, []);
 
+  const fetchGateSignal = useCallback(async (taskId: string, stepId: string): Promise<{
+    gated?: boolean;
+    category?: string;
+    reason?: string;
+    items?: Array<{ name: string; kind: string; action: string }>;
+  } | null> => {
+    const res = await fetch(
+      `/api/tasks/${taskId}/artifacts/content?path=artifacts/${stepId}-gate-signal.json`
+    );
+    if (!res.ok) return null;
+    try {
+      return JSON.parse(await res.text());
+    } catch {
+      return null;
+    }
+  }, []);
+
+  const fetchGpuNodes = useCallback(async (): Promise<{
+    default: string;
+    nodes: Array<{
+      name: string;
+      kind: "local" | "ssh";
+      vram_gb?: number;
+      comfyui_root: string;
+      venv_python: string;
+      model_roots: string[];
+      api_host: string;
+      api_port: number;
+      launch_flags?: string[];
+      ssh?: { host: string; user: string; port?: number; key_configured: boolean; remote_workspace_root?: string };
+      model_share?: "nfs_same_path" | "none";
+    }>;
+  }> => {
+    const res = await fetch("/api/gpu-nodes");
+    if (!res.ok) throw new Error(await res.text());
+    return res.json();
+  }, []);
+
+  const createGpuNode = useCallback(async (node: GpuNodeWriteRequest): Promise<Awaited<ReturnType<typeof fetchGpuNodes>>> => {
+    const res = await fetch("/api/gpu-nodes", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(node)
+    });
+    if (!res.ok) throw new Error(await res.text());
+    return res.json();
+  }, []);
+
+  const updateGpuNode = useCallback(async (name: string, node: GpuNodeWriteRequest): Promise<Awaited<ReturnType<typeof fetchGpuNodes>>> => {
+    const res = await fetch(`/api/gpu-nodes/${encodeURIComponent(name)}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(node)
+    });
+    if (!res.ok) throw new Error(await res.text());
+    return res.json();
+  }, []);
+
+  const deleteGpuNode = useCallback(async (name: string): Promise<Awaited<ReturnType<typeof fetchGpuNodes>>> => {
+    const res = await fetch(`/api/gpu-nodes/${encodeURIComponent(name)}`, { method: "DELETE" });
+    if (!res.ok) throw new Error(await res.text());
+    return res.json();
+  }, []);
+
+  const verifyGpuNode = useCallback(async (input: { name?: string; node?: GpuNodeWriteRequest }): Promise<GpuNodeVerifyResult> => {
+    const res = await fetch("/api/gpu-nodes/verify", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input)
+    });
+    if (!res.ok) throw new Error(await res.text());
+    return res.json();
+  }, []);
+
   return {
     fetchSteps, fetchTasks, createTask, deleteTask,
     runUntilGate, runStep, resumeStep, rerunStep, hardStop,
     answerQuestion, uploadMedia, fetchArtifacts, fetchArtifactContent,
     fetchDecisions, fetchSubJobs, fetchProgressNarrative,
-    fetchHealth, runPreflight, generateRunReport
+    fetchHealth, runPreflight, generateRunReport, fetchGateSignal, fetchGpuNodes,
+    createGpuNode, updateGpuNode, deleteGpuNode, verifyGpuNode
   };
 }

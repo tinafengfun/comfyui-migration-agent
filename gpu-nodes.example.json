@@ -1,0 +1,46 @@
+{
+  "_comment": "Template GPU-node registry. Copy to gpu-nodes.json (gitignored) and edit paths for this host. The first/local node is what the agent launches ComfyUI on by default. See docs/deployment.md and docs/gpu-node-setup.md.",
+  "default_node": "local-xpu",
+  "nodes": [
+    {
+      "name": "local-xpu",
+      "kind": "local",
+      "comfyui_root": "/path/to/ComfyUI",
+      "venv_python": "/path/to/ComfyUI/.venv/bin/python3",
+      "model_roots": [
+        "/path/to/models"
+      ],
+      "api_host": "127.0.0.1",
+      "api_port": 8188,
+      "launch_flags": [
+        "--reserve-vram",
+        "1"
+      ],
+      "vram_gb": 24
+    },
+    {
+      "_comment": "Optional remote SSH node. Register one with: npx tsx scripts/bootstrap-gpu-node.mts --name <host> --host <ip> --user <user> ...",
+      "name": "remote-example",
+      "kind": "ssh",
+      "comfyui_root": "/home/intel/ComfyUI",
+      "venv_python": "/home/intel/ComfyUI/.venv-xpu/bin/python3",
+      "model_roots": [
+        "/home/intel/hf_models"
+      ],
+      "api_host": "172.16.124.12",
+      "api_port": 8188,
+      "launch_flags": [
+        "--reserve-vram",
+        "1"
+      ],
+      "vram_gb": 24,
+      "model_share": "nfs_same_path",
+      "ssh": {
+        "host": "172.16.124.12",
+        "user": "intel",
+        "port": 22,
+        "key_path": "/home/intel/.ssh/id_ed25519"
+      }
+    }
+  ]
+}

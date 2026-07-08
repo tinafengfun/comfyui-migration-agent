@@ -51,6 +51,8 @@ export interface MigrationTask {
   createdAt: string;
   updatedAt: string;
   steps: MigrationStepState[];
+  /** Selected GPU node name from gpu-nodes.json. Undefined = use registry default. */
+  gpuNode?: string;
 }
 
 export interface ArtifactRecord {
@@ -220,12 +222,53 @@ export interface StepJob {
   learnedRules?: string;
   /** Recipe library section (§L hard-injection layer). Populated for steps 02/04/05. */
   matchedRecipes?: string;
+  /** Skill library section (§M soft-injection layer). Populated when on-demand triggers match. */
+  matchedSkills?: string;
+  /**
+   * GPU node block injected when the task is pinned to a node in gpu-nodes.json.
+   * Step 05 skill branches on `kind` (local vs ssh) using this block. Undefined
+   * means synthesized default local node — agent uses existing local-launch flow.
+   */
+  gpuNodeBlock?: string;
 }
 
 export interface CreateTaskRequest {
   name?: string;
   workflowFileName: string;
   workflowJson: unknown;
+  /** Optional GPU node name from gpu-nodes.json. Falls back to registry default. */
+  gpuNode?: string;
+}
+
+/**
+ * Wire shape for POST/PUT /api/gpu-nodes. Structurally identical to GpuNode
+ * (in src/server/gpuNodes.ts) but declared here so the client doesn't import
+ * server-only modules. ssh.key_path is accepted on write but masked on read.
+ */
+export interface GpuNodeWriteRequest {
+  name: string;
+  kind: "local" | "ssh";
+  vram_gb?: number;
+  comfyui_root: string;
+  venv_python: string;
+  model_roots: string[];
+  api_host: string;
+  api_port: number;
+  launch_flags?: string[];
+  ssh?: {
+    host: string;
+    user: string;
+    port?: number;
+    key_path?: string;
+    remote_workspace_root?: string;
+  };
+  model_share?: "nfs_same_path" | "none";
+}
+
+/** Response from POST /api/gpu-nodes/verify. */
+export interface GpuNodeVerifyResult {
+  ok: boolean;
+  detail: string;
 }
 
 export interface CreateTaskResponse {

@@ -54,7 +54,7 @@
                   },
                   "nodeType": {
                     "type": "string",
-                    "description": "ComfyUI node class name."
+                    "description": "ComfyUI node class name. Supports glob patterns, e.g. 'SeedVR2*' matches SeedVR2VideoUpscaler, SeedVR2LoadDiTModel, etc."
                   },
                   "modelPattern": {
                     "type": "string",
@@ -68,9 +68,9 @@
                 }
               }
             },
-            "assetPattern": { "type": "string" },
-            "nodeType": { "type": "string" },
-            "modelPattern": { "type": "string" }
+            "assetPattern": { "type": "string", "description": "Glob matched against asset filenames." },
+            "nodeType": { "type": "string", "description": "ComfyUI node class name, supports glob (e.g. 'SeedVR2*')." },
+            "modelPattern": { "type": "string", "description": "Glob matched against model filenames." }
           }
         }
       }

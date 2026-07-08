@@ -18,6 +18,7 @@ describe("migration orchestrator", () => {
       draftDocRoot: root,
       comfyuiRoot: "/tmp/comfy",
       modelRoots: ["/home/intel/hf_models"],
+      gpuNodesPath: path.join(root, "gpu-nodes.json"),
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -85,6 +86,7 @@ describe("migration orchestrator", () => {
       draftDocRoot: root,
       comfyuiRoot: "/tmp/comfy",
       modelRoots: ["/home/intel/hf_models"],
+      gpuNodesPath: path.join(root, "gpu-nodes.json"),
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -128,6 +130,7 @@ describe("migration orchestrator", () => {
       draftDocRoot: root,
       comfyuiRoot,
       modelRoots: [modelRoot],
+      gpuNodesPath: path.join(root, "gpu-nodes.json"),
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -203,6 +206,7 @@ describe("migration orchestrator", () => {
       draftDocRoot: root,
       comfyuiRoot: path.join(root, "ComfyUI"),
       modelRoots: [path.join(root, "models")],
+      gpuNodesPath: path.join(root, "gpu-nodes.json"),
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -265,6 +269,7 @@ describe("migration orchestrator", () => {
       draftDocRoot: root,
       comfyuiRoot: path.join(root, "ComfyUI"),
       modelRoots: [path.join(root, "models")],
+      gpuNodesPath: path.join(root, "gpu-nodes.json"),
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -331,6 +336,7 @@ describe("migration orchestrator", () => {
       draftDocRoot: root,
       comfyuiRoot: path.join(root, "ComfyUI"),
       modelRoots: [modelRoot],
+      gpuNodesPath: path.join(root, "gpu-nodes.json"),
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -403,6 +409,7 @@ describe("migration orchestrator", () => {
       draftDocRoot: root,
       comfyuiRoot: path.join(root, "ComfyUI"),
       modelRoots: [path.join(root, "models")],
+      gpuNodesPath: path.join(root, "gpu-nodes.json"),
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -462,6 +469,7 @@ describe("migration orchestrator", () => {
       draftDocRoot: root,
       comfyuiRoot: path.join(root, "ComfyUI"),
       modelRoots: [path.join(root, "models")],
+      gpuNodesPath: path.join(root, "gpu-nodes.json"),
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -539,6 +547,7 @@ describe("migration orchestrator", () => {
       draftDocRoot: root,
       comfyuiRoot: path.join(root, "ComfyUI"),
       modelRoots: [initialModelRoot],
+      gpuNodesPath: path.join(root, "gpu-nodes.json"),
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -603,6 +612,7 @@ describe("migration orchestrator", () => {
       draftDocRoot: root,
       comfyuiRoot: path.join(root, "ComfyUI"),
       modelRoots: [path.join(root, "models")],
+      gpuNodesPath: path.join(root, "gpu-nodes.json"),
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -654,6 +664,7 @@ describe("migration orchestrator", () => {
       draftDocRoot: root,
       comfyuiRoot: "/tmp/comfy",
       modelRoots: ["/home/intel/hf_models"],
+      gpuNodesPath: path.join(root, "gpu-nodes.json"),
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -697,6 +708,7 @@ describe("migration orchestrator", () => {
       draftDocRoot: root,
       comfyuiRoot: "/tmp/comfy",
       modelRoots: ["/home/intel/hf_models"],
+      gpuNodesPath: path.join(root, "gpu-nodes.json"),
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -737,6 +749,7 @@ describe("migration orchestrator", () => {
       draftDocRoot: root,
       comfyuiRoot: "/tmp/comfy",
       modelRoots: ["/home/intel/hf_models"],
+      gpuNodesPath: path.join(root, "gpu-nodes.json"),
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -797,6 +810,7 @@ describe("migration orchestrator", () => {
       draftDocRoot: root,
       comfyuiRoot: "/tmp/comfy",
       modelRoots: ["/home/intel/hf_models"],
+      gpuNodesPath: path.join(root, "gpu-nodes.json"),
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -859,6 +873,7 @@ describe("migration orchestrator", () => {
       draftDocRoot: root,
       comfyuiRoot: "/tmp/comfy",
       modelRoots: ["/home/intel/hf_models"],
+      gpuNodesPath: path.join(root, "gpu-nodes.json"),
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -920,6 +935,7 @@ describe("migration orchestrator", () => {
       draftDocRoot: root,
       comfyuiRoot: "/tmp/comfy",
       modelRoots: ["/home/intel/hf_models"],
+      gpuNodesPath: path.join(root, "gpu-nodes.json"),
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -969,6 +985,7 @@ describe("migration orchestrator", () => {
       draftDocRoot: root,
       comfyuiRoot: "/tmp/comfy",
       modelRoots: ["/home/intel/hf_models"],
+      gpuNodesPath: path.join(root, "gpu-nodes.json"),
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -1044,6 +1061,7 @@ describe("migration orchestrator", () => {
       draftDocRoot: root,
       comfyuiRoot: "/tmp/comfy",
       modelRoots: ["/home/intel/hf_models"],
+      gpuNodesPath: path.join(root, "gpu-nodes.json"),
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -1095,6 +1113,7 @@ describe("migration orchestrator", () => {
       draftDocRoot: root,
       comfyuiRoot: path.join(root, "ComfyUI"),
       modelRoots: [path.join(root, "models")],
+      gpuNodesPath: path.join(root, "gpu-nodes.json"),
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -1143,6 +1162,7 @@ describe("migration orchestrator", () => {
       draftDocRoot: root,
       comfyuiRoot: path.join(root, "ComfyUI"),
       modelRoots: [path.join(root, "models")],
+      gpuNodesPath: path.join(root, "gpu-nodes.json"),
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -1190,6 +1210,7 @@ describe("migration orchestrator", () => {
       draftDocRoot: root,
       comfyuiRoot: "/tmp/comfy",
       modelRoots: ["/home/intel/hf_models"],
+      gpuNodesPath: path.join(root, "gpu-nodes.json"),
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -1234,6 +1255,7 @@ describe("migration orchestrator", () => {
       draftDocRoot: root,
       comfyuiRoot: "/tmp/comfy",
       modelRoots: ["/home/intel/hf_models"],
+      gpuNodesPath: path.join(root, "gpu-nodes.json"),
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);

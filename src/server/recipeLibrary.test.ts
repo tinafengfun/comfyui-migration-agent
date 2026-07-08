@@ -5,10 +5,10 @@ import path from "node:path";
 import { loadAllRecipes, findRecipesForNode, findRecipeById } from "./recipeLibrary";
 
 const CLILOADER_FP8 = {
-  recipeId: "CLIPLoader-qwen25-vl-fp8",
+  recipeId: "CLIPLoader-qwen-fp8",
   version: "1.0.0",
   nodeType: "CLIPLoader",
-  modelPattern: "qwen_*_vl_*_fp8*.safetensors",
+  modelPattern: "*qwen*fp8*.safetensors",
   xpuSupport: "patched",
   patchClass: "functional_runtime_support",
   patchFile: "patches/xpu-bug-investigation/0001-xpu-fp8-fallback.patch",
@@ -31,7 +31,7 @@ beforeEach(async () => {
   recipesRoot = await mkdtemp(path.join(tmpdir(), "recipes-"));
   await mkdir(path.join(recipesRoot, "nodes"), { recursive: true });
   await writeFile(
-    path.join(recipesRoot, "nodes", "CLIPLoader-qwen25-vl-fp8.json"),
+    path.join(recipesRoot, "nodes", "CLIPLoader-qwen-fp8.json"),
     JSON.stringify(CLILOADER_FP8, null, 2)
   );
   await writeFile(
@@ -51,7 +51,7 @@ describe("recipeLibrary.loadAllRecipes", () => {
     expect(invalid).toHaveLength(0);
     expect(recipes).toHaveLength(2);
     // Sort order: alphabetical by recipeId.
-    expect(recipes[0].recipeId).toBe("CLIPLoader-qwen25-vl-fp8");
+    expect(recipes[0].recipeId).toBe("CLIPLoader-qwen-fp8");
     expect(recipes[1].recipeId).toBe("VAELoader-generic");
   });
 
@@ -91,7 +91,7 @@ describe("recipeLibrary.loadAllRecipes", () => {
 describe("recipeLibrary.findRecipesForNode", () => {
   it("returns all recipes for a nodeType when modelFilename is omitted", () => {
     const list = findRecipesForNode("CLIPLoader", undefined, recipesRoot);
-    expect(list.map((r) => r.recipeId)).toEqual(["CLIPLoader-qwen25-vl-fp8"]);
+    expect(list.map((r) => r.recipeId)).toEqual(["CLIPLoader-qwen-fp8"]);
   });
 
   it("matches recipes whose modelPattern glob fits the filename", () => {
@@ -100,7 +100,7 @@ describe("recipeLibrary.findRecipesForNode", () => {
       "qwen_2.5_vl_7b_fp8_scaled.safetensors",
       recipesRoot
     );
-    expect(matches.map((r) => r.recipeId)).toEqual(["CLIPLoader-qwen25-vl-fp8"]);
+    expect(matches.map((r) => r.recipeId)).toEqual(["CLIPLoader-qwen-fp8"]);
   });
 
   it("returns empty when the glob does not match", () => {
@@ -127,8 +127,8 @@ describe("recipeLibrary.findRecipesForNode", () => {
 
 describe("recipeLibrary.findRecipeById", () => {
   it("finds by exact recipeId", () => {
-    const r = findRecipeById("CLIPLoader-qwen25-vl-fp8", recipesRoot);
-    expect(r?.recipeId).toBe("CLIPLoader-qwen25-vl-fp8");
+    const r = findRecipeById("CLIPLoader-qwen-fp8", recipesRoot);
+    expect(r?.recipeId).toBe("CLIPLoader-qwen-fp8");
     expect(r?.patchFile).toMatch(/0001-xpu-fp8/);
   });
 
@@ -141,13 +141,13 @@ describe("recipeLibrary against the real recipes/ dir", () => {
   // This test reads the actual repo recipe. Skip if running in a context
   // where the repo root is not the cwd (e.g. some CI sandboxes). The point
   // is to catch regressions to the committed recipe.
-  it("loads the committed CLIPLoader-qwen25-vl-fp8 recipe without errors", () => {
+  it("loads the committed CLIPLoader-qwen-fp8 recipe without errors", () => {
     // Use the default recipesRoot by passing the project-relative path.
     const realRoot = path.resolve(__dirname, "..", "..", "recipes");
     const result = loadAllRecipes(realRoot);
     expect(result.unparseable).toEqual([]);
     expect(result.invalid).toEqual([]);
-    const ours = result.recipes.find((r) => r.recipeId === "CLIPLoader-qwen25-vl-fp8");
+    const ours = result.recipes.find((r) => r.recipeId === "CLIPLoader-qwen-fp8");
     expect(ours).toBeDefined();
     expect(ours?.xpuSupport).toBe("patched");
     expect(ours?.patchFile).toMatch(/xpu-fp8-fallback/);

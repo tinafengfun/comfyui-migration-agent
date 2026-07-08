@@ -41,24 +41,47 @@ Use to create a reproducible Intel XPU ComfyUI baseline.
    - **If Step 02 decided `fp8_te_path_chosen: "ops_py_patch"`**, apply `xpu-bug-investigation/0001-xpu-fp8-fallback-dequantize-before-move-to-xpu.patch` to `comfy/ops.py` here (or carry the equivalent change from the upstream ComfyUI fork). Verify with `git diff comfy/ops.py` that `_quantized_apply` now contains the `_is_fp8_quantized_tensor` + `_probe_device` + `dequantize-before-move-to-xpu` block. The patch is the prerequisite for keeping FP8 TEs on XPU without segfault.
    - **If Step 02 decided `fp8_te_path_chosen: "cpu_offload"`**, no `ops.py` patch is needed; the CLIPLoader widget `device=cpu` override is delivered as a runtime-policy JSON patch in Step 08 instead.
    - **If Step 02 decided `fp8_te_checkpoint_stripped: true`**, ensure the stripped `<name>_text_only.safetensors` is the file referenced by the CLIPLoader widget, not the original.
-8. Launch ComfyUI from the ComfyUI root, **not** from the task workspace. The SDK session's working directory is the workspace, so an unqualified `python3 main.py` inherits the wrong CWD and Python's `sys.path[0]` will not contain the ComfyUI root. Always launch with an explicit `cd`:
+8. Launch ComfyUI from the ComfyUI root, **not** from the task workspace. The SDK session's working directory is the workspace, so an unqualified `python3 main.py` inherits the wrong CWD and Python's `sys.path[0]` will not contain the ComfyUI root. **Branch on the `## GPU node` block injected at the top of this step's prompt:**
+
+   ### kind=local (existing flow)
 
    ```bash
    cd "${COMFYUI_ROOT}" && \
-   python3 main.py \
+   "${VENV_PYTHON}" main.py \
      --port "${COMFYUI_PORT:-8188}" \
      --listen 127.0.0.1 \
      --extra-model-paths-yaml "${WORKSPACE}/artifacts/05-extra-model-paths.yaml" \
      --output-directory "${WORKSPACE}/outputs" \
-     <conservative Intel XPU flags, e.g. --disable-gpu --reserve-vram 1 --disable-dynamic-vram>
+     <conservative Intel XPU flags, e.g. --reserve-vram 1 --disable-dynamic-vram>
    ```
 
-   Notes:
-   - `cd "${COMFYUI_ROOT}" &&` is the load-bearing part — without it, `from utils.install_util import ...` and other top-level imports can fail.
-   - Run the launch in the background (`nohup ... &` or detached shell) and poll `http://127.0.0.1:${COMFYUI_PORT}/system_stats` until it responds before claiming readiness.
-   - Record the exact launch command in the environment summary as `launch_command`. Subsequent steps (07, 08, 12) inherit this server; do not relaunch unless the process died.
+   Run in the background (`nohup ... &` or detached shell) and poll `http://127.0.0.1:${COMFYUI_PORT}/system_stats` until it responds.
+
+   ### kind=ssh (remote large-VRAM node)
+
+   The remote node's `comfyui_root`, `venv_python`, `model_roots`, and SSH details are in the `## GPU node` block. Models and custom nodes must already exist on the remote — see `docs/gpu-node-setup.md`. NFS-same-path means the same `model_roots` strings are valid on both sides; do not sync models.
+
+   ```bash
+   ssh -p ${SSH_PORT} ${SSH_KEY_OPT} ${SSH_USER}@${SSH_HOST} \
+     "cd '${REMOTE_COMFYUI_ROOT}' && \
+       nohup '${REMOTE_VENV_PYTHON}' main.py \
+         --port ${COMFYUI_PORT:-8188} \
+         --listen 0.0.0.0 \
+         > /tmp/comfyui-${TASK_ID}.log 2>&1 &"
+   ```
+
+   Then from the migration agent poll the **remote** API URL `${API_URL}/system_stats` until it responds (usually 10–60s). The local workspace path is not valid on the remote — skip `--extra-model-paths-yaml` and `--output-directory`. Outputs are fetched later via the `/view` and `/history` HTTP APIs from Steps 07/08.
+
+   Use `--listen 0.0.0.0` on the remote so the migration agent can reach it across the network. Do NOT use `--listen 127.0.0.1` for an ssh node — the agent's HTTP calls will time out.
+
+   ### Common notes (both kinds)
+
+   - `cd "${COMFYUI_ROOT}" &&` (local) or `cd '${REMOTE_COMFYUI_ROOT}' &&` (ssh) is load-bearing — without it, `from utils.install_util import ...` and other top-level imports can fail.
+   - Record the exact launch command in `05-environment-summary.json` as `launch_command`, plus `api_url` (e.g. `http://172.16.114.200:8188`) and `node_kind` (`local` or `ssh`) so Steps 07/08 and the orchestrator's `killComfyUIForTask` know how to reach and tear down the server.
+   - Subsequent steps (07, 08, 12) inherit this server; do not relaunch unless the process died.
    - Conservative default flags: prefer `--reserve-vram 1` and `--disable-dynamic-vram` for smoke; widen only when Step 08 capacity evidence permits.
    - If the workflow selected CPU-only placement (e.g. FP8 TE CPU-offload path), launch with `--cpu` and pin CLIPLoader `device=cpu` via runtime-policy JSON in Step 08 rather than relaunching.
+   - The orchestrator's `killComfyUIForTask` routes on `node_kind`: local → `pgrep -f main.py.*${WORKSPACE}`; ssh → SSH `pkill -f 'main.py.*--port ${COMFYUI_PORT}'`. The agent does not need to tear down manually on rerun.
 9. Verify startup and backend node registration through `/system_stats` and `/object_info`.
 10. For frontend-only LiteGraph nodes, record source evidence from web extension registration code instead of requiring `/object_info`.
 11. Preserve logs and API evidence before moving to prompt validation.
@@ -66,7 +89,7 @@ Use to create a reproducible Intel XPU ComfyUI baseline.
 
 ## Reusable readiness collector
 
-Use the Step 05 collector when available:
+Use the Step 05 collector when available. For `kind=ssh`, the `--api-url` must point at the remote node, and `--comfy-root` / `--venv` are local paths used only for evidence-reading (the tool does not SSH on its own — gather remote evidence via `ssh ... python3 -c "..."` or by reading `/system_stats` over HTTP):
 
 ```bash
 python3 ComfyUI/docs/draft/migration-workflow-v2/tools/step05_environment_readiness.py \
@@ -74,10 +97,10 @@ python3 ComfyUI/docs/draft/migration-workflow-v2/tools/step05_environment_readin
   --comfy-root <ComfyUI root> \
   --venv <ComfyUI root>/.venv-xpu \
   --link-staged-custom-nodes \
-  --api-url http://127.0.0.1:<port>
+  --api-url <http://API_HOST:API_PORT from the GPU node block>
 ```
 
-The tool creates safe custom-node symlinks, writes `05-extra-model-paths.yaml`, collects XPU/venv/API evidence, writes registration/model/dependency ledgers, and generates `05-environment-summary.json` plus `05-output-manifest.json`. It must not overwrite custom-node collisions, install packages, edit source workflow JSON, or apply source patches.
+The tool creates safe custom-node symlinks (local only — for ssh nodes, custom nodes are pre-installed on the remote per `docs/gpu-node-setup.md`), writes `05-extra-model-paths.yaml`, collects XPU/venv/API evidence, writes registration/model/dependency ledgers, and generates `05-environment-summary.json` plus `05-output-manifest.json`. It must not overwrite custom-node collisions, install packages, edit source workflow JSON, or apply source patches.
 
 ## Environment baseline table
 

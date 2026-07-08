@@ -1,11 +1,14 @@
 {
-  "recipeId": "CLIPLoader-qwen25-vl-fp8",
-  "version": "1.0.0",
+  "recipeId": "CLIPLoader-qwen-fp8",
+  "version": "1.2.0",
   "nodeType": "CLIPLoader",
-  "modelPattern": "qwen_*_vl_*_fp8*.safetensors",
+  "modelPattern": "*fp8*.safetensors",
   "xpuSupport": "patched",
   "patchClass": "functional_runtime_support",
   "patchFile": "patches/xpu-bug-investigation/0001-xpu-fp8-fallback-dequantize-before-move-to-xpu.patch",
+  "patchTarget": "comfy/ops.py::_quantized_apply",
+  "validationCommand": "python -c \"import torch; t=torch.zeros(1,dtype=torch.float8_e4m3fn); assert t.to('xpu').device.type=='xpu'; print('FP8 XPU OK')\"",
+  "baseVersion": "comfy_kitchen@0e1a2f3",
   "knownIssues": [
     "comfy_kitchen QTensor.clone() segfaults on .to('xpu') when the FP8 quantized text encoder is moved to Intel XPU directly.",
     "fp8 -> bf16 dequant roughly doubles activation memory; pair with a VRAM gate.",
@@ -23,7 +26,7 @@
       "tradeoff": "First-prompt latency increases by seconds-to-tens-of-seconds depending on prompt length. Throughput after cache is unaffected."
     },
     {
-      "action": "If the checkpoint contains unused visual/lm_head buckets (common for text-only fine-tunes of qwen2.5-vl), strip them to a *_text_only.safetensors file and point CLIPLoader at the stripped file.",
+      "action": "If the checkpoint is a VL model with unused visual/lm_head buckets (common for text-only fine-tunes), strip them to a *_text_only.safetensors file and point CLIPLoader at the stripped file.",
       "rationale": "Smaller file loads faster, uses less RAM during dequant, and avoids loading buckets the text-only ComfyUI workflow never touches.",
       "tradeoff": "One-time preprocessing step; the stripped file must be referenced consistently thereafter."
     }

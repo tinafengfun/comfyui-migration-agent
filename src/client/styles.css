@@ -21,6 +21,123 @@ button, input, select, textarea { font: inherit; }
 .app-header h1 { font-size: 18px; margin: 0; font-weight: 700; }
 .header-left { display: flex; align-items: center; gap: 12px; }
 .header-actions { display: flex; align-items: center; gap: 8px; }
+.gpu-node-select {
+  padding: 6px 8px;
+  font-size: 13px;
+  border: 1px solid #cbd5e1;
+  border-radius: 4px;
+  background: #fff;
+  color: #0f172a;
+  max-width: 220px;
+}
+
+/* ── GPU Node Manager ── */
+.gpu-node-manager-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 50;
+}
+.gpu-node-manager {
+  background: #fff;
+  border-radius: 8px;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2);
+  width: min(900px, 92vw);
+  max-height: 88vh;
+  overflow-y: auto;
+  padding: 20px 24px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.gpu-node-manager-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.gpu-node-manager-header h2 { margin: 0; font-size: 18px; }
+.gpu-node-list { display: flex; flex-direction: column; gap: 10px; }
+.gpu-node-card {
+  border: 1px solid #e2e8f0;
+  border-left: 3px solid #94a3b8;
+  border-radius: 6px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  background: #f8fafc;
+}
+.gpu-node-card.ssh { border-left-color: #2563eb; }
+.gpu-node-card.local { border-left-color: #16a34a; }
+.gpu-node-card-header {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  flex-wrap: wrap;
+}
+.gpu-node-card-header .tag {
+  background: #fef3c7;
+  color: #92400e;
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 3px;
+}
+.gpu-node-card-path {
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  font-size: 12px;
+  color: #334155;
+  word-break: break-all;
+}
+.gpu-node-card-actions { display: flex; gap: 6px; margin-top: 4px; }
+.gpu-node-verify { font-size: 12px; padding: 4px 6px; border-radius: 3px; }
+.gpu-node-verify.ok { background: #dcfce7; color: #166534; }
+.gpu-node-verify.fail { background: #fee2e2; color: #991b1b; }
+.gpu-node-tip { font-size: 12px; }
+.gpu-node-tip code {
+  background: #f1f5f9;
+  padding: 1px 4px;
+  border-radius: 3px;
+  font-family: ui-monospace, SFMono-Regular, monospace;
+}
+.gpu-node-form {
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  padding: 14px;
+  background: #f8fafc;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.gpu-node-form h3 { margin: 0; font-size: 15px; }
+.gpu-node-form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 8px 12px;
+}
+.gpu-node-form-grid label {
+  display: flex;
+  flex-direction: column;
+  font-size: 12px;
+  color: #475569;
+  gap: 3px;
+}
+.gpu-node-form-grid input,
+.gpu-node-form-grid select {
+  padding: 5px 7px;
+  border: 1px solid #cbd5e1;
+  border-radius: 3px;
+  font-size: 13px;
+  color: #0f172a;
+}
+.gpu-node-form-actions { display: flex; gap: 6px; justify-content: flex-end; }
+.btn-sm {
+  padding: 3px 9px !important;
+  font-size: 12px !important;
+  min-height: auto !important;
+}
 
 .health-dot {
   width: 8px; height: 8px; border-radius: 50%; background: #ef4444;
@@ -336,3 +453,58 @@ button, input, select, textarea { font: inherit; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: #d1d5db; border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: #9ca3af; }
+
+/* ── Asset Upload Panel ── */
+.asset-upload-panel {
+  background: #fffbeb; border: 2px solid #f59e0b; border-radius: 10px;
+  padding: 16px; margin-bottom: 12px;
+}
+.asset-upload-header {
+  display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px;
+}
+.asset-upload-badge {
+  background: #f59e0b; color: white; font-size: 11px; font-weight: 700;
+  padding: 3px 10px; border-radius: 999px; text-transform: uppercase; letter-spacing: 0.5px;
+}
+.asset-item-list { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; }
+.asset-item-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 10px; border-radius: 6px; background: #fff;
+  border: 1px solid #e5e7eb; transition: border-color 0.2s;
+}
+.asset-item-row.uploading { border-color: #3b82f6; background: #eff6ff; }
+.asset-item-row.resolved { border-color: #22c55e; background: #f0fdf4; }
+.asset-item-row.failed { border-color: #ef4444; background: #fef2f2; }
+.asset-item-status-icon { font-size: 16px; flex-shrink: 0; }
+.asset-item-info { flex: 1; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.asset-item-name { font-size: 13px; font-weight: 600; word-break: break-all; }
+.asset-item-kind { font-size: 11px; color: #6b7280; }
+.asset-item-error { font-size: 11px; color: #ef4444; }
+.asset-empty { padding: 8px; font-size: 13px; }
+.btn-sm { font-size: 12px; padding: 3px 10px; }
+.asset-drop-zone {
+  border: 2px dashed #d1d5db; border-radius: 8px; padding: 16px;
+  text-align: center; cursor: pointer; transition: border-color 0.2s, background 0.2s;
+  font-size: 13px; color: #6b7280;
+}
+.asset-drop-zone:hover { border-color: #3b82f6; background: #eff6ff; color: #1d4ed8; }
+.asset-drop-icon { font-size: 20px; margin-right: 6px; }
+.asset-bulk-msg {
+  margin-top: 8px; padding: 6px 10px; border-radius: 6px;
+  background: #e0e7ff; font-size: 12px; color: #4338ca;
+}
+.asset-unmatched {
+  margin-top: 10px; padding: 10px; border-radius: 6px; background: #fef3c7;
+}
+.asset-unmatched-title { font-size: 12px; font-weight: 600; margin: 0 0 6px; color: #92400e; }
+.asset-unmatched-row {
+  display: flex; align-items: center; gap: 8px; margin-bottom: 4px;
+}
+.asset-unmatched-name { font-size: 12px; flex: 1; word-break: break-all; }
+.asset-unmatched-row select {
+  font-size: 12px; border: 1px solid #d1d5db; border-radius: 4px; padding: 2px 6px;
+}
+.asset-choices {
+  display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px;
+  padding-top: 12px; border-top: 1px solid #fde68a;
+}

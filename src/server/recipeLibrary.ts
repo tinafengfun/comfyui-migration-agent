@@ -41,6 +41,9 @@ export interface Recipe {
   xpuSupport: "native" | "patched" | "cpu_offload" | "unsupported" | "unknown";
   patchClass?: "registration_only" | "functional_runtime_support" | "runtime_policy" | "none";
   patchFile?: string;
+  patchTarget?: string;
+  validationCommand?: string;
+  baseVersion?: string;
   knownIssues: string[];
   workarounds?: Array<{
     action: string;

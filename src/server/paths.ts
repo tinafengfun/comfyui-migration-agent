@@ -83,7 +83,11 @@ export const GLOBAL_DIRS = {
   /** Out-of-band debug archives, pruned by cron (design §C). */
   debugArchivesRoot: resolveGlobal(process.env.MIGRATION_DEBUG_ARCHIVES_DIR, "debug-archives"),
   /** Aggregated analytics DB (design §H). */
-  analyticsDb: resolveGlobal(process.env.MIGRATION_ANALYTICS_DB, ".demo-state/analytics.sqlite")
+  analyticsDb: resolveGlobal(process.env.MIGRATION_ANALYTICS_DB, ".demo-state/analytics.sqlite"),
+  /** Skills registry file — active/retired lists (design §5.2/§M). */
+  skillsRegistry: resolveGlobal(process.env.MIGRATION_SKILLS_REGISTRY, ".demo-state/skills-registry.json"),
+  /** Protocol docs — single-context files injected when matching recipes need them (e.g. patch adaptation). */
+  protocolsRoot: resolveGlobal(process.env.MIGRATION_PROTOCOLS_DIR, "prompts/migration-workflow-v2/protocols")
 } as const;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -124,6 +128,14 @@ export function taskEscalationDir(workspaceRoot: string, taskId: string): string
 
 export function taskEscalationSummaryPath(workspaceRoot: string, taskId: string): string {
   return path.join(taskEscalationDir(workspaceRoot, taskId), TASK_FILES.escalationSummary);
+}
+
+/**
+ * Skills directory under the draft-doc root. On-demand skill .md files
+ * (with YAML frontmatter) live here alongside the existing core skills.
+ */
+export function skillsDir(draftDocRoot: string): string {
+  return path.join(draftDocRoot, "migration-workflow-v2", "skills");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -52,6 +52,18 @@
       "type": "string",
       "description": "Repo-relative path to the patch file under patches/."
     },
+    "patchTarget": {
+      "type": "string",
+      "description": "File(s) and symbol(s) the patch modifies, e.g. 'src/optimization/memory_manager.py::get_vram_usage, src/interfaces/video_upscaler.py'. Helps ast-grep and LLM adaptation locate code during patch adaptation."
+    },
+    "validationCommand": {
+      "type": "string",
+      "description": "Shell command (run from the package root) that exits 0 if the patch achieved its goal. Used by the patch adaptation protocol to verify success."
+    },
+    "baseVersion": {
+      "type": "string",
+      "description": "Package commit the patch was authored against, e.g. 'numz/ComfyUI-SeedVR2_VideoUpscaler@4490bd1'. Used to detect version drift and pick the adaptation layer."
+    },
     "knownIssues": {
       "type": "array",
       "description": "Concrete failure signatures, with root cause if known.",

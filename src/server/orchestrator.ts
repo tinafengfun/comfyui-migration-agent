@@ -56,7 +56,10 @@ import type { StateStore } from "./state";
 import { ensureStepArtifactScaffold } from "./stepArtifactScaffold";
 import { createTaskWorkspace, deleteTaskWorkspace, getLayoutForTask } from "./taskWorkspaces";
 import { STEP_OUTPUT_SUBDIR } from "./paths";
+import { appendFeedbackEvent, type FeedbackEventInput } from "./feedbackLog";
+import { recordRecipeOutcome } from "./analyticsDb";
 import { ensureWorkflowInventory } from "./workflowInventory";
+import { loadGpuNodes, pickNode, type GpuNode } from "./gpuNodes";
 
 type EventListener = (event: AgentEvent) => void;
 type QuestionEventData = Record<string, unknown> & {
@@ -113,6 +116,7 @@ export class MigrationOrchestrator {
     name: string;
     workflowFileName: string;
     workflowJson: unknown;
+    gpuNode?: string;
   }) {
     await this.prepareExclusiveNewTask();
 
@@ -130,7 +134,8 @@ export class MigrationOrchestrator {
       workflowPath: layout.workflowPath,
       workspacePath: layout.root,
       artifactPath: layout.artifactPath,
-      steps: this.steps
+      steps: this.steps,
+      ...(input.gpuNode ? { gpuNode: input.gpuNode } : {})
     });
 
     await this.store.appendArtifact({
@@ -551,6 +556,8 @@ export class MigrationOrchestrator {
         );
       }
       await this.store.updateStep(taskId, stepId, "completed", { summary });
+      // §H: record recipe outcome for analytics (fire-and-forget).
+      recordRecipeOutcome(taskId, stepId, "success");
       await this.emit({
         taskId,
         stepId,
@@ -623,13 +630,35 @@ export class MigrationOrchestrator {
           type: "progress",
           message: `Step ${stepId} paused after SDK timeout. Use resume to continue with the existing session, or re-run to start over. Reason: ${message}`
         });
+        // §G.wire: SDK hang is system-side. Capture for Step 13 + opencode escalation triage.
+        await this.recordFeedback(taskId, {
+          stepId,
+          source: "agent_self",
+          type: "agent_bug",
+          severity: "degrade",
+          message: `SDK step timeout: ${message}`,
+          proposedAction: "escalate_opencode"
+        });
       } else {
         await this.store.updateStep(taskId, stepId, "failed", { error: message });
+        // §H: record recipe outcome for analytics (fire-and-forget).
+        recordRecipeOutcome(taskId, stepId, "failed");
         await this.emit({
           taskId,
           stepId,
           type: "step_failed",
           message
+        });
+        // §G.wire: unhandled step failure. Type defaults to comfyui_bug
+        // because most runtime failures in step 05/07/08 are XPU/ComfyUI-side,
+        // not agent-side. Step 13 will reclassify if the artifact shows otherwise.
+        await this.recordFeedback(taskId, {
+          stepId,
+          source: "agent_self",
+          type: "comfyui_bug",
+          severity: "blocker",
+          message: `Step ${stepId} failed: ${message}`,
+          proposedAction: "record_only"
         });
       }
       throw error;
@@ -1001,6 +1030,19 @@ export class MigrationOrchestrator {
       answer: redactSensitiveText(rawDecision.answer)
     };
     await this.store.appendDecision(decision);
+    // §G.wire: record non-routine decisions as feedback. Routine approvals
+    // (yes/ok/continue/approve/proceed/1) don't carry useful signal — skip
+    // them to keep the feedback log focused on overrides and corrections.
+    if (!isRoutineApproval(input.answer)) {
+      await this.recordFeedback(input.taskId, {
+        stepId: input.stepId ?? "task",
+        source: "human",
+        type: "user_preference",
+        severity: severityForDecision(input.answer),
+        message: trimMessage(input.answer),
+        stateSnapshot: { extraNotes: `questionEventId=${input.questionEventId}; wasFreeform=${input.wasFreeform}` }
+      });
+    }
     const phase1RunActive = this.activeStepRuns.has(this.stepRunKey(input.taskId, "phase1"));
     // First, try to deliver the decision to an active SDK session via the broker.
     // This handles interactive steps (like Step 02) where the SDK agent asked the question.
@@ -1341,8 +1383,9 @@ export class MigrationOrchestrator {
     this.activeStepRuns.delete(runKey);
     this.approvalBroker.cancelAllForStep(stepId, `Re-run requested for step ${stepId}`);
 
-    // 0a. Kill ComfyUI processes referencing this task's workspace (Step 05+ side effects)
-    const killed = await this.killComfyUIProcessesForTask(task);
+    // 0a. Kill ComfyUI processes referencing this task's workspace (Step 05+ side effects).
+    // Routes to local pgrep or remote SSH kill based on the task's GPU node kind.
+    const killed = await this.killComfyUIForTask(task);
     if (killed > 0) {
       await this.emit({
         taskId,
@@ -1850,6 +1893,17 @@ export class MigrationOrchestrator {
       type: "hard_stop",
       message: input.reason,
       data: { reportPath, improvementStrategy: strategy }
+    });
+    // §G.wire: capture hard-stop as a feedback event for Step 13 analysis.
+    // Best-effort; never blocks the return below.
+    await this.recordFeedback(input.taskId, {
+      stepId: input.stepId ?? "task",
+      source: "human",
+      type: "agent_bug",
+      severity: "blocker",
+      message: input.reason,
+      stateSnapshot: { failingArtifactPath: reportPath },
+      proposedAction: input.improvementStrategy ? "evolve_prompt" : "record_only"
     });
     return { taskId: input.taskId, stepId: input.stepId, reason: input.reason, improvementStrategy: strategy, artifactPath: reportPath, createdAt: now };
   }
@@ -2411,6 +2465,29 @@ export class MigrationOrchestrator {
     return record;
   }
 
+  /**
+   * Best-effort feedback-event writer (§G.wire). Fire-and-forget at call
+   * sites via `await this.recordFeedback(...)`. Never throws — feedback
+   * collection must not break the main orchestrator flow.
+   *
+   * Call sites:
+   *   - terminateWithHardStop     (human explicitly stops a step)
+   *   - recordHumanDecision       (non-routine human input only)
+   *   - SDK paused                 (watchdog timeout, session kept alive)
+   *   - step failure catch block   (unhandled exception)
+   */
+  private async recordFeedback(taskId: string, input: FeedbackEventInput): Promise<void> {
+    try {
+      await appendFeedbackEvent(this.config.workspaceRoot, taskId, input);
+    } catch (e) {
+      // Swallow. The next daily-check (§J) won't surface this since the
+      // event never landed; accept the loss rather than blocking the user.
+      console.warn(
+        `[feedbackLog] write failed (task=${taskId} step=${input.stepId}): ${(e as Error).message}`
+      );
+    }
+  }
+
   private stepRunKey(taskId: string, stepId: string): string {
     return `${taskId}:${stepId}`;
   }
@@ -2478,10 +2555,23 @@ export class MigrationOrchestrator {
   }
 
   /**
-   * Kill ComfyUI processes whose command line references the task's workspace path.
-   * Used during rerunStep to clean up before restarting.
+   * Kill ComfyUI processes for a task. Routes to local pgrep or remote SSH kill
+   * based on the task's GPU node kind. Used during rerunStep + hard-stop.
    */
+  private async killComfyUIForTask(task: MigrationTask): Promise<number> {
+    const node = this.lookupTaskNode(task);
+    if (node?.kind === "ssh") {
+      return this.killRemoteComfyUI(task, node);
+    }
+    return this.killLocalComfyUI(task);
+  }
+
+  /** Backwards-compatible local-only kill; preserved for callers that want local behaviour. */
   private async killComfyUIProcessesForTask(task: MigrationTask): Promise<number> {
+    return this.killLocalComfyUI(task);
+  }
+
+  private async killLocalComfyUI(task: MigrationTask): Promise<number> {
     return new Promise((resolve) => {
       execFile("pgrep", ["-f", `main.py.*${task.workspacePath}`], (err, stdout) => {
         if (err || !stdout.trim()) {
@@ -2499,6 +2589,52 @@ export class MigrationOrchestrator {
         resolve(killed);
       });
     });
+  }
+
+  /**
+   * SSH to the remote node and kill the ComfyUI process for this task.
+   * Matches by port (each task's node has a fixed api_port) to avoid killing
+   * unrelated workloads. Returns 0 if no match or SSH failed (best-effort).
+   */
+  private async killRemoteComfyUI(task: MigrationTask, node: GpuNode): Promise<number> {
+    if (!node.ssh) return 0;
+    const port = node.api_port;
+    const sshTarget = `${node.ssh.user}@${node.ssh.host}`;
+    const sshArgs = [
+      "-p", String(node.ssh.port ?? 22),
+      ...(node.ssh.key_path ? ["-i", node.ssh.key_path] : []),
+      "-o", "BatchMode=yes",
+      "-o", "ConnectTimeout=10",
+      sshTarget,
+      `pkill -f 'main.py.*--port ${port}' || true`
+    ];
+    return new Promise((resolve) => {
+      execFile("ssh", sshArgs, { timeout: 30_000 }, (err) => {
+        if (err) {
+          console.warn(
+            `[killRemoteComfyUI] SSH kill failed for task ${task.id} on ${sshTarget}:${port} — ${err.message}`
+          );
+          resolve(0);
+          return;
+        }
+        resolve(1);
+      });
+    });
+  }
+
+  /**
+   * Look up the GpuNode a task is pinned to. Returns undefined for the
+   * synthesized-default case (which is always kind=local).
+   */
+  private lookupTaskNode(task: MigrationTask): GpuNode | undefined {
+    try {
+      const registry = loadGpuNodes(this.config);
+      const node = pickNode(registry, task.gpuNode);
+      return node;
+    } catch (err) {
+      console.warn(`[lookupTaskNode] Failed to load gpu-nodes.json: ${(err as Error).message}`);
+      return undefined;
+    }
   }
 }
 
@@ -3394,6 +3530,40 @@ function phase1BlockingReasonForStep(stepId: string): HumanQuestion["blockingRea
   if (stepId === "12") return "quality_review";
   if (stepId === "13") return "quality_review";
   return "other";
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// §G.wire helpers — decide which gate decisions become feedback events
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Short affirmations that don't carry corrective signal — skip recording. */
+const ROUTINE_APPROVALS = new Set([
+  "yes", "y", "ok", "okay", "continue", "approve", "approved",
+  "proceed", "go", "1", "true", "confirm", "confirmed"
+]);
+
+function isRoutineApproval(answer: string): boolean {
+  return ROUTINE_APPROVALS.has(answer.trim().toLowerCase());
+}
+
+/**
+ * Heuristic severity for a non-routine decision answer. Looks for stop/abort
+ * language first, then downgrade language, else default to nit.
+ */
+function severityForDecision(answer: string): "blocker" | "degrade" | "nit" {
+  const lower = answer.toLowerCase();
+  if (/\b(stop|abort|cancel|wrong|incorrect|broken|bug|fail|hard.?stop)\b/.test(lower)) {
+    return "blocker";
+  }
+  if (/\b(instead|override|prefer|rather|change|swap|replace|use)\b/.test(lower)) {
+    return "degrade";
+  }
+  return "nit";
+}
+
+/** Truncate long freeform answers so the JSONL line stays manageable. */
+function trimMessage(s: string, max = 800): string {
+  return s.length <= max ? s : `${s.slice(0, max - 20)}… [truncated]`;
 }
 
 function stringValue(value: unknown): string | undefined {

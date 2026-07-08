@@ -2,11 +2,11 @@
 
 > Companion to [docs/evolution-and-memory-design.md](evolution-and-memory-design.md).
 > This document tracks what's been built, how it fits together, and what's pending.
-> Last updated: 2026-06-24.
+> Last updated: 2026-06-25.
 
 ## At a glance
 
-Eight modules shipped. The **hard-injection layer is closed end-to-end**: a workflow with `CLIPLoader + qwen_*_vl_*_fp8*.safetensors` now gets the FP8 recipe auto-injected into the Step 02/04/05 prompt, validated against a JSON Schema, and gated by a daily cron-style check.
+Eleven modules shipped. **Both layers of the two-layer knowledge design are closed** (recipes = hard injection, skills = soft injection) and **SQLite analytics tracks real-world recipe/skill efficacy**. Feedback collection is wired into orchestrator internals. A workflow with `CLIPLoader + qwen_*_vl_*_fp8*.safetensors` now gets the FP8 recipe auto-injected into the Step 02/04/05 prompt, FP8 feasibility skill injected into Step 02, feedback events auto-collected from hard-stops and failures, and recipe success rates queryable from the analytics DB.
 
 | § | Module | Commit | Status |
 |---|---|---|---|
@@ -14,8 +14,11 @@ Eight modules shipped. The **hard-injection layer is closed end-to-end**: a work
 | A | JSON Schemas (skill / recipe / feedback) | `1281a1c` | ✅ shipped |
 | F | ajv runtime validator | `f77a197` | ✅ shipped |
 | G | per-task feedback log + HTTP | `4193071` | ✅ shipped |
+| G.wire | feedback auto-collection in orchestrator | — | ✅ shipped |
+| H | SQLite analytics DB (node:sqlite built-in) | — | ✅ shipped |
 | I | recipe library + first real recipe | `d985c35` | ✅ shipped |
 | L | recipe hard-injection into prompts | `636ce79` | ✅ shipped, smoke-verified |
+| M | skill registry + soft injection (layer 2) | — | ✅ shipped |
 | C | workspace purity linter | `6de1571` | ✅ shipped, real-pollution-verified |
 | J | daily-check orchestrator (cron-ready) | `f9c402b` | ✅ shipped |
 
@@ -124,7 +127,18 @@ Per-task JSONL feedback log at `workspaces/<taskId>/feedback/feedback-events.jso
 - `listFeedbackEvents(workspaceRoot, taskId)` tolerant reader — corrupt lines in `corrupt[]`, healthy events in `events[]`
 - HTTP: `POST /api/tasks/:taskId/feedback` (422 on schema fail), `GET /api/tasks/:taskId/feedback`
 
-Not yet wired into orchestrator internals (hard-stop / gate decisions). That's a follow-up.
+#### §G.wire — orchestrator auto-collection
+
+Feedback events are now auto-written from four orchestrator-internal paths, not just HTTP:
+
+| Trigger | `type` | `severity` | `proposedAction` |
+|---|---|---|---|
+| `terminateWithHardStop` | `agent_bug` | `blocker` | `evolve_prompt` if `improvementStrategy` given, else `record_only` |
+| Step failure (unhandled exception) | `comfyui_bug` | `blocker` | `record_only` |
+| SDK step timeout (paused) | `agent_bug` | `degrade` | `escalate_opencode` |
+| Non-routine human decision | `user_preference` | keyword-based (`blocker`/`degrade`/`nit`) | — |
+
+Routine approvals (`yes`/`ok`/`continue`/`approve`/`proceed`/`1`/…) are skipped to keep the log focused on signal. All writes go through `recordFeedback()`, which is `await`-ed but wraps `appendFeedbackEvent` in try/catch — a feedback write failure never breaks the orchestrator flow.
 
 ### §I — `src/server/recipeLibrary.ts` + `recipes/nodes/`
 
@@ -147,6 +161,30 @@ The hard-injection layer. Closes the loop: workflow → recipe match → prompt.
 Wired through `StepJob.matchedRecipes` (added to `src/shared/types.ts`) and injected by `serializeStepJobForAgent` between learnedRules and step instructions.
 
 **Verified end-to-end**: a workflow with `CLIPLoader + qwen_2.5_vl_7b_fp8_scaled.safetensors` produces a Step 04 prompt containing `CLIPLoader-qwen25-vl-fp8`, the dequant-before-move workaround text, and the retireCondition. Step 07 (outside the injection set) correctly gets no recipe.
+
+### §M — `src/server/skillRegistry.ts` + `src/server/skillInjector.ts`
+
+The soft-injection layer. Closes the two-layer design: recipes handle deterministic nodeType+modelPattern, skills handle trigger-based matching (stepId + asset/node/model/env patterns).
+
+- `loadRegistry(path?)` reads `.demo-state/skills-registry.json` for active skill IDs
+- `loadActiveSkills(path?, dir?)` loads .md files, parses YAML frontmatter, validates against `skill-frontmatter.schema.json`
+- `evaluateTrigger(skill, context)` — tier must be `on-demand`; stepId must match; condition keys AND'd, anyOf entries OR'd; globMatch for asset/model patterns, versionGte for envGte
+- `injectSkillsForWorkflow({workflowPath, stepId})` — top-level entry, fires for ANY step (trigger handles gating), returns "" on no match
+- Wired through `StepJob.matchedSkills` (added to `src/shared/types.ts`)
+
+**Three on-demand skills shipped**: `fp8-feasibility-checklist` (step 02, FP8 models), `xpu-attention-fallback` (step 04, AIO_Preprocessor), `seedvr2-loader-workaround` (step 04, SeedVR2Upscaler).
+
+### §H — `src/server/analyticsDb.ts` + `scripts/sync-analytics.mts`
+
+SQLite analytics using Node.js v24 built-in `node:sqlite` (zero new npm deps). Tables: `tasks`, `feedback`, `recipe_usage`, `skill_injections`.
+
+- `recordRecipeApplied(taskId, stepId, recipeIds)` — fired from `compileStepJob` when recipes match
+- `recordRecipeOutcome(taskId, stepId, "success"|"failed")` — fired from orchestrator on step complete/fail
+- `computeRecipeEfficacy(recipeId?)` — aggregates applied/success/failed counts + successRate
+- `syncFeedbackFromJsonl(workspaceRoot)` — batch-syncs JSONL feedback events into SQLite (dedup by event id)
+- All writers fire-and-forget (try/catch + console.warn), never break the migration pipeline
+
+`scripts/sync-analytics.mts` provides a cron-friendly CLI: `npx tsx scripts/sync-analytics.mts`.
 
 ### §C — `src/server/lintWorkspacePurity.ts` + `scripts/lint-workspace-purity.mts`
 
@@ -229,10 +267,7 @@ console.log(out);  // non-empty if any recipe matches
 
 | § | What | Why it matters | Effort |
 |---|---|---|---|
-| H | SQLite analytics DB | Make `efficacy.appliedCount/successCount` dynamic so a recipe's real-world success rate is observable. Currently static fields. | 2 days |
-| M | Skill registry + soft injection (layer 2) | The other half of the two-layer design (see feedback memory `two_layer_injection.md`). Catches cases recipes can't express (multi-node, version-conditional, workflow-pattern). | 3-5 days |
 | (J.2) | Pre-commit hook | Run §C + §F locally before push. The cron half is shipped; the pre-commit half is a 1-hour follow-up. | 1 hour |
-| G.wire | Wire feedback collection into orchestrator | Currently feedback events only land via HTTP. Auto-collect from hard-stop, gate decisions, agent self-reports. | 1 day |
 
 ## Design contracts to preserve
 

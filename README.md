@@ -4,8 +4,6 @@ Local web demo for semi-automatic ComfyUI workflow migration to Intel XPU.
 
 The demo wraps the existing migration operating system in `../ComfyUI/docs/draft/` and drives it through a backend migration-agent layer based on GitHub Copilot SDK and Copilot CLI.
 
-> **Self-evolution + memory subsystem**: the agent has a two-layer knowledge system (recipes = hard injection, skills = soft injection) and a feedback log that feeds Step 13 improvement. See [docs/self-evolution-status.md](docs/self-evolution-status.md) for what's built and how the modules fit together.
-
 ## Development
 
 ```bash

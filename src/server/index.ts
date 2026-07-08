@@ -1,7 +1,7 @@
 import express from "express";
 import fs from "node:fs/promises";
 import path from "node:path";
-import type { CreateTaskRequest, MigrationTask } from "../shared/types";
+import type { CreateTaskRequest, GpuNodeVerifyResult, GpuNodeWriteRequest, MigrationTask } from "../shared/types";
 import { classifyArtifact, listArtifactFiles, readArtifactText } from "./artifacts";
 import { processUploadedReplacement, FileValidationError } from "./assetReplacement";
 import { loadConfig } from "./config";
@@ -17,6 +17,16 @@ import { buildProgressNarrative } from "./progressNarrative";
 import { StateStore } from "./state";
 import { SubJobManager } from "./subJobs";
 import { deleteTaskWorkspace } from "./taskWorkspaces";
+import {
+  buildNodeFromRequest,
+  loadGpuNodes,
+  maskNodeForPublic,
+  pickNode,
+  removeNode,
+  saveGpuNodes,
+  upsertNode,
+  verifyNode
+} from "./gpuNodes";
 import { loadStepDefinitions } from "./workflowLoader";
 
 const config = loadConfig();
@@ -75,13 +85,117 @@ app.post("/api/tasks", async (req, res, next) => {
     const task = await orchestrator.createTask({
       name: body.name?.trim() || path.basename(body.workflowFileName, ".json"),
       workflowFileName: sanitizeFileName(body.workflowFileName),
-      workflowJson: body.workflowJson
+      workflowJson: body.workflowJson,
+      ...(body.gpuNode ? { gpuNode: body.gpuNode } : {})
     });
     res.status(201).json({ task });
   } catch (error) {
     next(error);
   }
 });
+
+app.get("/api/gpu-nodes", (_req, res, next) => {
+  try {
+    const registry = loadGpuNodes(config);
+    res.json({
+      default: registry.default_node,
+      nodes: registry.nodes.map(maskNodeForPublic)
+    });
+  } catch (error) {
+    // Missing file is fine — synthesize default. Real config errors throw.
+    next(error);
+  }
+});
+
+app.post("/api/gpu-nodes", async (req, res, next) => {
+  try {
+    const registry = loadGpuNodes(config);
+    const node = buildNodeFromRequest(req.body as GpuNodeWriteRequest, config.gpuNodesPath);
+    const updated = upsertNode(registry, node);
+    await saveGpuNodes(config, updated);
+    res.status(201).json({
+      default: updated.default_node,
+      nodes: updated.nodes.map(maskNodeForPublic)
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.put("/api/gpu-nodes/:name", async (req, res, next) => {
+  try {
+    const oldName = req.params.name;
+    const registry = loadGpuNodes(config);
+    if (!registry.nodes.some((n) => n.name === oldName)) {
+      res.status(404).json({ error: `Node "${oldName}" not found` });
+      return;
+    }
+    const node = buildNodeFromRequest(req.body as GpuNodeWriteRequest, config.gpuNodesPath);
+    // Two-step: remove old, then upsert new (handles name change cleanly).
+    const afterRemove = removeNode(registry, oldName);
+    const updated = upsertNode(afterRemove, node);
+    await saveGpuNodes(config, updated);
+    res.json({
+      default: updated.default_node,
+      nodes: updated.nodes.map(maskNodeForPublic)
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.delete("/api/gpu-nodes/:name", async (req, res, next) => {
+  try {
+    const name = req.params.name;
+    const registry = loadGpuNodes(config);
+    if (!registry.nodes.some((n) => n.name === name)) {
+      res.status(404).json({ error: `Node "${name}" not found` });
+      return;
+    }
+    if (registry.nodes.length === 1) {
+      res.status(400).json({ error: "Refusing to delete the last GPU node — add another first." });
+      return;
+    }
+    const updated = removeNode(registry, name);
+    await saveGpuNodes(config, updated);
+    res.json({
+      default: updated.default_node,
+      nodes: updated.nodes.map(maskNodeForPublic)
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/gpu-nodes/verify", async (req, res, next) => {
+  try {
+    const body = req.body as { name?: string; node?: GpuNodeWriteRequest };
+    let nodeToVerify;
+    if (body.node) {
+      // Verify-before-save path: caller passes a full node spec.
+      nodeToVerify = buildNodeFromRequest(body.node, config.gpuNodesPath);
+    } else if (body.name) {
+      const registry = loadGpuNodes(config);
+      const found = registry.nodes.find((n) => n.name === body.name);
+      if (!found) {
+        res.status(404).json({ error: `Node "${body.name}" not found` });
+        return;
+      }
+      nodeToVerify = found;
+    } else {
+      res.status(400).json({ error: "Provide {name} or {node} in body" });
+      return;
+    }
+    const result: GpuNodeVerifyResult = await verifyNode(nodeToVerify);
+    res.json(result);
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Re-export pickNode via a tiny helper for code paths that look it up by name
+// through the API layer (currently unused, but keeps imports consistent).
+void pickNode;
 
 app.get("/api/tasks/:taskId", async (req, res, next) => {
   try {
