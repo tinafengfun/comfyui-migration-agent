@@ -25,6 +25,9 @@ function testConfig(root: string): AppConfig {
 
 function testDraftDocRoot(): string {
   const candidates = [
+    // Standalone repo layout: bundled prompts/ at the project root.
+    path.resolve(process.cwd(), "prompts"),
+    // Legacy layouts (agent-demo lived inside the ComfyUI checkout).
     path.resolve(process.cwd(), "../ComfyUI/docs/draft"),
     path.resolve(process.cwd(), "../docs/draft")
   ];

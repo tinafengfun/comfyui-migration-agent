@@ -325,5 +325,6 @@ function buildSummary(report: RunReport, patterns: ProblemPattern[]): string {
 }
 
 function getPromptFilesForSteps(stepIds: string[]): string[] {
-  return stepIds.map((id) => `docs/draft/migration-workflow-v2/skills/${id}-*.md`).filter(Boolean);
+  // Skills ship under the bundled prompts/ dir in the standalone repo.
+  return stepIds.map((id) => `prompts/migration-workflow-v2/skills/${id}-*.md`).filter(Boolean);
 }

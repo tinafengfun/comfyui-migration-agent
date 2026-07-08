@@ -1062,7 +1062,11 @@ async function walk(dir: string, visit: (file: string) => void): Promise<void> {
       isDirectory(): boolean;
     }>;
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    // Tolerate missing / unreadable directories: a model root may be a read-only
+    // NFS mount (deployments share models across nodes) or contain a subdir this
+    // user can't traverse. Skip it rather than aborting the whole asset scan.
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT" || code === "EACCES" || code === "EPERM") return;
     throw error;
   }
   for (const entry of entries) {
