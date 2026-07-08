@@ -15,7 +15,11 @@
     "asset:sources": "tsx src/server/assetSourceCli.ts",
     "asset:sources:demo": "MIGRATION_AGENT_DOWNLOAD_PROFILE=demo tsx src/server/assetSourceCli.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "playwright": "playwright test",
+    "playwright:install": "playwright install chromium",
+    "playwright:ui": "playwright test --grep @ui",
+    "playwright:migration": "playwright test --grep @migration"
   },
   "dependencies": {
     "@github/copilot-sdk": "^0.3.0",
@@ -32,6 +36,7 @@
     "vite": "^7.2.7"
   },
   "devDependencies": {
+    "@playwright/test": "^1.61.0",
     "@types/express": "^5.0.6",
     "@types/js-yaml": "^4.0.9",
     "@types/node": "^24.10.1",
