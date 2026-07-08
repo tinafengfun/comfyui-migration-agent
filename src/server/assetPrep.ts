@@ -349,7 +349,10 @@ async function walk(dir: string, visit: (file: string) => void): Promise<void> {
       isDirectory(): boolean;
     }>;
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    // Tolerate unreadable dirs: model roots are often shared (read-only NFS)
+    // and may contain subdirs this user can't traverse. Skip rather than abort.
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT" || code === "EACCES" || code === "EPERM") return;
     throw error;
   }
   for (const entry of entries) {
