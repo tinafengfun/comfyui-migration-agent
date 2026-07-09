@@ -338,7 +338,7 @@ function App() {
               <button className="btn btn-primary" onClick={() => void api.runUntilGate(selectedTask.id)} disabled={activeStep?.status === "running"}>
                 Run pipeline
               </button>
-              <button className="btn btn-danger" onClick={() => void api.hardStop(selectedTask.id)} disabled={activeStep?.status !== "running"}>
+              <button className="btn btn-danger" onClick={() => void api.hardStop(selectedTask.id, activeStep?.id)} disabled={activeStep?.status !== "running"}>
                 Stop
               </button>
             </>

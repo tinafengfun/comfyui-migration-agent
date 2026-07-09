@@ -101,6 +101,9 @@ export class MigrationOrchestrator {
   private readonly approvalBroker = new HumanApprovalBroker();
   private readonly autorunningTasks = new Set<string>();
   private readonly activeStepRuns = new Set<string>();
+  // Task IDs that have been hard-stopped/terminated. Their lingering run-locks
+  // (held while an in-flight SDK call winds down) must not block new work.
+  private readonly hardStoppedTaskIds = new Set<string>();
   private readonly sdkTimeoutRetries = new Map<string, number>();
 
   constructor(
@@ -555,6 +558,14 @@ export class MigrationOrchestrator {
           `Step ${stepId} SDK session ended before required evidence was complete. ${postRunArtifactCompletion.reason}`
         );
       }
+      // If a hard-stop / terminate landed while the SDK call was in flight, the
+      // step is no longer "running" — don't clobber it back to completed (that
+      // would make runUntilGate think the step succeeded and advance past the
+      // stop). Leave the terminal status as-is.
+      const liveStep = (await this.store.getTask(taskId))?.steps.find((s) => s.id === stepId);
+      if (liveStep && (liveStep.status === "hard_stopped" || liveStep.status === "terminated")) {
+        return;
+      }
       await this.store.updateStep(taskId, stepId, "completed", { summary });
       // §H: record recipe outcome for analytics (fire-and-forget).
       recordRecipeOutcome(taskId, stepId, "success");
@@ -686,6 +697,17 @@ export class MigrationOrchestrator {
       while (true) {
         const task = await this.store.getTask(taskId);
         if (!task) throw new Error(`Task not found: ${taskId}`);
+        // If the task was hard-stopped / terminated (e.g. by a concurrent
+        // terminateWithHardStop) while a step was in flight or between steps,
+        // stop the auto-run instead of advancing to the next step.
+        if (task.status === "hard_stopped" || task.status === "terminated") {
+          await this.emit({
+            taskId,
+            type: "progress",
+            message: `Auto-run stopped: task is ${task.status}.`
+          });
+          return;
+        }
         const blockingStep = task.steps.find((step) =>
           ["running", "waiting_for_human", "failed", "hard_stopped", "terminated"].includes(
             step.status
@@ -1880,6 +1902,11 @@ export class MigrationOrchestrator {
       });
     }
     await this.store.updateTaskStatus(input.taskId, "hard_stopped");
+    // Free the one-run-per-process lock now (don't wait for the in-flight SDK
+    // call to wind down), so new tasks can be created immediately. Also flag the
+    // task so any lock the winding-down run re-acquires is ignored.
+    this.hardStoppedTaskIds.add(input.taskId);
+    this.releaseTaskRuns(input.taskId);
     await this.store.appendArtifact({
       taskId: input.taskId,
       stepId: input.stepId,
@@ -2498,9 +2525,29 @@ export class MigrationOrchestrator {
 
   private assertNoLiveStepRuns(action: string): void {
     if (this.activeStepRuns.size === 0) return;
+    // Ignore run-locks held by hard-stopped/terminated tasks: those locks are
+    // just the in-flight SDK call winding down and must not block new work.
+    const blocking = [...this.activeStepRuns].filter((key) => {
+      const tid = key.split(":", 1)[0];
+      return !this.hardStoppedTaskIds.has(tid);
+    });
+    if (blocking.length === 0) return;
     throw new Error(
       `${action} cannot continue while another migration step is actively running in this API process.`
     );
+  }
+
+  /**
+   * Release every run-lock held by a task. Called by terminateWithHardStop so a
+   * hard-stopped task frees the one-run-per-process lock immediately, instead of
+   * holding it until the in-flight SDK call happens to return (which can take
+   * minutes and blocks new task creation with a 500 in the meantime).
+   */
+  private releaseTaskRuns(taskId: string): void {
+    const prefix = `${taskId}:`;
+    for (const key of [...this.activeStepRuns]) {
+      if (key.startsWith(prefix)) this.activeStepRuns.delete(key);
+    }
   }
 
   /**

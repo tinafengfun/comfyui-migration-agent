@@ -66,8 +66,14 @@ export function useApi() {
     if (!res.ok) throw new Error(await res.text());
   }, []);
 
-  const hardStop = useCallback(async (taskId: string): Promise<void> => {
-    const res = await fetch(`/api/tasks/${taskId}/hard-stop`, { method: "POST" });
+  const hardStop = useCallback(async (taskId: string, stepId?: string, reason = "Stopped via UI"): Promise<void> => {
+    // The endpoint requires a `reason` body and targets the given step. Without
+    // a body the call 400s and the migration keeps running (holding the run lock).
+    const res = await fetch(`/api/tasks/${taskId}/hard-stop`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ reason, ...(stepId ? { stepId } : {}) }),
+    });
     if (!res.ok) throw new Error(await res.text());
   }, []);
 

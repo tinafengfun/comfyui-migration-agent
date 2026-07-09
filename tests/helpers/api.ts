@@ -138,8 +138,13 @@ export async function recordDecision(
   return (await r.json().catch(() => ({}))) as { resumedLiveSession?: boolean };
 }
 
-export async function hardStop(request: APIRequestContext, taskId: string): Promise<number> {
-  const r = await request.post(`${API}/api/tasks/${taskId}/hard-stop`);
+export async function hardStop(request: APIRequestContext, taskId: string, reason = "Test cleanup: hard-stop."): Promise<number> {
+  // The endpoint requires a `reason` body; without it the call 400s and the
+  // task keeps running (which then holds the one-run-per-process lock).
+  const r = await request.post(`${API}/api/tasks/${taskId}/hard-stop`, {
+    headers: { "Content-Type": "application/json" },
+    data: { reason },
+  });
   return r.status();
 }
 
