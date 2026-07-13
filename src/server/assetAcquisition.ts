@@ -526,7 +526,17 @@ function unresolvedCustomNodeItems(items: CustomNodeJobItem[]): AssetAcquisition
 }
 
 function customNodeSourceSatisfied(item: CustomNodeJobItem): boolean {
-  return item.status === "source_known" || item.status === "source_cloned";
+  // A custom-node source is "satisfied" (won't trigger a human gate) when it has
+  // been confidently identified — whether already cloned, explicitly known, or
+  // high-confidence candidates found. Per the Step 01 skill: "Do not require a
+  // human gate merely because a public custom-node source is known but not
+  // staged" — cloning/install happens at Step 05. Only genuinely-failed or
+  // not-yet-searched sources stay open (clone_failed, source_search_pending).
+  return (
+    item.status === "source_known" ||
+    item.status === "source_cloned" ||
+    item.status === "candidate_sources_found"
+  );
 }
 
 function parseAssetRows(content: string): AssetRow[] {
