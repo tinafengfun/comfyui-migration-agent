@@ -2152,14 +2152,22 @@ export class MigrationOrchestrator {
     const mdPath = path.join(task.artifactPath, "01-custom-nodes.md");
     const gaps: Array<{ name: string; kind: string; action: string }> = [];
     try {
-      const csvContent = await fs.readFile(csvPath, "utf8");
-      for (const line of csvContent.split("\n").slice(1)) {
+      const csvLines = (await fs.readFile(csvPath, "utf8")).split("\n");
+      // Resolve column positions from the header instead of hardcoding indices —
+      // the CSV schema grew (size_bytes/checksum/provider_attempts were inserted)
+      // and the `gap` column moved from index 14 to 17. Hardcoded [14] read
+      // size_bytes, which falsely flagged every sized model as a gap.
+      const header = (csvLines[0] ?? "").split(",").map((f) => f.replace(/^"|"$/g, "").trim());
+      const stateIdx = header.indexOf("state");
+      const gapIdx = header.indexOf("gap");
+      const nameIdx = header.indexOf("asset_name");
+      for (const line of csvLines.slice(1)) {
         if (!line.trim()) continue;
         const fields = line.split(",").map((f) => f.replace(/^"|"$/g, "").trim());
-        const state = fields[4] ?? "";
-        const gap = fields[14] ?? "";
+        const state = stateIdx >= 0 ? (fields[stateIdx] ?? "") : "";
+        const gap = gapIdx >= 0 ? (fields[gapIdx] ?? "") : "";
         if (state === "source unknown" || (gap && !gap.includes("alias available"))) {
-          const name = fields[0] ?? "unknown";
+          const name = nameIdx >= 0 ? (fields[nameIdx] ?? "unknown") : (fields[0] ?? "unknown");
           const kind = /\.(png|jpe?g|webp|gif|mp4|mov)$/i.test(name) ? "input media" : "model";
           gaps.push({ name, kind, action: gap || `Provide ${kind === "input media" ? "source media file" : "source-identical model file"}` });
         }
