@@ -20,7 +20,9 @@ Read these artifacts before writing Step 13 outputs:
 8. workflow diff / claim-boundary artifacts, especially Step 11/12 outputs
 9. failure, retry, hard-stop, and human-gate events
 
-If any required input is missing, write the missing item into the Step 13 completion decision and stop at a human gate or hard stop when the missing evidence prevents safe improvement.
+If any required input is missing, attempt to reconstruct it from per-step reflection files and durable artifacts before reporting a hard stop. For example, if `phase1-context/running-summary.md` is missing, reconstruct it by reading all `*-reflection.md` files. Record the reconstruction as an evidence artifact and document the missing input as an upstream contract gap.
+
+If the missing input cannot be reconstructed from durable artifacts, write the missing item into the Step 13 completion decision and stop at a human gate or hard stop.
 
 ## Outputs
 

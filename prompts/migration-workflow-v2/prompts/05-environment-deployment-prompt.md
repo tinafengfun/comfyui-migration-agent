@@ -31,6 +31,7 @@ Prepare a reproducible fresh ComfyUI Intel XPU environment for migration validat
 8. Do not edit the canonical source workflow. Generated model-path config, symlink maps, launch logs, and runtime-policy variants must be separate artifacts with provenance.
 9. Distinguish backend nodes from frontend-only LiteGraph nodes. Backend nodes must be present in `/object_info`; frontend-only nodes may be source-verified from web extension registration evidence and must not be silently dropped.
 10. If Step 05 installs a dependency, record the exact package, reason, command/log, and whether it was a portable minimal install or a skipped CUDA-only dependency.
+11. Check the ComfyUI server log for Comfyroll CR XY registration errors (500 on /free endpoint). If Comfyroll nodes exist in the installation but the workflow does not use any, document the errors as a non-blocking cosmetic issue. Do not remove, patch, or bypass Comfyroll nodes.
 
 ## Steps
 

@@ -34,6 +34,7 @@ Convert the workflow JSON into an API prompt and prove the prompt validates corr
 
 1. Convert workflow JSON to API prompt.
 2. Preserve widget-heavy nodes such as literal inputs, prompt editors, lineup nodes, LoRA loaders, and package-specific controls.
+3. Sanitize rgthree Image Comparer nodes: detect Image Comparer nodes by class name, clear `widgets_values` entries for disconnected inputs (`image_a`, `image_b` when no link exists in the workflow). Set affected entries to `[None]` instead of leaving empty arrays. This prevents converter bugs where temp session image references produce `[]` inputs for disconnected ports.
 3. Normalize model and asset selectors.
 4. Initialize custom nodes the same way the server does before offline validation; some custom nodes require `PromptServer.instance` even when no HTTP request is sent.
 5. Validate without queueing execution when possible. If `/prompt` is used, state that execution is intentionally allowed and retain the raw response.

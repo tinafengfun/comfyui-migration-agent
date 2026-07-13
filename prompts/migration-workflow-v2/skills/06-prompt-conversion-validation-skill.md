@@ -21,6 +21,7 @@ Use before any runtime result is interpreted.
 
 1. Convert graph to API prompt while preserving real inputs.
 2. Keep literal/widget-only nodes and package-specific controls.
+3. Sanitize rgthree Image Comparer nodes: detect Image Comparer by class name, clear `widgets_values` for disconnected inputs (image_a, image_b when no link exists). Set to `[None]` instead of leaving empty arrays.
 3. Normalize selector-backed names to basenames.
 4. Initialize custom nodes through the same startup path as ComfyUI when validating offline; route-dependent custom nodes may require `PromptServer.instance`.
 5. Validate without queueing execution when the task is validation-only. Use internal `execution.validate_prompt()` or an equivalent no-queue path; use `/prompt` only when execution is intentionally allowed.
@@ -51,6 +52,7 @@ It converts the source workflow, runs offline `execution.validate_prompt()` with
 
 ## Common failure signatures
 
+- Image Comparer (rgthree) temp session image references in `widgets_values` produce empty arrays instead of omitted inputs
 - `Int`, prompt editor, lineup, or loader widget value dropped
 - selector value not in list
 - `execution_success` returned while intended output never runs

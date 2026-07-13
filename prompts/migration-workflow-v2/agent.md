@@ -43,6 +43,8 @@ This section is the compact shared contract for every Step 00-13 runner. Step-sp
 9. **Web state:** keep `task-state.json`, backend events, human decisions, running summary, context debt, reflections, and Step 13 artifacts current enough for the Web UI to explain progress and operator decisions without private chat context.
 10. **Step 13:** after Step 12, run Step 13 improvement unless Step 12 is gated or hard-stopped. Step 13 may generate a patch plan, but shared prompt/skill/agent/backend changes require explicit human approval.
 11. **Context budget:** read `artifacts/phase1-context/context-budget.json` at step boundaries when present. On `warning`, write a compact checkpoint and avoid non-required large artifacts. On `critical`, do not start another step; stop with a context checkpoint summary so the backend can resume in a fresh SDK session.
+12. **task-state.json schema:** every step must update `task-state.json` with the full schema specified in this contract (steps array with completion_decision, claim_boundary sections, compaction refs, human_decisions list). Validate the schema after every update. Do not commit schema drift — the flat-object form (without steps array, without claim_boundary, without compaction refs) is deprecated.
+13. **Phase 1 context enforcement:** after every step, verify that the three mandatory phase1-context files exist: `running-summary.md`, `context-debt.json`, and `phase3-extraction-candidates.json`. If any is missing, write it from the current step's evidence before proceeding to the next step.
 
 ## Backend state contract
 

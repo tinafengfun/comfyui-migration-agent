@@ -14,7 +14,7 @@ Turn one completed or gated workflow migration into actionable agent/playbook im
 
 1. Load `task-state.json` and verify the run reached Step 13 legitimately.
 2. Read Step 00-12 reflections and output manifests.
-3. Read context debt and Phase 3 extraction candidates.
+3. Read context debt and Phase 3 extraction candidates. If `phase1-context/` artifacts (running-summary.md, context-debt.json, phase3-extraction-candidates.json) are missing, reconstruct them from per-step `*-reflection.md` and `*-reflection.json` files. Record each reconstruction as an explicit workaround with a note to fix the upstream contract.
 4. Review human questions/answers, failures, retries, hard stops, and claim-boundary changes.
 5. Group issues by root cause:
    - missing upstream context;
