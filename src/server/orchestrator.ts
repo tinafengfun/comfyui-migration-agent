@@ -393,12 +393,20 @@ export class MigrationOrchestrator {
             relativePath: path.relative(task.workspacePath, normalizedPath),
             kind: "json"
           });
-          normalizationNote = ` Graph normalized: ${report.changes.length} cycle back-edge(s) cut → rewired to image producer ${report.primaryImageProducer}; use ${stepId}-workflow.normalized.json as the execution graph.`;
+          // Make the normalized graph the CANONICAL workflow all downstream steps
+          // read: back up the original GUI export, then overwrite task.workflowPath
+          // with the normalized (acyclic) graph. Steps 05/07/08 read task.workflowPath
+          // directly, so a soft "please use the normalized file" note is not enough —
+          // the executed graph must actually be the DAG.
+          const guiBackupPath = task.workflowPath.replace(/\.json$/i, "") + ".gui-original.json";
+          await fs.copyFile(task.workflowPath, guiBackupPath).catch(() => {});
+          await fs.writeFile(task.workflowPath, `${JSON.stringify(normalizedWf, null, 2)}\n`, "utf8");
+          normalizationNote = ` Graph normalized: ${report.changes.length} cycle back-edge(s) cut → rewired to image producer ${report.primaryImageProducer}. The source workflow was replaced with the normalized DAG (GUI original backed up to ${path.basename(guiBackupPath)}); Steps 05/07/08 execute the normalized graph.`;
           await this.emit({
             taskId,
             stepId,
             type: "artifact_created",
-            message: `Graph normalization applied: ${report.changes.length} cycle(s) resolved. Use ${stepId}-workflow.normalized.json for execution (Step 05/07/08).`
+            message: `Graph normalization applied: ${report.changes.length} cycle(s) resolved. Source workflow replaced with the normalized DAG for execution (GUI original backed up).`
           });
         } else if (!report.isDag || report.unresolved.length) {
           normalizationNote = ` Graph has ${report.unresolved.length} unresolved cycle(s) — see ${stepId}-graph-normalization.json.`;
