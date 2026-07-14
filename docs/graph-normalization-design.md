@@ -27,8 +27,8 @@ A new deterministic step (or a sub-phase of Step 03 inventory), right after the 
 7. The normalized graph is what Step 05/07/08 execute. Step 06's runtime-policy notes the normalization.
 8. **Unresolvable** (no VAEDecode source, >2-node SCC the heuristic can't disambiguate) → human gate carrying the full analysis (which cycle, proposed surgery), not a blunt smoke-time gate.
 
-### Layer 2 — recipe `graph-cycle-resolution` (soft fallback)
-When the deterministic stage detects a cycle it flags-but-doesn't-auto-resolve, inject this recipe into the Step 06/07 prompt so the SDK agent applies the principled surgery: *cut the transform's IMAGE back-edge, rewire to the decoded image; preserve all nodes; record the change*. Handles edge cases the deterministic code can't.
+### Layer 2 — Step 03 skill instruction (soft fallback)
+The recipe system is node-pattern-based, so a structural cycle doesn't fit a recipe. Instead, the Step 03 skill is updated with a "Graph normalization" section: if `03-graph-normalization.json` lists `unresolved` cycles (the deterministic code couldn't pick a back-edge — no image-producer source, complex >2-node SCC), the SDK agent analyzes the cycle and proposes the principled surgery (cut the transform's IMAGE back-edge, rewire to the primary image producer; keep all nodes executing), surfaced as a human gate. If `03-workflow.normalized.json` exists, the agent uses it as the execution graph for Steps 05/07/08.
 
 ## Generality
 Resolves the whole class: any GUI export with a non-persisted toggle, a wiring-error loop, or a muted group is normalized automatically — no per-workflow manual fix. Extensible to other GUI-only constructs (view-node handling, subgraph reroutes) by extending `workflowNormalize.ts`.

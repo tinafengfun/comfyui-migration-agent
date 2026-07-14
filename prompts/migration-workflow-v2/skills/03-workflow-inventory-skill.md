@@ -25,6 +25,13 @@ Use as Step 03 after asset/custom-node resolution and feasibility routing, befor
 10. Emit all-node inventory: every source node must appear exactly once with role, branch membership, package/origin, dependency state, and migration risk.
 11. Emit a `completion_decision` block and a Toolization block before closing Step 03.
 
+## Graph normalization (GUI→API cycle resolution)
+
+The backend runs a deterministic normalizer during Step 03 and writes `03-graph-normalization.json` (report) plus, if it changed anything, `03-workflow.normalized.json` (the normalized graph). This fixes dependency cycles that ComfyUI's DAG API rejects — the common case is a transform (upscaler/sampler) whose IMAGE input is wired to a node it also feeds, a leftover from a non-persisted GUI group-bypass/switch widget (rgthree *Fast Groups Bypasser*, Comfyroll switches) or a wiring error.
+
+- If `03-workflow.normalized.json` exists, **use it as the execution graph** for Steps 05/07/08 (the source workflow had a cycle that was resolved). Note the normalization in the inventory + Step 06 runtime-policy so the operator knows the API-executed graph differs from the GUI export.
+- If `03-graph-normalization.json` lists `unresolved` cycles (the deterministic code couldn't pick a back-edge — e.g. no VAEDecode/image-producer source, or a complex >2-node SCC), analyze the cycle yourself and propose the principled surgery: **cut the transform node's IMAGE back-edge and rewire it to the workflow's primary image producer (VAEDecode output)**; keep all nodes executing (never skip/delete); record the change. Surface it as a human gate with the proposed rewire.
+
 ## Common failure signatures
 
 - `last_link_id` treated as real link count

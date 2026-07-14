@@ -59,6 +59,7 @@ import { STEP_OUTPUT_SUBDIR } from "./paths";
 import { appendFeedbackEvent, type FeedbackEventInput } from "./feedbackLog";
 import { recordRecipeOutcome } from "./analyticsDb";
 import { ensureWorkflowInventory } from "./workflowInventory";
+import { normalizeWorkflowForApi } from "./workflowNormalize";
 import { loadGpuNodes, pickNode, type GpuNode } from "./gpuNodes";
 
 type EventListener = (event: AgentEvent) => void;
@@ -367,6 +368,44 @@ export class MigrationOrchestrator {
 
     if (stepId === "03") {
       const inventory = await ensureWorkflowInventory(task, stepId);
+      // GUI→API graph normalization (Step 03½): detect/resolve dependency cycles
+      // (e.g. from a non-persisted rgthree group-bypass widget) before execution.
+      let normalizationNote = "";
+      try {
+        const sourceWf = JSON.parse(await fs.readFile(task.workflowPath, "utf8"));
+        const { workflow: normalizedWf, report } = normalizeWorkflowForApi(sourceWf);
+        const reportPath = path.join(task.artifactPath, `${stepId}-graph-normalization.json`);
+        await fs.writeFile(reportPath, `${JSON.stringify(report, null, 2)}\n`, "utf8");
+        await this.store.appendArtifact({
+          taskId,
+          stepId,
+          path: reportPath,
+          relativePath: path.relative(task.workspacePath, reportPath),
+          kind: "json"
+        });
+        if (report.changed) {
+          const normalizedPath = path.join(task.artifactPath, `${stepId}-workflow.normalized.json`);
+          await fs.writeFile(normalizedPath, `${JSON.stringify(normalizedWf, null, 2)}\n`, "utf8");
+          await this.store.appendArtifact({
+            taskId,
+            stepId,
+            path: normalizedPath,
+            relativePath: path.relative(task.workspacePath, normalizedPath),
+            kind: "json"
+          });
+          normalizationNote = ` Graph normalized: ${report.changes.length} cycle back-edge(s) cut → rewired to image producer ${report.primaryImageProducer}; use ${stepId}-workflow.normalized.json as the execution graph.`;
+          await this.emit({
+            taskId,
+            stepId,
+            type: "artifact_created",
+            message: `Graph normalization applied: ${report.changes.length} cycle(s) resolved. Use ${stepId}-workflow.normalized.json for execution (Step 05/07/08).`
+          });
+        } else if (!report.isDag || report.unresolved.length) {
+          normalizationNote = ` Graph has ${report.unresolved.length} unresolved cycle(s) — see ${stepId}-graph-normalization.json.`;
+        }
+      } catch (e) {
+        normalizationNote = ` Graph normalization skipped: ${(e as Error).message}`;
+      }
       await this.store.appendArtifact({
         taskId,
         stepId,
@@ -381,7 +420,7 @@ export class MigrationOrchestrator {
         message: "Created deterministic Step 03 workflow inventory artifact.",
         data: inventory
       });
-      const summary = `Step 03 deterministic workflow inventory completed: ${inventory.nodeCount} nodes, ${inventory.linkCount} links.`;
+      const summary = `Step 03 deterministic workflow inventory completed: ${inventory.nodeCount} nodes, ${inventory.linkCount} links.${normalizationNote}`;
       await this.store.updateStep(taskId, stepId, "completed", { summary, error: undefined });
       await this.emit({
         taskId,
