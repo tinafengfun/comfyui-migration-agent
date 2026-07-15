@@ -119,9 +119,11 @@ export function detectEnumDependencies(
         if (vals.includes(raw)) { slot = s; break; }
       }
       if (!slot) {
-        // No source info for this node — use the baseline slots: if the value is a
-        // KNOWN core value for a dependency slot, it's fine; if it's not-core AND a
-        // recipe maps it to a package, flag it. Otherwise we can't classify it.
+        // No source object_info for this node → slot precision isn't recoverable
+        // from a recipe that groups values (recipe enumSlots are recipe-level, not
+        // per-value). Classify by: value is a known package-injected value (recipe
+        // hit) or a known core value for a dependency slot. Slot label is best-effort
+        // here; the authoritative per-slot mapping comes from source object_info.
         for (const s of DEPENDENCY_ENUM_SLOTS) {
           if (COMFY_CORE_ENUM_BASELINE[s]?.has(raw) || resolvePackage(s, raw)) { slot = s; break; }
         }
