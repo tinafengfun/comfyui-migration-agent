@@ -30,7 +30,17 @@ Use to create a reproducible Intel XPU ComfyUI baseline.
    - `torch.xpu.is_available()`
    - XPU device name and total VRAM from both PyTorch and system tools where possible
 3. If a generic install pulled CUDA wheels on an XPU host, replace them with matching XPU wheels and re-run the proof. Do not continue with a CUDA build just because imports succeed.
-4. Install or symlink custom nodes at recorded commits and record whether they are clean, patched, or dirty. This includes **implicit-package dependencies from `00-enum-dependencies.csv` / Step 01** (packages that inject enum values like `res_2s`/`bong_tangent` into core node dropdowns, e.g. RES4LYF): install them on the target too. After installing such a package, **re-fetch `/object_info` and assert the enum value is now present** in the host node's slot (e.g. `res_2s` in KSampler.sampler_name). Only then is the value usable identical-to-source. If the package genuinely cannot be installed (repo unreachable / XPU-incompatible after bounded attempts), do NOT silently substitute — surface a human gate stating the tradeoff (install=identical vs substitute=drifts); substitution requires explicit approval and downgrades the claim boundary (agent.md rule 3a).
+4. Install or symlink custom nodes at recorded commits and record whether they are clean, patched, or dirty. This includes **implicit-package dependencies from `00-enum-dependencies.csv` / Step 01** (packages that inject enum values like `res_2s`/`bong_tangent` into core node dropdowns, e.g. RES4LYF): install them on the target too.
+
+   **Use the deterministic tool `scripts/install-enum-package.mts`** — it does the proven install→reload→verify loop (idempotent, local + ssh). For each `state=source known` row in `00-enum-dependencies.csv`, take the `resolving_package` (the recipe's `packageRepo`) and run:
+   ```bash
+   npx tsx scripts/install-enum-package.mts \
+     --node <gpu-node-name> \
+     --repo <resolving_package repo url> \
+     --host-node-type <node_type from the CSV row, e.g. KSampler> \
+     --verify <slot>=<value>   # one --verify per enum value the package must restore
+   ```
+   It writes `05-enum-package-install.json` (before/after presence, commit, outcome) — attach it as Step 05 evidence. `outcome=installed_verified` or `already_satisfied` = success (value present identical-to-source). `outcome=install_failed`/`verify_failed`/`comfyui_unreachable` = do NOT silently substitute — surface a human gate stating the tradeoff (install=identical vs substitute=drifts); substitution requires explicit approval and downgrades the claim boundary (agent.md rule 3a).
 5. Install dependencies using the source-audit report:
     - install portable import/runtime dependencies needed for target registration
     - include portable runtime dependencies for workflow-selected node classes, even if node registration succeeds without importing them
