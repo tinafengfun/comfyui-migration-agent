@@ -42,9 +42,15 @@ async function objectInfoUp(apiUrl: string): Promise<boolean> {
 }
 
 async function stop(node: GpuNode): Promise<void> {
-  const cmd = `pkill -f 'main.py' 2>/dev/null || true`;
-  if (node.kind === "ssh") await execFile("ssh", ["-n", ...sshBase(node), cmd], { timeout: 30_000 });
-  else await execFile("bash", ["-c", cmd], { timeout: 30_000 });
+  // `; true` (not `|| true`) + explicit exit 0 so ssh/local always returns 0 even
+  // when pkill matches nothing (exit 1) — execFile rejects on any non-zero.
+  const cmd = `pkill -f 'main.py' 2>/dev/null; true`;
+  try {
+    if (node.kind === "ssh") await execFile("ssh", ["-n", ...sshBase(node), cmd], { timeout: 30_000 });
+    else await execFile("bash", ["-c", cmd], { timeout: 30_000 });
+  } catch {
+    /* pkill non-zero (nothing to kill) is fine */
+  }
 }
 
 async function start(node: GpuNode, apiUrl: string): Promise<void> {
