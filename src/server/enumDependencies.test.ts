@@ -76,6 +76,19 @@ describe("enumDependencies", () => {
     expect(deps.some((d) => d.value === "res_2s" && d.slot === "sampler_name")).toBe(true);
   });
 
+  it("handles dict-shaped widgets_values without throwing (e.g. VHS_VideoCombine GUI export)", () => {
+    const dictNode = {
+      id: 54,
+      type: "VHS_VideoCombine",
+      widgets_values: { frame_rate: 16, loop_count: 0, filename_prefix: "out", format: "video/h264-mp4", pix_fmt: "yuv420p" }
+    };
+    const resolve = (_slot: string, value: string) =>
+      value === "res_2s" || value === "bong_tangent" ? "RES4LYF" : undefined;
+    expect(() => detectEnumDependencies([dictNode, cyclicKSamplerNode], SOURCE_INFO, resolve)).not.toThrow();
+    const deps = detectEnumDependencies([dictNode, cyclicKSamplerNode], SOURCE_INFO, resolve);
+    expect(deps).toHaveLength(2); // only the KSampler's res_2s/bong_tangent — dict node contributes nothing, doesn't crash
+  });
+
   it("ignores model/media filenames (not enum values)", () => {
     const node = {
       id: 1,

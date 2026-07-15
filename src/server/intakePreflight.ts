@@ -124,7 +124,7 @@ export async function ensureIntakePreflight(input: {
     .map((node) => `${node.id ?? "?"}:${node.type ?? "(unknown)"}`);
   const noteTexts = nodes
     .filter((node) => String(node.type ?? "").toLowerCase() === "note")
-    .flatMap((node) => (node.widgets_values ?? []).filter((value): value is string => typeof value === "string"));
+    .flatMap((node) => iterWidgetValues(node.widgets_values).filter((value): value is string => typeof value === "string"));
 
   const content = [
     `workflow: \`${input.task.workflowPath}\``,

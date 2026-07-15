@@ -35,7 +35,15 @@ export interface EnumDependency {
 interface WorkflowNode {
   id?: number | string;
   type?: string;
-  widgets_values?: unknown[];
+  widgets_values?: unknown;
+}
+
+/** Normalize widgets_values to an iterable array — handles both array and dict formats
+ * (e.g. VHS_VideoCombine stores widgets_values as a dict, not an array). */
+function iterWidgetValues(widgetsValues: unknown): unknown[] {
+  if (Array.isArray(widgetsValues)) return widgetsValues;
+  if (widgetsValues && typeof widgetsValues === "object") return Object.values(widgetsValues as Record<string, unknown>);
+  return [];
 }
 
 /**
@@ -107,7 +115,7 @@ export function detectEnumDependencies(
     const sourceEnums = enumSlotsForNode(sourceInfo, nodeType);
     const targetEnums = targetInfo ? enumSlotsForNode(targetInfo, nodeType) : undefined;
 
-    for (const raw of node.widgets_values ?? []) {
+    for (const raw of iterWidgetValues(node.widgets_values)) {
       if (typeof raw !== "string" || !raw) continue;
       if (modelFilePattern.test(raw) || mediaFilePattern.test(raw)) continue; // not an enum value
 
