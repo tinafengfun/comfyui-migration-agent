@@ -82,4 +82,61 @@ describe("asset prep", () => {
     expect(customNodes).toContain("comfyui-kjnodes");
     expect(customNodes).toContain("custom_nodes/ComfyUI-KJNodes");
   });
+
+  it("finds input media already in ComfyUI's input/ dir and custom-node-bundled checkpoints (e.g. RIFE)", async () => {
+    const root = path.join(process.cwd(), ".demo-state", "tests", `asset-prep-${Date.now()}`);
+    const artifactPath = path.join(root, "artifacts");
+    const workflowPath = path.join(root, "workflow.json");
+    const comfyuiRoot = path.join(root, "ComfyUI");
+    await ensureDir(artifactPath);
+    await ensureDir(path.join(comfyuiRoot, "input"));
+    await ensureDir(path.join(comfyuiRoot, "custom_nodes", "ComfyUI-Frame-Interpolation", "ckpts", "rife"));
+    await fs.writeFile(path.join(comfyuiRoot, "input", "photo1.jpg"), "x", "utf8");
+    await fs.writeFile(
+      path.join(comfyuiRoot, "custom_nodes", "ComfyUI-Frame-Interpolation", "ckpts", "rife", "rife47.pth"),
+      "x",
+      "utf8"
+    );
+    await fs.writeFile(
+      workflowPath,
+      JSON.stringify({
+        nodes: [
+          { id: 1, type: "LoadImage", properties: { cnr_id: "comfy-core" }, widgets_values: ["photo1.jpg"] },
+          { id: 2, type: "LoadImage", properties: { cnr_id: "comfy-core" }, widgets_values: ["nowhere.jpg"] },
+          {
+            id: 3,
+            type: "RIFE VFI",
+            properties: { cnr_id: "comfyui-frame-interpolation" },
+            widgets_values: ["rife47.pth"]
+          }
+        ],
+        links: []
+      }),
+      "utf8"
+    );
+    const task: MigrationTask = {
+      id: "task",
+      name: "Task",
+      status: "running",
+      workflowPath,
+      workspacePath: root,
+      artifactPath,
+      createdAt: "now",
+      updatedAt: "now",
+      steps: [{ id: "01", status: "running" }]
+    };
+
+    const result = await ensureAssetPrep({ task, modelRoots: [], comfyuiRoot });
+    const csv = await fs.readFile(result.assetsPath, "utf8");
+
+    expect(csv).toContain("photo1.jpg");
+    expect(csv).toContain("local ComfyUI input dir exact match");
+    expect(csv).toContain("nowhere.jpg");
+    expect(csv).toContain("input media file not staged");
+    expect(csv).toContain("rife47.pth");
+    expect(csv).toContain("local model root exact match");
+    expect(result.gapDetails.some((g) => g.name === "photo1.jpg")).toBe(false);
+    expect(result.gapDetails.some((g) => g.name === "nowhere.jpg")).toBe(true);
+    expect(result.gapDetails.some((g) => g.name === "rife47.pth")).toBe(false);
+  });
 });

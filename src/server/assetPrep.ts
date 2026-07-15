@@ -35,10 +35,18 @@ export async function ensureAssetPrep(input: {
   const stepId = input.stepId ?? "01";
   const workflow = JSON.parse(await fs.readFile(input.task.workflowPath, "utf8")) as WorkflowGraph;
   const nodes = Array.isArray(workflow.nodes) ? workflow.nodes : [];
-  const modelRoots = uniquePaths([...input.modelRoots, path.join(input.comfyuiRoot, "models")]);
+  // Custom nodes commonly bundle their own checkpoints outside models/ (e.g.
+  // ComfyUI-Frame-Interpolation/ckpts/rife/rife47.pth) — search there too, not
+  // just the models/ tree, so a genuinely-present file isn't reported as a gap.
+  const modelRoots = uniquePaths([
+    ...input.modelRoots,
+    path.join(input.comfyuiRoot, "models"),
+    path.join(input.comfyuiRoot, "custom_nodes")
+  ]);
   const models = extractModels(nodes);
   const mediaAssets = extractInputMedia(nodes);
   const modelIndex = await indexModels(modelRoots);
+  const mediaIndex = await indexMediaFiles(path.join(input.comfyuiRoot, "input"));
   const customRows = await customNodeRows(nodes, path.join(input.comfyuiRoot, "custom_nodes"));
   const assetRows = [
     ...models.map((model) => {
@@ -64,23 +72,26 @@ export async function ensureAssetPrep(input: {
         gap: exact[0] ? "" : aliases.length ? "alias available, not source-identical" : "source-identical asset not staged"
       };
     }),
-    ...mediaAssets.map((media) => ({
-      asset_name: media.name,
-      requested_name: media.name,
-      resolved_path: "",
-      source: "input media — not a model file",
-      state: "source unknown" as string,
-      staged_path: "",
-      custom_node_repo: "",
-      custom_node_cache_path: "",
-      wrapper_source_evidence: media.node,
-      commit: "",
-      install_status: "missing",
-      acquisition_status: "unresolved",
-      mirror_used: "none",
-      credential_recorded: "false",
-      gap: "input media file not staged — requires human upload or source confirmation"
-    }))
+    ...mediaAssets.map((media) => {
+      const match = mediaIndex.get(path.posix.basename(media.name.replaceAll("\\", "/")));
+      return {
+        asset_name: media.name,
+        requested_name: media.name,
+        resolved_path: match ?? "",
+        source: match ? "local ComfyUI input dir exact match" : "input media — not a model file",
+        state: match ? "staged" : ("source unknown" as string),
+        staged_path: match ?? "",
+        custom_node_repo: "",
+        custom_node_cache_path: "",
+        wrapper_source_evidence: media.node,
+        commit: "",
+        install_status: match ? "present" : "missing",
+        acquisition_status: match ? "complete" : "unresolved",
+        mirror_used: "none",
+        credential_recorded: "false",
+        gap: match ? "" : "input media file not staged — requires human upload or source confirmation"
+      };
+    })
   ];
   const assetsPath = path.join(input.task.artifactPath, `${stepId}-assets.csv`);
   const customNodesPath = path.join(input.task.artifactPath, `${stepId}-custom-nodes.md`);
@@ -428,6 +439,18 @@ function cell(value: string): string {
 }
 
 const mediaPattern = /\.(png|jpe?g|webp|gif|mp4|mov|webm|avi|mkv|wav|mp3|flac)$/i;
+
+/** Index ComfyUI's own input/ dir by basename, so a media file the workflow
+ * already references (uploaded via the source GUI) is recognized as staged
+ * instead of always deferring to a human. */
+async function indexMediaFiles(inputRoot: string): Promise<Map<string, string>> {
+  const result = new Map<string, string>();
+  await walk(inputRoot, (file) => {
+    if (!mediaPattern.test(file)) return;
+    result.set(path.basename(file), file);
+  });
+  return result;
+}
 
 function extractInputMedia(nodes: WorkflowNode[]): Array<{ name: string; node: string }> {
   const result = new Map<string, { name: string; node: string }>();
