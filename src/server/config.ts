@@ -13,6 +13,14 @@ export interface AppConfig {
   modelRoots: string[];
   /** Path to gpu-nodes.json — single source of truth for ComfyUI launch targets. */
   gpuNodesPath: string;
+  /**
+   * Source ComfyUI object_info — the "truth table" of node/enum capabilities in
+   * the environment the workflow was authored in. Used to detect implicit package
+   * dependencies (enum widget values injected by a source-side custom package).
+   * A URL (GET {url}/object_info) or a path to a snapshot JSON. Optional.
+   */
+  sourceObjectInfoUrl?: string;
+  sourceObjectInfoPath?: string;
   copilotCliPath?: string;
   autoApproveAgentPermissions: boolean;
 }
@@ -42,6 +50,10 @@ export function loadConfig(): AppConfig {
     modelRoots: uniquePaths([demoModelRoot, ...configuredModelRoots]),
     // gpu-nodes.json at project root by default; override via GPU_NODES_PATH for tests.
     gpuNodesPath: resolveFromProject(process.env.GPU_NODES_PATH ?? "gpu-nodes.json"),
+    sourceObjectInfoUrl: process.env.SOURCE_COMFYUI_URL || undefined,
+    sourceObjectInfoPath: process.env.SOURCE_OBJECT_INFO_PATH
+      ? resolveFromProject(process.env.SOURCE_OBJECT_INFO_PATH)
+      : undefined,
     copilotCliPath: process.env.COPILOT_CLI_PATH,
     autoApproveAgentPermissions: process.env.MIGRATION_AGENT_AUTO_APPROVE !== "0"
   };

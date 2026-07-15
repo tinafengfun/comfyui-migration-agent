@@ -42,6 +42,7 @@ import { ensureFeasibility } from "./feasibility";
 import { ensureDir, safeJoin, writeJson } from "./fsUtils";
 import { HumanApprovalBroker } from "./humanApprovalBroker";
 import { ensureIntakePreflight } from "./intakePreflight";
+import { loadSourceObjectInfo, buildEnumPackageResolver } from "./sourceObjectInfo";
 import {
   compactStoredPhase1TaskState,
   normalizePhase1StepStatus,
@@ -224,10 +225,29 @@ export class MigrationOrchestrator {
     });
 
     if (stepId === "00") {
+      // Source object_info + recipe-backed package resolver enable implicit
+      // package-dependency detection (enum widget values injected by a source-side
+      // custom package). Best-effort: undefined source info falls back to the
+      // comfy-core baseline + recipe mapping.
+      const sourceObjectInfo = await loadSourceObjectInfo(this.config);
+      if (sourceObjectInfo) {
+        const soiPath = path.join(task.artifactPath, "00-source-object-info.json");
+        await fs.writeFile(soiPath, `${JSON.stringify(sourceObjectInfo, null, 2)}\n`, "utf8");
+        await this.store.appendArtifact({
+          taskId,
+          stepId,
+          path: soiPath,
+          relativePath: path.relative(task.workspacePath, soiPath),
+          kind: "json"
+        });
+      }
+      const resolveEnumPackage = buildEnumPackageResolver();
       const intake = await ensureIntakePreflight({
         task,
         modelRoots: this.config.modelRoots,
-        comfyuiRoot: this.config.comfyuiRoot
+        comfyuiRoot: this.config.comfyuiRoot,
+        sourceObjectInfo,
+        resolveEnumPackage
       });
       await this.store.appendArtifact({
         taskId,

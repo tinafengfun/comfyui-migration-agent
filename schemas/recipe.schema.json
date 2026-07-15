@@ -33,6 +33,20 @@
       "type": "string",
       "description": "Glob matched against model filenames. Absent means 'all models for this nodeType'."
     },
+    "providesEnumValues": {
+      "type": "array",
+      "description": "Enum widget values this package injects into the host nodeType's dropdowns (e.g. RES4LYF adds ['res_2s','res_2m','bong_tangent']). Used to detect implicit package dependencies: a workflow using one of these values needs this package installed on the target to stay identical to source.",
+      "items": { "type": "string" }
+    },
+    "enumSlots": {
+      "type": "array",
+      "description": "The host nodeType's enum slots the values above belong to, e.g. ['sampler_name','scheduler'].",
+      "items": { "type": "string" }
+    },
+    "packageRepo": {
+      "type": "string",
+      "description": "Git repo URL to clone into custom_nodes/ to install this package (for enum-value/custom-node dependencies)."
+    },
     "xpuSupport": {
       "type": "string",
       "enum": ["native", "patched", "cpu_offload", "unsupported", "unknown"],

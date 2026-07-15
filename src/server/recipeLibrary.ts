@@ -38,6 +38,12 @@ export interface Recipe {
   version: string;
   nodeType: string;
   modelPattern?: string;
+  /** Enum widget values this package injects into the host nodeType's dropdowns. */
+  providesEnumValues?: string[];
+  /** The host nodeType's enum slots those values belong to (e.g. sampler_name). */
+  enumSlots?: string[];
+  /** Git repo to clone into custom_nodes/ to install this package. */
+  packageRepo?: string;
   xpuSupport: "native" | "patched" | "cpu_offload" | "unsupported" | "unknown";
   patchClass?: "registration_only" | "functional_runtime_support" | "runtime_policy" | "none";
   patchFile?: string;

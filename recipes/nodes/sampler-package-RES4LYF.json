@@ -1,0 +1,37 @@
+{
+  "recipeId": "sampler-package-RES4LYF",
+  "version": "1.0.0",
+  "nodeType": "KSampler",
+  "providesEnumValues": [
+    "res_2s", "res_2m", "res_3s", "res_3m", "res_5s", "res_6s",
+    "bong_tangent", "bong_tangent_2", "bong_tangent_2_simple",
+    "clownsharkchunk", "res_multistep_ancestral_rf"
+  ],
+  "enumSlots": ["sampler_name", "scheduler"],
+  "packageRepo": "https://github.com/ClownsharkBatwing/RES4LYF",
+  "xpuSupport": "native",
+  "patchClass": "none",
+  "knownIssues": [
+    "RES4LYF registers extra samplers (res_2s, res_2m, ...) and schedulers (bong_tangent, ...) into the core KSampler dropdowns. If the package is not installed on the target, those enum values are silently absent and ComfyUI rejects the prompt with `'res_2s' not in (list)` — a core node (KSampler, cnr_id comfy-core) whose dropdown was extended by this package, so node-type scanning misses the dependency entirely.",
+    "The apple-to-apple fix is to install this package on the target so the values exist natively. Substituting to the closest core value (res_2s -> res_multistep, bong_tangent -> normal) changes the denoising trajectory and breaks pixel-level fidelity; it is a human-approved last resort only."
+  ],
+  "workarounds": [
+    {
+      "action": "Install RES4LYF on the target: git clone https://github.com/ClownsharkBatwing/RES4LYF into ComfyUI/custom_nodes, install its requirements, restart ComfyUI, then re-fetch /object_info and confirm the enum value (e.g. res_2s) now appears under KSampler.sampler_name.",
+      "rationale": "Restores the exact sampler/scheduler the source workflow used — keeps output identical (apple-to-apple).",
+      "tradeoff": "Adds one custom-node dependency to deploy on each target node. Prefer installing to a shared node library so it accumulates across nodes."
+    },
+    {
+      "action": "LAST RESORT (requires explicit human approval, flag as fidelity-degrading): substitute to the closest core value — sampler_name res_2s -> res_multistep, scheduler bong_tangent -> normal — via runtime-policy JSON.",
+      "rationale": "Lets the workflow run when the package genuinely cannot be installed (repo unreachable / XPU-incompatible).",
+      "tradeoff": "Different denoising algorithm + sigma schedule -> visibly different image. NOT apple-to-apple. Must be human-approved and recorded."
+    }
+  ],
+  "provenance": {
+    "taskOrigin": "de567f1f-6a8d-4d45-9d7a-1d8c24ef3fd0",
+    "evidenceArtifact": "06-prompt-validation-summary.json",
+    "createdAt": "2026-07-15",
+    "approvedBy": "tinafengfun"
+  },
+  "retireCondition": "ComfyUI core adds res_2s / bong_tangent to its built-in sampler/scheduler lists, making the package unnecessary."
+}

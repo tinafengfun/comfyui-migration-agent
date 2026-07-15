@@ -1,6 +1,12 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { MigrationTask } from "../shared/types";
+import {
+  detectEnumDependencies,
+  renderEnumDependencyCsv,
+  type EnumDependency,
+  type ObjectInfo
+} from "./enumDependencies";
 
 export interface IntakePreflightResult {
   artifactPath: string;
@@ -8,6 +14,7 @@ export interface IntakePreflightResult {
   hardStops: string[];
   modelRows: AssetRow[];
   customNodeRows: CustomNodeRow[];
+  enumDependencies: EnumDependency[];
 }
 
 interface AssetRow {
@@ -52,6 +59,10 @@ export async function ensureIntakePreflight(input: {
   task: MigrationTask;
   modelRoots: string[];
   comfyuiRoot: string;
+  /** Source-environment object_info (truth table) for implicit-package detection. */
+  sourceObjectInfo?: ObjectInfo;
+  /** Maps an enum (slot,value) → the package that provides it (from recipes). */
+  resolveEnumPackage?: (slot: string, value: string) => string | undefined;
 }): Promise<IntakePreflightResult> {
   const workflow = JSON.parse(await fs.readFile(input.task.workflowPath, "utf8")) as WorkflowGraph;
   const nodes = Array.isArray(workflow.nodes) ? workflow.nodes : [];
@@ -64,6 +75,12 @@ export async function ensureIntakePreflight(input: {
   const modelIndex = await indexExactFilenames(modelRoots, modelRequests.map((request) => request.name));
   const aliasIndex = await indexPossibleAliases(modelRoots, modelRequests.map((request) => request.name));
   const customNodeRows = await buildCustomNodeRows(nodes, customNodeRoot);
+  // Implicit package dependencies: enum widget values (sampler_name, scheduler, …)
+  // injected by a source-side custom package but absent from target core. These are
+  // invisible to node-type scanning (the host node is often comfy-core).
+  const enumDeps = detectEnumDependencies(nodes, input.sourceObjectInfo, input.resolveEnumPackage);
+  const enumDepCsv = renderEnumDependencyCsv(enumDeps);
+  await fs.writeFile(path.join(input.task.artifactPath, "00-enum-dependencies.csv"), enumDepCsv, "utf8");
   const modelRows = modelRequests.map((request) =>
     buildAssetRow(request, modelIndex.get(request.name) ?? [], aliasIndex.get(request.name) ?? [])
   );
@@ -83,10 +100,25 @@ export async function ensureIntakePreflight(input: {
       .map((row) => `Required asset source is not proven: ${row.requestedAsset}`),
     ...customNodeRows
       .filter((row) => row.criticalPath === "yes" && row.state === "source unknown")
-      .map((row) => `Critical custom-node source is not proven: ${row.nodeType}`)
+      .map((row) => `Critical custom-node source is not proven: ${row.nodeType}`),
+    // Enum-value dependency whose providing package we cannot identify → hard stop
+    // (a human must identify the source package). Ones with a known package are
+    // NOT a hard stop — they're resolvable by install at Step 01/05.
+    ...enumDeps
+      .filter((d) => d.state === "source unknown")
+      .map(
+        (d) =>
+          `Implicit package dependency unidentified: node ${d.nodeId} ${d.nodeType}.${d.slot}="${d.value}" is not a target-core value and no providing package is known — identify it from the source environment (do NOT substitute).`
+      )
   ];
+  // Enum deps with a known package are resolvable gaps (install at Step 01/05).
+  const enumDepGaps = enumDeps.filter((d) => d.state === "source known").length;
   const canContinueToFeasibility =
-    hardStops.length > 0 ? "no" : rows.some((row) => row.state !== "staged") ? "yes-with-gaps" : "yes";
+    hardStops.length > 0
+      ? "no"
+      : rows.some((row) => row.state !== "staged") || enumDepGaps > 0
+        ? "yes-with-gaps"
+        : "yes";
   const outputNodes = nodes
     .filter((node) => isOutputNode(node.type))
     .map((node) => `${node.id ?? "?"}:${node.type ?? "(unknown)"}`);
@@ -110,6 +142,7 @@ export async function ensureIntakePreflight(input: {
     `required_models: ${modelRequests.length ? modelRequests.map((request) => request.name).join(", ") : "none detected"}`,
     `required_input_media: ${mediaRequests.length ? mediaRequests.join(", ") : "none detected"}`,
     `required_custom_nodes: ${customNodeRows.length ? customNodeRows.map((row) => row.nodeType).join(", ") : "none detected"}`,
+    `implicit_package_dependencies: ${enumDeps.length ? enumDeps.map((d) => `${d.nodeType}.${d.slot}="${d.value}"→${d.resolvingPackage}`).join("; ") : "none detected"}`,
     `dependency_states: ${summarizeStates([...rows, ...customNodeRows])}`,
     `hard_stops: ${hardStops.length ? hardStops.join("; ") : "none"}`,
     `human_inputs_needed: ${humanInputs(rows, customNodeRows)}`,
@@ -130,6 +163,19 @@ export async function ensureIntakePreflight(input: {
       ? customNodeRows.map(formatCustomNodeRow)
       : ["| none detected | - | - | - | - | - |"]),
     "",
+    "## Implicit package dependencies (enum widget values)",
+    "",
+    "Enum widget values (sampler_name, scheduler, …) that a source-side custom package injected into a node's dropdown. Apple-to-apple fix = install the providing package on the target (see `00-enum-dependencies.csv`); substitution is a human-approved last resort.",
+    "",
+    "| Node | Slot | Value | In target core? | Resolving package | State |",
+    "| --- | --- | --- | --- | --- | --- |",
+    ...(enumDeps.length
+      ? enumDeps.map(
+          (d) =>
+            `| ${d.nodeId}:${d.nodeType} | ${d.slot} | ${d.value} | ${d.targetCoreHas ? "yes" : "no"} | ${d.resolvingPackage} | ${d.state} |`
+        )
+      : ["| none detected | - | - | - | - | - |"]),
+    "",
     "## Preflight decision",
     "",
     "| Decision item | Result |",
@@ -147,7 +193,7 @@ export async function ensureIntakePreflight(input: {
   ].join("\n");
 
   await fs.writeFile(artifactPath, content, "utf8");
-  return { artifactPath, canContinueToFeasibility, hardStops, modelRows, customNodeRows };
+  return { artifactPath, canContinueToFeasibility, hardStops, modelRows, customNodeRows, enumDependencies: enumDeps };
 }
 
 function extractModelRequests(nodes: WorkflowNode[]): Array<{ name: string; role: string; expectedFolder: string }> {
