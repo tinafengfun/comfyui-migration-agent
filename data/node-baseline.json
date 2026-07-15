@@ -1,0 +1,14 @@
+{
+  "_comment": "Curated baseline of custom-node packages that recur across migrated workflows on this fleet. node-precheck.mts checks these are present on a target and (with --prepare) installs missing ones. Grows over time — add a package here once a workflow needed it, so new nodes are prepared once instead of tripping repeatedly. dir = the custom_nodes/ directory name; repo = git url to clone.",
+  "custom_nodes": [
+    { "dir": "rgthree-comfy", "repo": "https://github.com/rgthree/rgthree-comfy", "provides": "Fast Groups Bypasser, Power Lora Loader, Image Comparer" },
+    { "dir": "ComfyUI-KJNodes", "repo": "https://github.com/kijai/ComfyUI-KJNodes", "provides": "PatchSageAttentionKJ, ImageResizeKJv2" },
+    { "dir": "ComfyUI_LayerStyle", "repo": "https://github.com/chflame163/ComfyUI_LayerStyle", "provides": "LayerColor, LayerUtility scaling/VRAM cleanup" },
+    { "dir": "ComfyUI-SeedVR2_VideoUpscaler", "repo": "https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler", "provides": "SeedVR2 DiT/VAE loaders + video upscaler" },
+    { "dir": "ComfyUI-QwenVL", "repo": "https://github.com/1038lab/ComfyUI-QwenVL", "provides": "AILab_QwenVL prompt enhancement" },
+    { "dir": "comfyui_controlnet_aux", "repo": "https://github.com/Fannovel16/comfyui_controlnet_aux", "provides": "ControlNet preprocessors (AIO_Preprocessor, DepthAnything)" },
+    { "dir": "comfyui-vrgamedevgirl", "repo": "https://github.com/vrgamegirl19/comfyui-vrgamedevgirl", "provides": "FastFilmGrain" },
+    { "dir": "ComfyUI_Comfyroll_CustomNodes", "repo": "https://github.com/Suzie1/ComfyUI_Comfyroll_CustomNodes", "provides": "CR Text and other Comfyroll utility nodes" },
+    { "dir": "RES4LYF", "repo": "https://github.com/ClownsharkBatwing/RES4LYF", "provides": "extra samplers (res_2s, res_2m, …) + schedulers (bong_tangent, …) injected into KSampler" }
+  ]
+}

@@ -1,0 +1,90 @@
+{
+  "node": "remote-124-12",
+  "ok": true,
+  "checks": [
+    {
+      "name": "ssh_reachable",
+      "status": "ok",
+      "detail": "ok"
+    },
+    {
+      "name": "torch_xpu",
+      "status": "ok",
+      "detail": "True"
+    },
+    {
+      "name": "model_roots",
+      "status": "ok",
+      "detail": "/home/intel/hf_models:ok"
+    },
+    {
+      "name": "custom_node:rgthree-comfy",
+      "status": "ok",
+      "detail": "present",
+      "fixable": false
+    },
+    {
+      "name": "custom_node:ComfyUI-KJNodes",
+      "status": "ok",
+      "detail": "present",
+      "fixable": false
+    },
+    {
+      "name": "custom_node:ComfyUI_LayerStyle",
+      "status": "ok",
+      "detail": "present",
+      "fixable": false
+    },
+    {
+      "name": "custom_node:ComfyUI-SeedVR2_VideoUpscaler",
+      "status": "ok",
+      "detail": "present",
+      "fixable": false
+    },
+    {
+      "name": "custom_node:ComfyUI-QwenVL",
+      "status": "ok",
+      "detail": "present",
+      "fixable": false
+    },
+    {
+      "name": "custom_node:comfyui_controlnet_aux",
+      "status": "ok",
+      "detail": "present",
+      "fixable": false
+    },
+    {
+      "name": "custom_node:comfyui-vrgamedevgirl",
+      "status": "ok",
+      "detail": "present",
+      "fixable": false
+    },
+    {
+      "name": "custom_node:ComfyUI_Comfyroll_CustomNodes",
+      "status": "ok",
+      "detail": "present",
+      "fixable": false
+    },
+    {
+      "name": "custom_node:RES4LYF",
+      "status": "ok",
+      "detail": "present",
+      "fixable": false
+    },
+    {
+      "name": "object_info",
+      "status": "ok",
+      "detail": "1953 node types registered"
+    },
+    {
+      "name": "sampler_pkg:KSampler.sampler_name=res_2s",
+      "status": "ok",
+      "detail": "value present",
+      "fixable": false
+    }
+  ],
+  "gaps": [],
+  "fixable": [],
+  "apiUrl": "http://172.16.124.12:8188",
+  "generatedAt": "2026-07-15T11:30:23.359Z"
+}

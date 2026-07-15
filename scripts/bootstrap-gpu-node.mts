@@ -526,9 +526,12 @@ async function registerNode(args: Args, nfsResult: { installed: boolean; localIp
 
   ok(`Registered "${args.name}" in ${config.gpuNodesPath}.`);
   console.log(`\nNext steps:`);
-  console.log(`  1. Open the web UI and pick "${args.name}" from the GPU node dropdown.`);
-  console.log(`  2. Upload a workflow, run to Step 05 — the agent will SSH-launch ComfyUI on the remote.`);
-  console.log(`  3. To test the connection from the GUI: open Manage GPU Nodes → Test.`);
+  console.log(`  1. Precheck + prepare env deps (custom nodes, sampler packages, xpu, models):`);
+  console.log(`       npx tsx scripts/node-precheck.mts --node "${args.name}" --prepare`);
+  console.log(`     (prepares a fresh node ONCE so migrations don't trip on missing nodes/packages)`);
+  console.log(`  2. Open the web UI and pick "${args.name}" from the GPU node dropdown.`);
+  console.log(`  3. Upload a workflow, run to Step 05 — the agent will SSH-launch ComfyUI on the remote.`);
+  console.log(`  See scripts/TOOLS.md for the full tool index.`);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
