@@ -201,14 +201,15 @@ Not supported by this package: {", ".join(package["claim_boundary"]["not_support
 
 ## Key files
 
-- `workflows/source-workflow.json`: preserved source workflow copy.
-- `workflows/runtime-policy-api-prompt.json`: validated runtime-policy API prompt for XPU execution.
+- `workflows/runtime-policy-gui-workflow.json` (added by Step 12): **import this into ComfyUI to actually run the migration.** Preserves the original node/link graph 1:1 and applies only the documented, strictly-required runtime-policy widget fixes for this target — see `GUI-IMPORT-README.md`.
+- `workflows/source-workflow.json`: preserved, unmodified source workflow copy — fidelity reference only, not for direct execution if `workflows/runtime-policy-changes.json` lists any required changes.
+- `workflows/runtime-policy-api-prompt.json`: validated runtime-policy API prompt for XPU execution (API format, not GUI-importable).
 - `runtime/extra-model-paths.yaml`: model path wiring used for validation.
 - `validation/`: prompt, branch smoke, full validation, tuning, and coverage evidence.
 - `ledgers/`: asset, custom-node, model wiring, and coverage ledgers.
 - `outputs/`: retained reduced full-path output media from Step 08.
 
-Customer GUI/manual acceptance remains Step 12 and is not claimed here.
+Customer GUI/manual acceptance remains Step 12 and is not claimed here. `workflows/runtime-policy-gui-workflow.json` and `GUI-IMPORT-README.md` are written by Step 12, not present until that step runs.
 """
 
 
@@ -299,7 +300,7 @@ def render_manual_plan(package: dict[str, Any]) -> str:
 Step 12 must use this package as input and record GUI/manual acceptance evidence.
 
 1. Start the ComfyUI service using `runtime/extra-model-paths.yaml`.
-2. Import or reconstruct the GUI workflow from `workflows/source-workflow.json`; use `workflows/runtime-policy-api-prompt.json` only as API evidence, not as a GUI import claim.
+2. Import `workflows/runtime-policy-gui-workflow.json` (written by Step 12; preserves the original node/link graph 1:1 with only the required runtime-policy widget fixes applied). Do not import `workflows/source-workflow.json` directly if `workflows/runtime-policy-changes.json` lists any required changes — that copy is the unmodified fidelity reference only. `workflows/runtime-policy-api-prompt.json` is API-format evidence, not a GUI import.
 3. Confirm model paths and custom-node registration in the UI.
 4. Queue a reduced validation run first; record prompt, queue response, history, output files, and logs.
 5. If requesting full-size/original-resolution validation, get explicit human approval before running due to Step 08 memory boundary.

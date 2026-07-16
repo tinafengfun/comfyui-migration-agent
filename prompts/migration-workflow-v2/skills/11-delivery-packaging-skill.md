@@ -35,6 +35,7 @@ Use after migration, validation, and review evidence are available.
 - patch application steps not reproducible
 - customer GUI validation omitted
 - result report lacks branch coverage or hard-stop evidence
+- delivered/customer-facing docs point at the unmodified `workflows/source-workflow.json` for actual GUI import when required runtime-policy changes exist (`workflows/runtime-policy-changes.json` non-empty) — the only importable file proven to run on the target is Step 12's `workflows/runtime-policy-gui-workflow.json`; `customer_ready`/GUI-acceptance claims must not be made until that file is present in the package
 - package copies stale or previous-attempt outputs instead of the accepted Step 08 output list
 - Step 11 marks customer-ready before Step 12 GUI/manual evidence exists
 

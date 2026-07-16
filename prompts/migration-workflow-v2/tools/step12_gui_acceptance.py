@@ -7,6 +7,7 @@ import argparse
 import csv
 import json
 import os
+import shutil
 import stat
 import urllib.error
 import urllib.request
@@ -177,6 +178,20 @@ def build_readiness(workspace: Path, api_url: str) -> dict[str, Any]:
         "pid_running": pid_running,
         "server_log": str(artifact_dir / "05-comfyui-server.log"),
     }
+
+
+def render_gui_import_readme(source_workflow: Path, delivery_gui_workflow: Path) -> str:
+    return f"""# Which workflow file to import
+
+This package contains two workflow JSON files. They are not interchangeable:
+
+| File | Use for | Notes |
+| --- | --- | --- |
+| `workflows/runtime-policy-gui-workflow.json` | **Actually importing into ComfyUI and running.** | Preserves the original node/link graph 1:1 (no nodes, links, or bypasses added/removed) and applies only the documented, strictly-required runtime-policy widget fixes for this target (see `workflows/runtime-policy-changes.json`). This is the same file Step 12 GUI acceptance tested. |
+| `workflows/source-workflow.json` | Fidelity reference / audit only. | Unmodified copy of what was submitted. Import this only to diff/compare against the original — if any runtime-policy changes were required (check `workflows/runtime-policy-changes.json`), running this one directly on the target may fail. |
+
+Source: `{source_workflow}` -> `{delivery_gui_workflow}` (copied here by Step 12 after GUI-acceptance preparation).
+"""
 
 
 def render_launch_script(workspace: Path, delivery_dir: Path, api_url: str) -> str:
@@ -441,6 +456,7 @@ Step 11 provided enough context to prepare GUI acceptance: delivery directory, s
 - Output prefix changes: `{len(summary["workflow_preparation"]["output_prefix_changes"])}`
 - Frontend stale preview cleanups: `{len(summary["workflow_preparation"]["frontend_cleanups"])}`
 - Workflow diff summary: `{summary["workflow_diff_summary_markdown"]}`
+- Copied into delivery package for actual customer import: `{summary["delivery_gui_workflow"]}`
 
 ## Workflow JSON differences and compromises
 
@@ -627,6 +643,16 @@ def main() -> int:
         gui_workflow,
     )
     diff = workflow_diff_summary(delivery_manifest, workflow_prep, source_workflow, gui_workflow)
+
+    # Unify delivery with what was actually verified: the graph-preserving,
+    # runtime-fixed GUI workflow is the only artifact that is both importable
+    # and proven to run on the target -- copy it into the Step 11 delivery
+    # package so the customer is not pointed at the unfixed source-workflow.json.
+    delivery_dir = Path(delivery_manifest["delivery_dir"])
+    delivery_gui_workflow = delivery_dir / "workflows" / "runtime-policy-gui-workflow.json"
+    delivery_gui_workflow.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(gui_workflow, delivery_gui_workflow)
+    write_text(delivery_dir / "GUI-IMPORT-README.md", render_gui_import_readme(source_workflow, delivery_gui_workflow))
     readiness = build_readiness(workspace, api_url)
     launch_script = step_dir / "12-launch-gui.sh"
     write_text(launch_script, render_launch_script(workspace, Path(delivery_manifest["delivery_dir"]), api_url))
@@ -659,6 +685,7 @@ def main() -> int:
         "command_used": f"{Path(__file__).resolve()} --workspace {workspace} --api-url {api_url}",
         "delivery_dir": delivery_manifest["delivery_dir"],
         "gui_workflow_json": str(gui_workflow),
+        "delivery_gui_workflow": str(delivery_gui_workflow),
         "model_path_config": delivery_manifest["step12_context"]["extra_model_paths"],
         "prepare_script": str(launch_script),
         "manual_checklist": str(checklist_path),

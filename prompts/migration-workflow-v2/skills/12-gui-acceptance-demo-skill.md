@@ -23,6 +23,7 @@ Use after Step 11 delivery packaging when the next goal is a clean-environment G
    - runtime-policy GUI workflow, source-identical workflow, or both
    - full fidelity or explicitly reduced demo mode
    - manual operator and target environment requirements
+   - **if a reduced/demo-mode pass is taken, write it to a separately-named file (e.g. a `-demo-mode` suffix) and never let it overwrite or be copied in place of `{delivery_dir}/workflows/runtime-policy-gui-workflow.json`.** That path is reserved for the graph-preserving (0 nodes/links added, removed, or bypassed), full-fidelity, runtime-fixed file so what's delivered and what's verified stay the same file. A demo-mode pass is an optional, clearly-labeled convenience check, not a substitute for it.
 2. Prepare a clean ComfyUI environment recipe:
    - install or point to all required custom nodes
    - apply local compatibility patches
