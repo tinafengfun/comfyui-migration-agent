@@ -137,9 +137,48 @@ def run_validations(
             return asyncio.run(runner())
 
 
+
+# Node types that pause execution waiting for a browser client to confirm via a
+# custom websocket/HTTP route (e.g. Comfyui_Prompt_Edit polls a `confirmed` flag
+# for up to an hour). No client is attached during headless Step 06-09 API
+# validation, so these nodes hang indefinitely and were previously misdiagnosed
+# as an XPU model-loading deadlock. Bypassed ONLY in the runtime-policy variant
+# consumed by automated tests (06b-runtime-policy-prompt.json + branch prompts)
+# -- the source-preserving prompt and the GUI workflow delivered to the customer
+# (Steps 11/12) are never touched, so a real human GUI run still gets the
+# interactive prompt-edit step as designed.
+HUMAN_IN_THE_LOOP_NODE_TYPES = {"Prompt_Edit"}
+
+
+def bypass_human_in_the_loop_nodes(variant: dict[str, Any]) -> list[dict[str, Any]]:
+    changes: list[dict[str, Any]] = []
+    for node_id in [nid for nid, node in variant.items() if node.get("class_type") in HUMAN_IN_THE_LOOP_NODE_TYPES]:
+        node = variant[node_id]
+        upstream = node.get("inputs", {}).get("text")
+        if not (isinstance(upstream, list) and len(upstream) == 2):
+            continue  # forceInput text should always be a link; skip defensively if not
+        for other in variant.values():
+            for input_name, value in other.get("inputs", {}).items():
+                if isinstance(value, list) and len(value) == 2 and value[0] == node_id:
+                    other["inputs"][input_name] = list(upstream)
+        del variant[node_id]
+        changes.append(
+            {
+                "node_id": node_id,
+                "class_type": node.get("class_type"),
+                "input_name": None,
+                "old_value": f"node {node_id} (blocks on browser confirmation)",
+                "new_value": f"bypassed -> passthrough of upstream link {upstream}",
+                "reason": "human-in-the-loop node hangs indefinitely with no browser client attached during headless API validation; bypassed for automated tests only, not the delivered/GUI workflow",
+            }
+        )
+    return changes
+
+
 def apply_runtime_policy_variant(source_prompt: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     variant = json.loads(json.dumps(source_prompt, ensure_ascii=False))
     changes: list[dict[str, Any]] = []
+    changes.extend(bypass_human_in_the_loop_nodes(variant))
     for node_id, node in variant.items():
         class_type = node.get("class_type")
         inputs = node.setdefault("inputs", {})

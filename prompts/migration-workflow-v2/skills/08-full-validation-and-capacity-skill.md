@@ -20,6 +20,7 @@ Use after branch smoke to test target fidelity or highest-fidelity reproducible 
 
 1. Run the full or highest-fidelity prompt.
 2. Capture exact failing node and model path if it fails.
+2a. **If the prompt "hangs" (queue shows running, VRAM stays flat, no error) — do not assume a model-loading/XPU deadlock before checking for a human-in-the-loop node.** Some custom nodes (e.g. `Prompt_Edit`) pause execution waiting for a browser client to confirm, with a timeout up to an hour — indistinguishable from a stuck load using VRAM/queue state alone. Get a live stack trace first: `py-spy dump --pid <comfyui_pid> --locals` (install via `pip install py-spy` in the target venv if missing). If the worker thread is parked in a custom node's own wait loop rather than torch/XPU code, this is that class of issue, not a capacity/XPU problem — route back to Step 06's `bypass_human_in_the_loop_nodes()` fix (see Step 06 skill 8a) rather than spending capacity-analysis effort on it.
 3. Compare runtime free/required memory with hardware budget.
 4. Compare active weights and activation estimate with runtime evidence.
 5. Try only reasonable mitigations.
