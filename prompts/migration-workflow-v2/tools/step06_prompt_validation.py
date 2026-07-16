@@ -176,9 +176,12 @@ def bypass_human_in_the_loop_nodes(variant: dict[str, Any]) -> list[dict[str, An
 
 
 def apply_runtime_policy_variant(source_prompt: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    # Widget-value-shaped changes only (device/schema fixes). Step 11/12 replay this
+    # exact list onto the delivered GUI workflow, so it must never contain a
+    # structural change like the human-in-the-loop bypass above (own list/file,
+    # see bypass_human_in_the_loop_nodes + 06b-headless-test-bypasses.json).
     variant = json.loads(json.dumps(source_prompt, ensure_ascii=False))
     changes: list[dict[str, Any]] = []
-    changes.extend(bypass_human_in_the_loop_nodes(variant))
     for node_id, node in variant.items():
         class_type = node.get("class_type")
         inputs = node.setdefault("inputs", {})
@@ -442,6 +445,20 @@ def render_report(summary: dict[str, Any]) -> str:
     lines.extend(
         [
             "",
+            "## Headless-test-only bypasses (never applied to delivered/GUI workflow)",
+            "",
+        ]
+    )
+    if summary["headless_test_bypasses"]:
+        for change in summary["headless_test_bypasses"]:
+            lines.append(
+                f"- Node {change['node_id']} `{change['class_type']}`: {change['old_value']} -> {change['new_value']} ({change['reason']})"
+            )
+    else:
+        lines.append("- none")
+    lines.extend(
+        [
+            "",
             "## Input sufficiency and reflection",
             "",
             "- Step 05 provided enough live runtime context for no-queue validation: extra model paths, object_info, XPU runtime, and registered custom nodes.",
@@ -489,14 +506,24 @@ def main() -> int:
 
     workflow = load_workflow(workflow_path)
     source_prompt = convert_workflow(comfy_root, workflow)
-    variant_prompt, variant_changes = apply_runtime_policy_variant(source_prompt)
+    # source_prompt (source-preserving) is only ever structurally validated, never
+    # queued (see run_validations), so it never hits a human-in-the-loop hang and
+    # is left completely untouched. variant_prompt IS queued for real execution by
+    # Steps 07/08/09, so the bypass runs first on a separate copy, tracked in its
+    # own list/file -- never merged into the widget-value runtime-policy changes
+    # that Step 11/12 replay onto the delivered GUI workflow.
+    headless_test_prompt = json.loads(json.dumps(source_prompt, ensure_ascii=False))
+    headless_test_bypasses = bypass_human_in_the_loop_nodes(headless_test_prompt)
+    variant_prompt, variant_changes = apply_runtime_policy_variant(headless_test_prompt)
 
     source_prompt_path = artifact_dir / "06-source-preserving-prompt.json"
     variant_prompt_path = artifact_dir / "06b-runtime-policy-prompt.json"
     variant_changes_path = artifact_dir / "06b-runtime-policy-changes.json"
+    headless_test_bypasses_path = artifact_dir / "06b-headless-test-bypasses.json"
     write_json(source_prompt_path, source_prompt)
     write_json(variant_prompt_path, variant_prompt)
     write_json(variant_changes_path, variant_changes)
+    write_json(headless_test_bypasses_path, headless_test_bypasses)
 
     validation_log = artifact_dir / "06-offline-validation.log"
     source_validation, variant_validation = run_validations(
@@ -546,6 +573,8 @@ def main() -> int:
         "variant_prompt_path": str(variant_prompt_path),
         "variant_changes_path": str(variant_changes_path),
         "variant_changes": variant_changes,
+        "headless_test_bypasses_path": str(headless_test_bypasses_path),
+        "headless_test_bypasses": headless_test_bypasses,
         "variant_validation_path": str(variant_validation_path),
         "variant_validation": variant_validation,
         "variant_output_status": variant_status,
