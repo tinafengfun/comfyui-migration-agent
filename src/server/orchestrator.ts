@@ -8,7 +8,8 @@ import type {
   HumanDecisionContext,
   HumanQuestion,
   MigrationStepDefinition,
-  MigrationTask
+  MigrationTask,
+  StepStatus
 } from "../shared/types";
 import type { AppConfig } from "./config";
 import {
@@ -56,6 +57,13 @@ import { ensureSourceAuditCheckpoint } from "./sourceAuditCheckpoint";
 import type { StateStore } from "./state";
 import { ensureStepArtifactScaffold } from "./stepArtifactScaffold";
 import { createTaskWorkspace, deleteTaskWorkspace, getLayoutForTask } from "./taskWorkspaces";
+import { writeTaskStateLedger } from "./taskStateLedger";
+import {
+  applyItemStatusUpdates,
+  parseApprovalAnswer,
+  readAgentImprovementFile,
+  writeAgentImprovementFile
+} from "./agentImprovementPatch";
 import { STEP_OUTPUT_SUBDIR } from "./paths";
 import { appendFeedbackEvent, type FeedbackEventInput } from "./feedbackLog";
 import { recordRecipeOutcome } from "./analyticsDb";
@@ -183,6 +191,30 @@ export class MigrationOrchestrator {
     });
   }
 
+  /**
+   * Per-step-flow-only wrapper around `store.updateStep`: persists the step
+   * transition to the task store as before, then deterministically rebuilds
+   * `task-state.json` from that authoritative state (see taskStateLedger.ts).
+   * This replaces the old design where every per-step Copilot SDK session
+   * hand-maintained task-state.json itself with no backend writer at all.
+   *
+   * Deliberately NOT used by Phase 1 monolithic-driver call sites (those
+   * keep writing their own richer Phase1TaskState schema to the same file
+   * path via phase1Agent.ts) -- that mode is unreachable from the UI today,
+   * but wrapping its call sites here would clobber its schema mid-session.
+   */
+  private async updateStepAndPersist(
+    taskId: string,
+    stepId: string,
+    status: StepStatus,
+    patch: Partial<Pick<MigrationTask["steps"][number], "summary" | "error">> = {}
+  ): Promise<MigrationTask> {
+    const task = await this.store.updateStep(taskId, stepId, status, patch);
+    const decisions = await this.store.listDecisions(taskId);
+    await writeTaskStateLedger(task, decisions);
+    return task;
+  }
+
   async runStep(
     taskId: string,
     stepId: string,
@@ -205,7 +237,7 @@ export class MigrationOrchestrator {
     this.activeStepRuns.add(runKey);
 
     try {
-    await this.store.updateStep(taskId, stepId, "running");
+    await this.updateStepAndPersist(taskId, stepId, "running");
     await this.emit({
       taskId,
       stepId,
@@ -271,7 +303,7 @@ export class MigrationOrchestrator {
         intake.canContinueToFeasibility === "no"
           ? "Step 00 intake preflight completed with dependency-source gaps. Deep source search/download is deferred to Step 01 asset/custom-node resolution."
           : `Step 00 intake preflight completed: ${intake.canContinueToFeasibility}. Deep URL/custom-node source search is deferred to Step 01.`;
-      await this.store.updateStep(taskId, stepId, "completed", { summary, error: undefined });
+      await this.updateStepAndPersist(taskId, stepId, "completed", { summary, error: undefined });
       await this.emit({
         taskId,
         stepId,
@@ -449,7 +481,7 @@ export class MigrationOrchestrator {
         data: inventory
       });
       const summary = `Step 03 deterministic workflow inventory completed: ${inventory.nodeCount} nodes, ${inventory.linkCount} links.${normalizationNote}`;
-      await this.store.updateStep(taskId, stepId, "completed", { summary, error: undefined });
+      await this.updateStepAndPersist(taskId, stepId, "completed", { summary, error: undefined });
       await this.emit({
         taskId,
         stepId,
@@ -543,7 +575,7 @@ export class MigrationOrchestrator {
 
     if (preRunArtifactCompletion.complete) {
       const summary = `Step ${stepId} completed from existing required artifact. ${preRunArtifactCompletion.reason}`;
-      await this.store.updateStep(taskId, stepId, "completed", { summary, error: undefined });
+      await this.updateStepAndPersist(taskId, stepId, "completed", { summary, error: undefined });
       await this.emit({
         taskId,
         stepId,
@@ -557,7 +589,7 @@ export class MigrationOrchestrator {
       const result = await this.sdkRunner.runStep(job, async (event) => {
         return this.emit(event);
       }, async (event) => {
-        await this.store.updateStep(taskId, stepId, "waiting_for_human");
+        await this.updateStepAndPersist(taskId, stepId, "waiting_for_human");
         await this.emit({
           taskId,
           stepId,
@@ -582,7 +614,7 @@ export class MigrationOrchestrator {
             message: `Replay: auto-injecting SDK decision for Step ${stepId}: "${replayDecision.answer}"`
           });
           await this.store.appendDecision(replayResult);
-          await this.store.updateStep(taskId, stepId, "running");
+          await this.updateStepAndPersist(taskId, stepId, "running");
           return replayResult;
         }
         if (options.pauseOnHumanGate) {
@@ -590,11 +622,11 @@ export class MigrationOrchestrator {
           // Keep the SDK session alive so the agent can process the answer
           // and continue or write final artifacts.
           const decision = await this.approvalBroker.waitForDecision(event);
-          await this.store.updateStep(taskId, stepId, "running");
+          await this.updateStepAndPersist(taskId, stepId, "running");
           return decision;
         }
         const decision = await this.approvalBroker.waitForDecision(event);
-        await this.store.updateStep(taskId, stepId, "running");
+        await this.updateStepAndPersist(taskId, stepId, "running");
         return decision;
       });
       const summary = result.summary ?? "Copilot SDK session completed without a final assistant summary.";
@@ -633,7 +665,8 @@ export class MigrationOrchestrator {
       if (liveStep && (liveStep.status === "hard_stopped" || liveStep.status === "terminated")) {
         return;
       }
-      await this.store.updateStep(taskId, stepId, "completed", { summary });
+      if (stepId === "13" && (await this.pauseIfAgentImprovementApprovalNeeded(task, step))) return;
+      await this.updateStepAndPersist(taskId, stepId, "completed", { summary });
       // §H: record recipe outcome for analytics (fire-and-forget).
       recordRecipeOutcome(taskId, stepId, "success");
       await this.emit({
@@ -660,7 +693,7 @@ export class MigrationOrchestrator {
         if (retryCount < 1) {
           this.sdkTimeoutRetries.set(runKey, retryCount + 1);
           this.activeStepRuns.delete(runKey);
-          await this.store.updateStep(taskId, stepId, "running");
+          await this.updateStepAndPersist(taskId, stepId, "running");
           await this.emit({
             taskId,
             stepId,
@@ -674,7 +707,7 @@ export class MigrationOrchestrator {
         const artifactCompletion = await checkRequiredArtifactCompletion(task, step);
         if (artifactCompletion.complete) {
           const summary = `Step ${stepId} completed by required artifact after SDK watchdog timeout. ${artifactCompletion.reason}`;
-          await this.store.updateStep(taskId, stepId, "completed", { summary });
+          await this.updateStepAndPersist(taskId, stepId, "completed", { summary });
           await this.emit({
             taskId,
             stepId,
@@ -689,7 +722,7 @@ export class MigrationOrchestrator {
         (event) => event.stepId === stepId && event.type === "human_question"
       );
       if (hasOpenHumanQuestion) {
-        await this.store.updateStep(taskId, stepId, "waiting_for_human", { error: message });
+        await this.updateStepAndPersist(taskId, stepId, "waiting_for_human", { error: message });
         await this.emit({
           taskId,
           stepId,
@@ -701,7 +734,7 @@ export class MigrationOrchestrator {
         // alive — keep the step in `paused` so the user can resume without
         // losing prior agent context. rerunStep remains available as the
         // heavier "start over" option.
-        await this.store.updateStep(taskId, stepId, "paused", { error: message });
+        await this.updateStepAndPersist(taskId, stepId, "paused", { error: message });
         await this.emit({
           taskId,
           stepId,
@@ -718,7 +751,7 @@ export class MigrationOrchestrator {
           proposedAction: "escalate_opencode"
         });
       } else {
-        await this.store.updateStep(taskId, stepId, "failed", { error: message });
+        await this.updateStepAndPersist(taskId, stepId, "failed", { error: message });
         // §H: record recipe outcome for analytics (fire-and-forget).
         recordRecipeOutcome(taskId, stepId, "failed");
         await this.emit({
@@ -1490,7 +1523,7 @@ export class MigrationOrchestrator {
     }
 
     // 1. Reset step state to pending
-    await this.store.updateStep(taskId, stepId, "pending", { summary: undefined, error: undefined });
+    await this.updateStepAndPersist(taskId, stepId, "pending", { summary: undefined, error: undefined });
 
     // 2. Clean artifacts produced by this step
     await this.cleanStepArtifacts(task.artifactPath, stepId);
@@ -1501,7 +1534,7 @@ export class MigrationOrchestrator {
       const ds = this.steps[i];
       const dsState = task.steps.find((s) => s.id === ds.id);
       if (dsState && dsState.status !== "pending") {
-        await this.store.updateStep(taskId, ds.id, "pending", { summary: undefined, error: undefined });
+        await this.updateStepAndPersist(taskId, ds.id, "pending", { summary: undefined, error: undefined });
         await this.cleanStepArtifacts(task.artifactPath, ds.id);
       }
     }
@@ -1597,6 +1630,10 @@ export class MigrationOrchestrator {
       return true;
     }
 
+    if (decision.stepId === "13" && (await this.applyAgentImprovementApprovalDecision({ task, decision }))) {
+      return true;
+    }
+
     if (decision.stepId !== "00") {
       const artifactGate = await checkRequiredArtifactGate(task, stepDefinition);
       if (!artifactGate.gated) {
@@ -1604,7 +1641,7 @@ export class MigrationOrchestrator {
         // If the decision is a continue/approve, complete the step directly.
         if (isContinueDecision(decision.answer)) {
           const summary = `Step ${decision.stepId} completed; gate was already resolved (assets provided).`;
-          await this.store.updateStep(decision.taskId, decision.stepId, "completed", {
+          await this.updateStepAndPersist(decision.taskId, decision.stepId, "completed", {
             summary,
             error: undefined
           });
@@ -1623,7 +1660,7 @@ export class MigrationOrchestrator {
 
     if (isStopDecision(decision.answer)) {
       const message = `Operator stopped migration at Step ${decision.stepId} after human gate.`;
-      await this.store.updateStep(decision.taskId, decision.stepId, "hard_stopped", {
+      await this.updateStepAndPersist(decision.taskId, decision.stepId, "hard_stopped", {
         error: message
       });
       await this.emit({
@@ -1647,7 +1684,7 @@ export class MigrationOrchestrator {
       const summary = decision.stepId === "00"
         ? "Step 00 completed with human-approved bounded smoke-only follow-up. Blocking dependency-source gaps remain documented in 00-intake-preflight.md."
         : `Step ${decision.stepId} completed with human-approved continuation under documented risk/gaps.`;
-      await this.store.updateStep(decision.taskId, decision.stepId, "completed", {
+      await this.updateStepAndPersist(decision.taskId, decision.stepId, "completed", {
         summary,
         error: undefined
       });
@@ -1675,7 +1712,7 @@ export class MigrationOrchestrator {
       });
     } else {
       const summary = `Step ${decision.stepId} still needs missing context after reviewing the latest human answer.`;
-      await this.store.updateStep(decision.taskId, decision.stepId, "waiting_for_human", {
+      await this.updateStepAndPersist(decision.taskId, decision.stepId, "waiting_for_human", {
         summary,
         error: undefined
       });
@@ -1707,7 +1744,7 @@ export class MigrationOrchestrator {
     decision: HumanDecision;
   }): Promise<void> {
     const summary = `Applying human decision for Step ${input.stepId}; the previous gate is being processed.`;
-    await this.store.updateStep(input.task.id, input.stepId, "running", { summary });
+    await this.updateStepAndPersist(input.task.id, input.stepId, "running", { summary });
     await this.emit({
       taskId: input.task.id,
       stepId: input.stepId,
@@ -1964,7 +2001,7 @@ export class MigrationOrchestrator {
     ].join("\n");
     await fs.writeFile(reportPath, `${content}\n`, "utf8");
     if (input.stepId) {
-      await this.store.updateStep(input.taskId, input.stepId, "hard_stopped", {
+      await this.updateStepAndPersist(input.taskId, input.stepId, "hard_stopped", {
         error: input.reason
       });
     }
@@ -2142,7 +2179,7 @@ export class MigrationOrchestrator {
     }
 
     const message = `Step ${step.id} reached a human decision gate. ${gate.reason}`;
-    await this.store.updateStep(task.id, step.id, "waiting_for_human", {
+    await this.updateStepAndPersist(task.id, step.id, "waiting_for_human", {
       summary: message,
       error: detail
     });
@@ -2194,6 +2231,103 @@ export class MigrationOrchestrator {
             { choice: "Stop", consequence: "Pipeline halts. No further steps will run.", followUp: "Manually resolve issues and restart." }
           ]
         } : undefined
+      }
+    });
+    return true;
+  }
+
+  /**
+   * Human-gated apply pipeline for Step 13's proposed improvements (see
+   * agentImprovementPatch.ts). Step 13 already produces a well-structured
+   * `13-agent-improvement.json` with each item's apply_status starting at
+   * `patch_plan_only` -- previously nothing ever consumed that field, so
+   * every proposal sat unused forever. This gate makes Step 13 pause for
+   * explicit human approval (opt-in per item) before completing; approved
+   * items are later applied by `scripts/apply-agent-improvements.mts` in an
+   * isolated git worktree, never automatically and never merged to main by
+   * the agent itself.
+   */
+  private async pauseIfAgentImprovementApprovalNeeded(
+    task: MigrationTask,
+    step: MigrationStepDefinition
+  ): Promise<boolean> {
+    const filePath = path.join(task.artifactPath, "13-agent-improvement.json");
+    const state = await readAgentImprovementFile(filePath);
+    if (!state || state.improvements.length === 0) return false;
+    const pending = state.improvements.filter((item) => item.apply_status === "patch_plan_only");
+    if (pending.length === 0) return false;
+
+    const { state: marked } = applyItemStatusUpdates(
+      state,
+      Object.fromEntries(pending.map((item) => [item.id, "waiting_for_human_approval"]))
+    );
+    await writeAgentImprovementFile(filePath, marked);
+
+    const message = `Step 13 proposed ${pending.length} improvement(s) to the agent's own prompts/skills/scripts. Human approval is required before any of them can be applied.`;
+    await this.updateStepAndPersist(task.id, step.id, "waiting_for_human", { summary: message });
+
+    const itemLines = pending
+      .map((item) => {
+        const detail = (item.root_cause ?? item.proposed_change ?? "").toString().slice(0, 200);
+        return `  - ${item.id} [${item.risk_tier ?? "unknown risk"}]: ${detail}`;
+      })
+      .join("\n");
+
+    await this.emit({
+      taskId: task.id,
+      stepId: step.id,
+      type: "human_question",
+      message,
+      data: {
+        question:
+          `${message}\n\n${itemLines}\n\n` +
+          `Which should be approved to apply? Answer "approve: <ids>" (e.g. "approve: I02,I05"), "approve: all", or "approve: none". ` +
+          `Nothing is ever applied automatically or merged to main by the agent itself -- approved items still require a manual git review/merge.`,
+        choices: ["approve: all", "approve: none"],
+        allowFreeform: true,
+        blockingReason: "quality_review",
+        artifactPath: filePath
+      }
+    });
+    return true;
+  }
+
+  /**
+   * Handles the human's answer to the gate above. Returns false (falls
+   * through to generic gate handling) if Step 13 isn't actually waiting on
+   * this specific approval gate, so unrelated Step 13 decisions still work.
+   */
+  private async applyAgentImprovementApprovalDecision(input: {
+    task: MigrationTask;
+    decision: HumanDecision;
+  }): Promise<boolean> {
+    const { task, decision } = input;
+    const filePath = path.join(task.artifactPath, "13-agent-improvement.json");
+    const state = await readAgentImprovementFile(filePath);
+    if (!state) return false;
+    const pendingIds = state.improvements
+      .filter((item) => item.apply_status === "waiting_for_human_approval")
+      .map((item) => item.id);
+    if (pendingIds.length === 0) return false;
+
+    const { decisions, unrecognizedTokens } = parseApprovalAnswer(decision.answer, pendingIds);
+    const { state: updated, unmatchedIds } = applyItemStatusUpdates(state, decisions);
+    await writeAgentImprovementFile(filePath, updated);
+
+    const approvedCount = Object.values(decisions).filter((value) => value === "approved_to_apply").length;
+    const summary =
+      `Step 13 improvement approval recorded: ${approvedCount}/${pendingIds.length} item(s) approved to apply ` +
+      `(run scripts/apply-agent-improvements.mts; nothing auto-merges to main).`;
+    await this.updateStepAndPersist(task.id, "13", "completed", { summary });
+    await this.emit({
+      taskId: task.id,
+      stepId: "13",
+      type: "step_completed",
+      message: summary,
+      data: {
+        decisions,
+        ...(unrecognizedTokens.length > 0 ? { unrecognizedTokens } : {}),
+        ...(unmatchedIds.length > 0 ? { unmatchedIds } : {})
       }
     });
     return true;
@@ -2403,7 +2537,7 @@ export class MigrationOrchestrator {
     );
     const message =
       "Step 05 stopped before environment deployment because Step 01 still has source-identical asset gaps.";
-    await this.store.updateStep(task.id, step.id, "waiting_for_human", {
+    await this.updateStepAndPersist(task.id, step.id, "waiting_for_human", {
       summary: message
     });
     await this.emit({

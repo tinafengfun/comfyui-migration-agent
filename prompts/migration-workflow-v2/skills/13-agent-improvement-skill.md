@@ -51,11 +51,13 @@ Each improvement in `13-agent-improvement.json` must include:
   "proposed_change": "",
   "approval_required": true,
   "required_validation": [],
-  "apply_status": "patch_plan_only | waiting_for_human_approval | approved_to_apply | applied | do_not_apply"
+  "apply_status": "patch_plan_only | waiting_for_human_approval | approved_to_apply | awaiting_merge_review | applied | do_not_apply"
 }
 ```
 
 `13-playbook-patch-plan.md` must group items by risk tier. For low-risk items, include ready-to-apply diff snippets when safe. For medium-risk items, include the exact human approval question. For high-risk items, include required test/build commands and review notes.
+
+Leave `apply_status` at `patch_plan_only` for every item you want a human to consider (the default) -- do not try to seek approval yourself via `ask_user`. The backend automatically gates the task right after this step's session ends if any item is still `patch_plan_only`, asking the human which ids to approve; it records the answer as `approved_to_apply`/`do_not_apply` per item and only then completes this step. A human later runs `scripts/apply-agent-improvements.mts` to apply `approved_to_apply` items inside an isolated git worktree (which then moves to `awaiting_merge_review`, and finally `applied` once a human merges) -- nothing is ever applied, committed, or merged automatically.
 
 ## Required output files
 

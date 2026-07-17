@@ -324,6 +324,69 @@ export class CopilotSdkRunner {
     }
   }
 
+  /**
+   * A minimal, StepJob-free way to run a single Copilot SDK turn against an
+   * arbitrary directory with a plain prompt string. Used by
+   * scripts/apply-agent-improvements.mts to apply a Step 13-approved
+   * improvement inside an isolated git worktree -- reusing `runStep`'s
+   * ComfyUI-migration-specific prompt serialization/session-recording would
+   * produce a confusing, ill-fitting prompt for a task that isn't a
+   * migration step at all (it's editing the agent's own repo files).
+   * Always creates a fresh session (never resumes); auto-approves permissions
+   * only when the backend config does, matching runStep's behavior.
+   */
+  async runFreeformSession(input: {
+    cwd: string;
+    prompt: string;
+    sessionId: string;
+    onProgress?: (message: string) => void;
+    timeoutMs?: number;
+  }): Promise<{ sessionId: string; summary?: string }> {
+    const gitHubToken = this.getExplicitGitHubToken();
+    const client = this.createClient(input.cwd, gitHubToken);
+    let session: Awaited<ReturnType<CopilotClient["createSession"]>> | undefined;
+    const timeoutMs = input.timeoutMs ?? 30 * 60 * 1000;
+    try {
+      const customProvider = this.resolveCustomProvider();
+      session = await client.createSession({
+        sessionId: input.sessionId,
+        clientName: "comfy-xpu-migration-demo-apply-improvement",
+        gitHubToken,
+        workingDirectory: input.cwd,
+        streaming: true,
+        systemMessage: { content: input.prompt },
+        ...(customProvider.model ? { model: customProvider.model } : {}),
+        ...(customProvider.provider ? { provider: customProvider.provider } : {}),
+        ...(customProvider.reasoningEffort ? { reasoningEffort: customProvider.reasoningEffort } : {}),
+        ...(customProvider.modelCapabilities ? { modelCapabilities: customProvider.modelCapabilities } : {}),
+        onPermissionRequest: async (request: { kind: string }) => {
+          if (this.config.autoApproveAgentPermissions || request.kind === "read") {
+            return { kind: "approve-once" as const };
+          }
+          return { kind: "user-not-available" as const };
+        },
+        onEvent: async (event: SessionEvent) => {
+          const semanticProgress = getSemanticProgress(event);
+          if (semanticProgress) input.onProgress?.(semanticProgress);
+        }
+      });
+      if (this.config.autoApproveAgentPermissions) {
+        await withTimeout(session.rpc.permissions.setApproveAll({ enabled: true }), 5_000, "set SDK approve-all permissions");
+      }
+      const response = await withTimeout(
+        session.sendAndWait({ prompt: input.prompt }, timeoutMs),
+        timeoutMs + 5_000,
+        "apply-agent-improvement SDK session"
+      );
+      return { sessionId: session.sessionId, summary: response?.data.content };
+    } finally {
+      if (session) {
+        await withTimeout(session.disconnect(), 5_000, "disconnect Copilot SDK session").catch(() => undefined);
+      }
+      await withTimeout(client.stop(), 5_000, "stop Copilot SDK client").catch(() => undefined);
+    }
+  }
+
   private createClient(cwd: string, gitHubToken?: string): CopilotClient {
     return new CopilotClient({
       cwd,

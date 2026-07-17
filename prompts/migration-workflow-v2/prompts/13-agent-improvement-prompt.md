@@ -75,11 +75,15 @@ Every improvement item in `13-agent-improvement.json` must include:
   "proposed_change": "",
   "approval_required": true,
   "required_validation": [],
-  "apply_status": "patch_plan_only | waiting_for_human_approval | approved_to_apply | applied | do_not_apply"
+  "apply_status": "patch_plan_only | waiting_for_human_approval | approved_to_apply | awaiting_merge_review | applied | do_not_apply"
 }
 ```
 
 `13-playbook-patch-plan.md` must group changes by risk tier and include exact files, rationale, unified-diff-style snippets when safe, approval requirement, and validation commands for high-risk changes.
+
+## What happens after you write 13-agent-improvement.json
+
+You do not need to seek approval yourself or call `ask_user` about these improvement items -- the backend automatically pauses the task at a dedicated human-approval gate immediately after this step's session ends, if any item's `apply_status` is `patch_plan_only`. The human answers with which item ids to approve (or "all"/"none"); the backend records the answer and updates each item's `apply_status` to `approved_to_apply` or `do_not_apply` accordingly, then completes this step. Approved items are later applied by a human running `scripts/apply-agent-improvements.mts`, which edits the target files inside an isolated git worktree/branch and stops for manual review -- it never commits, pushes, or merges automatically. Set `apply_status: "patch_plan_only"` on every item you want the human to consider (this is the default and expected value); use `do_not_apply` only for items you've already determined should not be applied (e.g. `workflow_specific_do_not_generalize` findings).
 
 ## Completion decision
 

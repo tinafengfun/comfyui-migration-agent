@@ -314,11 +314,19 @@ export async function processUploadedReplacement(input: {
 
 // ── ComfyUI API helpers ──
 
+/**
+ * Reads Step 05's own deterministic output manifest instead of task-state.json.
+ * That manifest is written by step05_environment_readiness.py's `write_json`
+ * call (never by the agent's freehand prose), so this never depends on
+ * anything an LLM hand-typed. `task-state.json`'s `steps` is an array, not a
+ * dict keyed by step id -- this function's prior `state.steps["05"]` lookup
+ * could never have matched anything real.
+ */
 async function getComfyUIApiUrl(task: MigrationTask): Promise<string | undefined> {
   try {
-    const statePath = path.join(task.workspacePath, "task-state.json");
-    const state = JSON.parse(await fs.readFile(statePath, "utf8"));
-    const apiUrl = state?.steps?.["05"]?.completion_signals?.api_url;
+    const manifestPath = path.join(task.artifactPath, "05-output-manifest.json");
+    const manifest = JSON.parse(await fs.readFile(manifestPath, "utf8"));
+    const apiUrl = manifest?.step06_context?.api_url;
     if (typeof apiUrl === "string" && apiUrl.startsWith("http")) return apiUrl;
   } catch { /* ignore */ }
   return undefined;
