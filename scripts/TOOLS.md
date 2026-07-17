@@ -49,7 +49,7 @@ Uses the reliable detached-launch pattern (launcher script on target + `setsid` 
 |---|---|---|
 | Scan a node's readiness (ssh/xpu/object_info/custom_nodes/models/sampler pkgs); prepare gaps | `node-precheck.mts` | `npx tsx scripts/node-precheck.mts --node <name> [--prepare] [--json]` |
 | Install a custom package that injects an enum value (sampler/scheduler) + verify via /object_info | `install-enum-package.mts` | `npx tsx scripts/install-enum-package.mts --node <name> --repo <git-url> --host-node-type KSampler --verify sampler_name=res_2s` |
-| Normalize a GUI-exported workflow (cut dependency cycles → DAG) | `normalize-workflow.mts` | `npx tsx scripts/normalize-workflow.mts <workflow.json> [out.json]` |
+| Normalize a GUI-exported workflow (cut dependency cycles → DAG) | `normalize-workflow.mjs` | `node scripts/normalize-workflow.mjs <workflow.json> [out.json]` |
 
 `node-precheck --prepare` installs the missing custom-node baseline
 (`data/node-baseline.json`, grows over time) + known sampler packages, so a new
