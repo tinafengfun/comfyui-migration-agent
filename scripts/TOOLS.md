@@ -11,10 +11,18 @@ a GPU node read `gpu-nodes.json` (override path with `GPU_NODES_PATH=`).
 |---|---|---|
 | Run a workflow through the pipeline via the API (create→gate→drive) | `drive-migration.mts` | `npx tsx scripts/drive-migration.mts --workflow <path.json> --node <gpu-node> [--answers answers.json] [--auto] [--until 13] [--budget-min 180]` |
 | Check a task's step statuses / list tasks | `task-status.mts` | `npx tsx scripts/task-status.mts <taskId>` · `--list` · `--json` |
+| Persist a step's completion entry into `artifacts/task-state.json` | `patch-task-state.mts` | `npx tsx scripts/patch-task-state.mts --artifacts <artifactDir> --step-file <scratch.json> [--top-level-file <scratch-toplevel.json>]` |
 
 `--answers` is a JSON map `{ "<stepId>": "answer text" }` (freeform). `--auto` picks a
 proceed/continue/approve choice. Neither → prints the gate + stops for manual handling.
 Answers only the latest question per step (avoids reconcileStaleActiveTasks).
+
+`patch-task-state.mts` — **never hand-edit `task-state.json`'s raw JSON text.** Write the
+step's completion object to a scratch JSON file, then call this tool. It always produces
+valid JSON (auto-repairs the one confirmed prior corruption shape — a step's entry
+dropped outside the `steps` array — if it finds it; refuses to proceed on unrecognized
+unparseable content). This is what every per-step SDK session must call instead of
+splicing the file by hand — see agent.md contract rule 12.
 
 ## ComfyUI on a node
 
