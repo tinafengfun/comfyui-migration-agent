@@ -41,6 +41,7 @@ Convert the workflow JSON into an API prompt and prove the prompt validates corr
 6. Inspect `node_errors`, validated output nodes, and pruned branches.
 7. Fix exporter or input issues before runtime, but do not silently normalize workflow policy values such as `cuda:0` or schema-incompatible prompts.
 8. If validation fails only because the preserved workflow contains runtime-policy or current-schema values that cannot validate in the target environment, create a clearly named validation variant instead of overwriting the source prompt:
+   - **PatchSageAttentionKJ on XPU**: If the workflow inventory contains a `PatchSageAttentionKJ` node and the target device is XPU, the variant must set `sage_attention='disabled'` on that node. The `auto` mode calls `q.is_cuda` internally and crashes on XPU. Including this change in the variant is mandatory when the node is present; do not leave the node in `auto` mode on XPU.
    - write a variant prompt such as `06b-runtime-policy-prompt.json`
    - document each changed input, old value, new value, and reason
    - keep the original workflow JSON unchanged
@@ -113,6 +114,18 @@ Runtime-policy variant example:
 Prompt validation: passed after explicit runtime-policy variant
 Variant prompt: 06b-runtime-policy-prompt.json
 Changed inputs: node 30 device cuda:0 -> xpu:0; node 93 seed normalized to current schema range
+Source workflow modified: no
+Nodes bypassed: no
+Queued execution: no
+Allowed next step: Step 7 branch smoke, still not full validation
+```
+
+PatchSageAttentionKJ runtime-policy variant example:
+
+```text
+Prompt validation: passed after explicit runtime-policy variant (PatchSageAttentionKJ)
+Variant prompt: 06b-runtime-policy-prompt.json
+Changed inputs: node 43 (PatchSageAttentionKJ) sage_attention auto -> disabled; node 30 device cuda:0 -> xpu:0
 Source workflow modified: no
 Nodes bypassed: no
 Queued execution: no

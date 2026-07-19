@@ -8,6 +8,7 @@ trigger:
     anyOf:
       - nodeType: "AIO_Preprocessor"
       - nodeType: "DepthAnythingPreprocessor"
+      - nodeType: "PatchSageAttentionKJ"
 provenance:
   taskOrigin: "manual"
   createdAt: "2026-06-25"
@@ -22,3 +23,4 @@ When the source workflow contains attention-based preprocessors (`AIO_Preprocess
 2. **Fallback policy**: If the operator is missing, route these nodes to CPU via `device=cpu` runtime policy. The quality impact is zero for deterministic preprocessors (depth, canny); only latency increases.
 3. **Provider hint**: Some processors accept a `provider` argument. Try `provider=openvino` as an alternative dispatch path if available — OpenVINO has better attention coverage for Intel hardware.
 4. **Source-audit annotation**: In `04-source-audit.md`, mark each affected node with `xpu_attention_risk: yes` and the fallback strategy chosen. This carries forward to step 05 deployment and step 07 smoke validation.
+5. **PatchSageAttentionKJ special case**: If the source workflow contains a `PatchSageAttentionKJ` node, the `auto` mode uses `q.is_cuda` internally and will `assert`-crash on XPU. Flag it as `CUDA-only auto mode: requires disabled on XPU` in the source-audit annotation, so Step 06 knows to emit `sage_attention='disabled'` in the runtime-policy variant and Step 07 skips the auto-mode assertion.
