@@ -43,7 +43,7 @@ Prepare a reproducible fresh ComfyUI Intel XPU environment for migration validat
     - include portable runtime dependencies declared by custom nodes used on target branches, not only dependencies needed for `/object_info` registration
     - avoid CUDA-only optional acceleration packages unless explicitly approved
     - record skipped optional dependencies and their impact
-5. Configure model roots or symlink staged assets into active ComfyUI model paths. Record source and destination for each model/input path.
+5. Configure model roots or symlink staged assets into active ComfyUI model paths. Read any existing `extra_model_paths.yaml` (or equivalent `.yaml` config referenced by `--extra-model-paths-yaml`) on the target, validate that every workflow model path in the asset ledger resolves against the effective root config (base_path + relative subdirectories), and document the resolved model directory layout as a tree or table. Record source and destination for each model/input path.
 6. Apply required registration patches or workflow runtime policies, and record them as patches, not as runtime success.
 7. Launch with Intel-XPU-safe flags and capture startup logs.
 8. Verify node registration through a machine-readable source such as `/object_info`; do not rely only on "server started".
@@ -75,7 +75,8 @@ Create an environment report with:
 - Python, PyTorch, IPEX, driver, Level Zero, and GPU details
 - package install notes
 - launch command and flags
-- model path config
+- model path config (including any discovered `extra_model_paths.yaml` on the target)
+- effective model directory layout (resolved paths per `extra_model_paths.yaml`)
 - startup/registration result
 - API evidence, such as `/system_stats` and `/object_info` excerpts or saved JSON
 - node-registration table that marks backend registered, frontend-only source-verified, missing, or not checked
