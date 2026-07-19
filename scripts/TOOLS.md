@@ -13,6 +13,7 @@ a GPU node read `gpu-nodes.json` (override path with `GPU_NODES_PATH=`).
 | Check a task's step statuses / list tasks | `task-status.mts` | `npx tsx scripts/task-status.mts <taskId>` · `--list` · `--json` |
 | **Historical repair only** — fix a `task-state.json` corrupted before the backend took over writing it | `patch-task-state.mts` | `npx tsx scripts/patch-task-state.mts --artifacts <artifactDir> --step-file <scratch.json> [--top-level-file <scratch-toplevel.json>]` |
 | Apply a Step 13-approved agent improvement (isolated worktree, never auto-merged) | `apply-agent-improvements.mts` | `npx tsx scripts/apply-agent-improvements.mts --task <taskId> [--item <id>] [--api http://127.0.0.1:3001]` |
+| Generate Step 10 node coverage table from inventory, prompt map, smoke, and full-run artifacts | `generate-coverage-table.mts` | `npx tsx scripts/generate-coverage-table.mts --workspace <workspace-dir>` |
 
 `--answers` is a JSON map `{ "<stepId>": "answer text" }` (freeform). `--auto` picks a
 proceed/continue/approve choice. Neither → prints the gate + stops for manual handling.
@@ -33,6 +34,15 @@ transition (`src/server/taskStateLedger.ts`, wired through `orchestrator.ts`'s
 12). This tool is kept only to repair any leftover files corrupted before that change; it
 auto-repairs the one confirmed prior corruption shape (a step's entry dropped outside the
 `steps` array) and refuses to proceed on unrecognized unparseable content.
+
+`generate-coverage-table.mts` — reads Step 03 inventory CSV, Step 06 prompt-map CSV, Step 07
+branch-smoke summary, and Step 08 full-run artifacts (node accounting + validation summary),
+then classifies every source node as one of: `covered_full_executed`, `covered_full_cached`,
+`covered_smoke_executed`, `covered_smoke_cached`, `covered_output_only`,
+`excluded_disconnected_or_frontend`, `excluded_dead_end_sink`, or `uncovered_executable`.
+Emits `10-node-coverage.csv` and `10-coverage-summary.json` in the workspace artifact
+directory. Previously this classification was done by hand — the tool makes it deterministic
+and reproducible.
 
 ## ComfyUI on a node
 
