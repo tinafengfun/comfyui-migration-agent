@@ -84,3 +84,4 @@ node is prepared once instead of tripping the same gaps every migration.
 | Validate/verify recipes | `validate-recipes.mts`, `verify-patch-recipes.mts` |
 | Sync analytics DB | `sync-analytics.mts` |
 | XPU python wrapper | `xpu-python.sh` |
+| XPU memory telemetry | `xpu-smi dump -d 0 -m 18` (provides per-second GPU Memory Used MiB). Poll duration should cover the full workflow execution (e.g., 120s for typical upscale runs). |
