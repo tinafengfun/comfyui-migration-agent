@@ -350,33 +350,23 @@ export class MigrationOrchestrator {
         message: "Created deterministic Step 01 asset and custom-node resolution ledgers.",
         data: prep
       });
-      if (prep.gapCount > 0) {
-        const summary = `Step 01 deterministic prep found ${prep.gapCount} gap(s). Gaps documented in ledgers — SDK agent will validate and attempt resolution.`;
-        await this.emit({
-          taskId,
-          stepId,
-          type: "progress",
-          message: summary,
-          data: {
-            ...prep,
-            details: [
-              `${prep.modelCount} model references checked`,
-              `${prep.customNodeCount} custom-node source hints checked`,
-              `${prep.gapCount} documented gap(s) in 01-assets.csv`
-            ]
-          }
-        });
-
-        // Run structured provider search (+ fuzzy query variants and an
-        // LLM-judged fuzzy match for ambiguous cases) on THIS first pass,
-        // not only after a human answers the gate below -- previously
-        // ensureAssetAcquisitionJob only ran from acceptHumanGateContext,
-        // so a first-time gap was always reported to the human before the
-        // agent's own structured search tool had ever run. Empty human
-        // context is fine here: the core provider search runs regardless;
-        // acceptHumanGateContext's later re-run still supplies the human's
-        // actual answer text for its remote-source-hint extraction.
-        let acquisitionItems: AssetAcquisitionUnresolvedItem[] = [];
+      // Run structured provider search (+ fuzzy query variants and an
+      // LLM-judged fuzzy match for ambiguous cases) on THIS first pass,
+      // not only after a human answers the gate below -- previously
+      // ensureAssetAcquisitionJob only ran from acceptHumanGateContext, so a
+      // first-time gap was always reported to the human before the agent's
+      // own structured search tool had ever run. Gated on
+      // rowsNeedingSearchCount (not gapCount): gapCount deliberately
+      // excludes weak local-alias matches (not blocking enough for a hard
+      // gate), but a weak alias is exactly the ambiguous case fuzzy/provider
+      // search can upgrade to a confident, evidenced match -- gating this on
+      // gapCount alone meant that path never ran when local search happened
+      // to find any alias, however weak. Empty human context is fine here:
+      // the core provider search runs regardless; acceptHumanGateContext's
+      // later re-run still supplies the human's actual answer text for its
+      // remote-source-hint extraction.
+      let acquisitionItems: AssetAcquisitionUnresolvedItem[] = [];
+      if (prep.rowsNeedingSearchCount > 0) {
         try {
           const acquisition = await ensureAssetAcquisitionJob({
             task,
@@ -417,6 +407,24 @@ export class MigrationOrchestrator {
             }`
           });
         }
+      }
+
+      if (prep.gapCount > 0) {
+        const summary = `Step 01 deterministic prep found ${prep.gapCount} gap(s). Gaps documented in ledgers — SDK agent will validate and attempt resolution.`;
+        await this.emit({
+          taskId,
+          stepId,
+          type: "progress",
+          message: summary,
+          data: {
+            ...prep,
+            details: [
+              `${prep.modelCount} model references checked`,
+              `${prep.customNodeCount} custom-node source hints checked`,
+              `${prep.gapCount} documented gap(s) in 01-assets.csv`
+            ]
+          }
+        });
 
         // Write detailed gate signal for post-SDK validation, but do NOT block SDK agent.
         // The gate will be checked AFTER the SDK agent finishes (line ~494).

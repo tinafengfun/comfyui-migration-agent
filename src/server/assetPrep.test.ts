@@ -139,4 +139,54 @@ describe("asset prep", () => {
     expect(result.gapDetails.some((g) => g.name === "nowhere.jpg")).toBe(true);
     expect(result.gapDetails.some((g) => g.name === "rife47.pth")).toBe(false);
   });
+
+  it("rowsNeedingSearchCount includes weak local-alias matches that gapCount deliberately excludes", async () => {
+    // Regression test for a real bug: orchestrator.ts previously gated its
+    // first-pass provider search (see assetFuzzyMatch.ts) on gapCount > 0,
+    // but gapCount excludes "alias available" rows -- so when local search
+    // happened to find ANY weak alias for every unresolved item, provider
+    // search never ran at all, even though a weak alias is exactly the
+    // ambiguous case fuzzy/provider search can upgrade to a confident match.
+    const root = path.join(process.cwd(), ".demo-state", "tests", `asset-prep-alias-${Date.now()}`);
+    const artifactPath = path.join(root, "artifacts");
+    const workflowPath = path.join(root, "workflow.json");
+    const modelRoot = path.join(root, "models");
+    const comfyuiRoot = path.join(root, "ComfyUI");
+    await ensureDir(artifactPath);
+    await ensureDir(path.join(modelRoot, "checkpoints"));
+    // No exact match for "z_image_bf16.safetensors" -- only a similarly
+    // named file, which findAliases() will surface as a weak alias.
+    await fs.writeFile(path.join(modelRoot, "checkpoints", "z_image_turbo_bf16.safetensors"), "x", "utf8");
+    await fs.writeFile(
+      workflowPath,
+      JSON.stringify({
+        nodes: [
+          {
+            id: 1,
+            type: "UNETLoader",
+            properties: { cnr_id: "comfy-core" },
+            widgets_values: ["z_image_bf16.safetensors"]
+          }
+        ],
+        links: []
+      }),
+      "utf8"
+    );
+    const task: MigrationTask = {
+      id: "task",
+      name: "Task",
+      status: "running",
+      workflowPath,
+      workspacePath: root,
+      artifactPath,
+      createdAt: "now",
+      updatedAt: "now",
+      steps: [{ id: "01", status: "running" }]
+    };
+
+    const result = await ensureAssetPrep({ task, modelRoots: [modelRoot], comfyuiRoot });
+
+    expect(result.gapCount).toBe(0);
+    expect(result.rowsNeedingSearchCount).toBe(1);
+  });
 });

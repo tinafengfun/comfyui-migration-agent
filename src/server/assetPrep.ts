@@ -24,6 +24,15 @@ export interface AssetPrepResult {
   customNodeCount: number;
   gapCount: number;
   gapDetails: Array<{ name: string; kind: string; action: string }>;
+  /**
+   * Every row with any non-empty gap, INCLUDING weak local-alias matches
+   * (gapCount/gapDetails deliberately exclude those -- they're not blocking
+   * enough for a hard human gate). This is what should gate whether to run
+   * provider search on the first pass: a weak alias found by local search
+   * is exactly the ambiguous case fuzzy/provider search can improve on, so
+   * excluding it here would mean that search path never runs for it.
+   */
+  rowsNeedingSearchCount: number;
 }
 
 export async function ensureAssetPrep(input: {
@@ -104,6 +113,8 @@ export async function ensureAssetPrep(input: {
   const gapRows = assetRows.filter((row) => row.gap && !row.gap.includes("alias available"));
   const gapCustomNodes = customRows.filter((row) => row.state !== "source known");
   const gapCount = gapRows.length + gapCustomNodes.length;
+  const allGapRows = assetRows.filter((row) => row.gap);
+  const rowsNeedingSearchCount = allGapRows.length + gapCustomNodes.length;
   const gapDetails = [
     ...gapRows.map((row) => ({
       name: row.asset_name,
@@ -122,7 +133,8 @@ export async function ensureAssetPrep(input: {
     modelCount: models.length,
     customNodeCount: customRows.length,
     gapCount,
-    gapDetails
+    gapDetails,
+    rowsNeedingSearchCount
   };
 }
 
