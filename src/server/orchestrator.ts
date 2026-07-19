@@ -382,7 +382,12 @@ export class MigrationOrchestrator {
                     candidates,
                     runner: this.sdkRunner as FreeformSessionRunner,
                     cwd: task.artifactPath,
-                    sessionId: `${task.id}:01:fuzzy:${requestedName}`
+                    // Requested names are workflow-author-controlled strings
+                    // (Windows-style backslashes, full-width parens, CJK
+                    // text) -- the Copilot SDK's session.create rejects
+                    // sessionIds containing them outright. Sanitize instead
+                    // of embedding requestedName verbatim.
+                    sessionId: `${task.id}-01-fuzzy-${sanitizeSessionIdSegment(requestedName)}`
                   })
               : undefined
           });
@@ -3481,6 +3486,19 @@ function uniqueStrings(values: string[]): string[] {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Copilot SDK session IDs only accept `[a-zA-Z0-9_-]` -- confirmed by live
+ * testing: `.` alone is enough to make session.create reject the request
+ * (as are backslashes, full-width punctuation, and CJK text). Workflow-
+ * author-controlled strings like requested asset names ("flux2\Klein-大熊
+ * 一致性consistency（0.4-1.0）.safetensors") can contain any of that, so
+ * never embed one verbatim in a sessionId.
+ */
+export function sanitizeSessionIdSegment(value: string): string {
+  const sanitized = value.replace(/[^a-zA-Z0-9_-]/g, "-").replace(/-+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60);
+  return /[a-zA-Z0-9]/.test(sanitized) ? sanitized : "unnamed";
 }
 
 function buildStep00QuestionData(

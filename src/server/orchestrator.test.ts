@@ -3,9 +3,41 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import type { AppConfig } from "./config";
 import { ensureDir } from "./fsUtils";
-import { MigrationOrchestrator } from "./orchestrator";
+import { MigrationOrchestrator, sanitizeSessionIdSegment } from "./orchestrator";
 import { SdkStepTimeoutError } from "./copilotSdkRunner";
 import { StateStore } from "./state";
+
+describe("sanitizeSessionIdSegment", () => {
+  // Regression test for a real bug: the Copilot SDK's session.create rejects
+  // any sessionId containing characters outside [a-zA-Z0-9_-] (confirmed
+  // live -- even a bare "." is enough to fail). Requested asset names are
+  // workflow-author-controlled strings that routinely contain backslashes,
+  // full-width parentheses, CJK text, and dots (file extensions), so the
+  // fuzzy-match sessionId built from one must be sanitized first.
+  it("strips backslashes, full-width parens, CJK text, and dots from a real messy asset name", () => {
+    const sanitized = sanitizeSessionIdSegment("flux2\\Klein-大熊一致性consistency（0.4-1.0）.safetensors");
+    expect(sanitized).toMatch(/^[a-zA-Z0-9_-]+$/);
+  });
+
+  it("strips dots from a plain file extension", () => {
+    const sanitized = sanitizeSessionIdSegment("Z-Image-Anime-AIO-FP8_V1.safetensors");
+    expect(sanitized).toMatch(/^[a-zA-Z0-9_-]+$/);
+    expect(sanitized).not.toContain(".");
+  });
+
+  it("collapses consecutive replaced characters into a single hyphen", () => {
+    expect(sanitizeSessionIdSegment("a（（（b")).toBe("a-b");
+  });
+
+  it("caps length at 60 characters", () => {
+    const sanitized = sanitizeSessionIdSegment("a".repeat(200));
+    expect(sanitized.length).toBeLessThanOrEqual(60);
+  });
+
+  it("falls back to a placeholder when nothing valid remains", () => {
+    expect(sanitizeSessionIdSegment("（）（）")).toBe("unnamed");
+  });
+});
 
 describe("migration orchestrator", () => {
   it("creates tasks, records human decisions, hard stops, and reflection proposals", async () => {
