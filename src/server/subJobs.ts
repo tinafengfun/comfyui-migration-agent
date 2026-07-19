@@ -35,6 +35,7 @@ interface AcquisitionJob {
   status: string;
   providerCandidateCount?: number;
   customNodeCandidateCount?: number;
+  unresolvedCount?: number;
   items?: AcquisitionItem[];
   customNodeItems?: CustomNodeItem[];
 }
@@ -80,12 +81,17 @@ export class SubJobManager {
         stepId: "01",
         type: "provider_search",
         title: "Step 01 provider search",
-        status: "completed",
+        // Ran to completion either way -- but only report "completed" (all
+        // gaps resolved) when unresolvedCount is actually zero, instead of
+        // always claiming success regardless of whether anything was found.
+        status: (acquisition.unresolvedCount ?? 0) === 0 ? "completed" : "blocked",
         artifactPath: "artifacts/01-acquisition-job.json",
         candidateCount:
           (acquisition.providerCandidateCount ?? 0) + (acquisition.customNodeCandidateCount ?? 0),
         progress: { percent: 100 },
-        message: "Provider discovery completed and candidates were written to the acquisition job."
+        message: (acquisition.unresolvedCount ?? 0) === 0
+          ? "Provider discovery completed and all gaps were resolved."
+          : `Provider discovery ran, but ${acquisition.unresolvedCount} item(s) remain unresolved -- see candidates/fuzzy-match judgment in the acquisition job.`
       },
       {
         id: "01-custom-node-search",

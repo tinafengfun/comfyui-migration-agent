@@ -2,8 +2,41 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import type { MigrationTask } from "../shared/types";
-import { ensureAssetAcquisitionJob } from "./assetAcquisition";
+import { ensureAssetAcquisitionJob, generateAssetQueryVariants } from "./assetAcquisition";
 import { ensureDir } from "./fsUtils";
+
+describe("generateAssetQueryVariants", () => {
+  it("strips a parenthetical strength-range hint and CJK descriptive words to find the real repo name (Klein LoRA)", () => {
+    const variants = generateAssetQueryVariants("Klein-大熊一致性consistency（0.4-1.0）.safetensors");
+    expect(variants).toContain("Klein-consistency");
+    expect(variants).toContain("Klein consistency");
+  });
+
+  it("strips a stale version suffix to find the real repo name (Z-Image checkpoint)", () => {
+    const variants = generateAssetQueryVariants("Z-Image-Anime-AIO-FP8_V1.safetensors");
+    expect(variants).toContain("Z-Image-Anime-AIO-FP8");
+  });
+
+  it("always includes the extension-stripped raw name first (cheapest, most common case)", () => {
+    const variants = generateAssetQueryVariants("flux1-dev.safetensors");
+    expect(variants[0]).toBe("flux1-dev");
+  });
+
+  it("returns a single variant unchanged when the name has no noise to strip", () => {
+    const variants = generateAssetQueryVariants("ae.safetensors");
+    expect(variants).toEqual(["ae"]);
+  });
+
+  it("never returns more than 5 variants", () => {
+    const variants = generateAssetQueryVariants("Some-Really（Messy）Name_V3-With-Many-Tokens-Here.safetensors");
+    expect(variants.length).toBeLessThanOrEqual(5);
+  });
+
+  it("dedupes variants that collapse to the same string after stripping", () => {
+    const variants = generateAssetQueryVariants("plain-name.safetensors");
+    expect(new Set(variants).size).toBe(variants.length);
+  });
+});
 
 describe("asset acquisition job", () => {
   it("creates provider search and custom-node candidate plans for unresolved assets", async () => {
@@ -76,6 +109,11 @@ describe("asset acquisition job", () => {
             provider: input.kind === "model" ? "huggingface" : "github",
             title: input.query,
             url: `https://example.test/${input.query}`,
+            // A real provider API hit (HuggingFace/Civitai/ModelScope/token-
+            // authenticated GitHub) always sets apiUrl -- this is what tells
+            // the query-variant loop in ensureAssetAcquisitionJob to stop
+            // trying further fuzzy variants (see generateAssetQueryVariants).
+            apiUrl: `https://example.test/api?query=${input.query}`,
             score: 100,
             requiresToken: false,
             notes: "mock candidate"

@@ -16,6 +16,7 @@ import {
   ensureAssetAcquisitionJob,
   type AssetAcquisitionUnresolvedItem
 } from "./assetAcquisition";
+import { judgeFuzzyMatch, type FreeformSessionRunner } from "./assetFuzzyMatch";
 import { ensureAssetPrep } from "./assetPrep";
 import { checkRequiredArtifactCompletion, checkRequiredArtifactGate } from "./artifactCompletion";
 import { analyzeRunReport } from "./evolutionAnalyzer";
@@ -97,6 +98,7 @@ class HumanGatePauseError extends Error {
 
 interface StepSdkRunner {
   preflight?: CopilotSdkRunner["preflight"];
+  runFreeformSession?: CopilotSdkRunner["runFreeformSession"];
   runStep(
     job: Parameters<CopilotSdkRunner["runStep"]>[0],
     emit: AgentEventSink,
@@ -364,9 +366,71 @@ export class MigrationOrchestrator {
             ]
           }
         });
+
+        // Run structured provider search (+ fuzzy query variants and an
+        // LLM-judged fuzzy match for ambiguous cases) on THIS first pass,
+        // not only after a human answers the gate below -- previously
+        // ensureAssetAcquisitionJob only ran from acceptHumanGateContext,
+        // so a first-time gap was always reported to the human before the
+        // agent's own structured search tool had ever run. Empty human
+        // context is fine here: the core provider search runs regardless;
+        // acceptHumanGateContext's later re-run still supplies the human's
+        // actual answer text for its remote-source-hint extraction.
+        let acquisitionItems: AssetAcquisitionUnresolvedItem[] = [];
+        try {
+          const acquisition = await ensureAssetAcquisitionJob({
+            task,
+            modelRoots: this.config.modelRoots,
+            comfyuiRoot: this.config.comfyuiRoot,
+            humanContext: "",
+            redactedHumanContext: "",
+            stepId,
+            fuzzyMatch: this.sdkRunner.runFreeformSession
+              ? async ({ requestedName, candidates }) =>
+                  judgeFuzzyMatch({
+                    requestedName,
+                    candidates,
+                    runner: this.sdkRunner as FreeformSessionRunner,
+                    cwd: task.artifactPath,
+                    sessionId: `${task.id}:01:fuzzy:${requestedName}`
+                  })
+              : undefined
+          });
+          acquisitionItems = acquisition.unresolvedItems;
+          await this.emit({
+            taskId,
+            stepId,
+            type: "progress",
+            message: `Step 01 first-pass provider search: ${acquisition.providerCandidateCount} candidate(s) found across ${acquisition.unresolvedCount} unresolved item(s).`,
+            data: {
+              providerCandidateCount: acquisition.providerCandidateCount,
+              unresolvedCount: acquisition.unresolvedCount
+            }
+          });
+        } catch (error) {
+          await this.emit({
+            taskId,
+            stepId,
+            type: "progress",
+            message: `Step 01 first-pass provider search failed (non-fatal; falling back to local-only gap report): ${
+              error instanceof Error ? error.message : String(error)
+            }`
+          });
+        }
+
         // Write detailed gate signal for post-SDK validation, but do NOT block SDK agent.
         // The gate will be checked AFTER the SDK agent finishes (line ~494).
-        const gapItems = prep.gapDetails ?? [];
+        const gapItems = acquisitionItems.length > 0
+          ? acquisitionItems.map((item) => ({
+              name: item.assetName,
+              kind: item.kind,
+              action: item.fuzzyJudgment && item.fuzzyJudgment.confidence !== "none"
+                ? `${item.nextAction} Fuzzy match judgment (${item.fuzzyJudgment.confidence} confidence): ${item.fuzzyJudgment.reason}${
+                    item.fuzzyJudgment.suggestedUrl ? ` (${item.fuzzyJudgment.suggestedUrl})` : ""
+                  }`
+                : item.nextAction
+            }))
+          : prep.gapDetails ?? [];
         await fs.writeFile(path.join(task.artifactPath, "01-gate-signal.json"), JSON.stringify({
           stepId: "01",
           gated: true,

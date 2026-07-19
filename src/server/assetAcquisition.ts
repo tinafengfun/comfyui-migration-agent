@@ -14,6 +14,7 @@ import {
   type SourceProviderConfig
 } from "./assetSourceProviders";
 import { demoModelRoot } from "./config";
+import type { FuzzyJudgment } from "./assetFuzzyMatch";
 
 const execFileAsync = promisify(execFile);
 
@@ -49,6 +50,7 @@ interface AssetJobItem {
   targetPath?: string;
   candidates?: AssetSourceCandidate[];
   searchIssues?: ProviderSearchIssue[];
+  fuzzyJudgment?: FuzzyJudgment;
 }
 
 export interface AssetAcquisitionUnresolvedItem {
@@ -62,6 +64,7 @@ export interface AssetAcquisitionUnresolvedItem {
   candidateCount: number;
   searchIssueCount: number;
   nextAction: string;
+  fuzzyJudgment?: FuzzyJudgment;
 }
 
 interface CustomNodeJobItem {
@@ -146,6 +149,17 @@ export async function ensureAssetAcquisitionJob(input: {
     candidates: AssetSourceCandidate[];
     issues: ProviderSearchIssue[];
   }>;
+  /**
+   * Only called for the genuinely ambiguous case: provider/remote search
+   * found candidates but none is an exact filename match. Advisory only --
+   * never merged into row.resolved_path/row.state (see assetFuzzyMatch.ts).
+   * Omit to skip fuzzy judgment entirely (e.g. in tests, or when no SDK
+   * runner is available).
+   */
+  fuzzyMatch?: (input: {
+    requestedName: string;
+    candidates: AssetSourceCandidate[];
+  }) => Promise<FuzzyJudgment | undefined>;
 }): Promise<AssetAcquisitionJobResult> {
   const stepId = input.stepId ?? "01";
   const assetsPath = path.join(input.task.artifactPath, `${stepId}-assets.csv`);
@@ -237,16 +251,39 @@ export async function ensureAssetAcquisitionJob(input: {
 
     const expectedPath = expectedTargetPath(row);
     const targetPath = targetPathForRow(row, input.modelRoots, input.comfyuiRoot);
-    const remoteSearchResult = await remoteSearch(row.requested_name || row.asset_name, targetPath, remoteModelSources);
+    const requestedAssetName = row.requested_name || row.asset_name;
+    const remoteSearchResult = await remoteSearch(requestedAssetName, targetPath, remoteModelSources);
     remoteCandidateCount += remoteSearchResult.candidates.length;
-    const search = await sourceSearch({
-      query: searchQueryForAsset(row),
-      assetName: row.requested_name || row.asset_name,
-      kind: "model",
-      targetPath
-    });
-    const candidates = [...remoteSearchResult.candidates, ...search.candidates];
-    const searchIssues = [...remoteSearchResult.issues, ...search.issues];
+
+    // Try the raw filename first (fast path, same behavior as before for the
+    // common case where it already matches). Only fan out to fuzzy variants
+    // -- stripped parentheticals/CJK/version suffixes -- when that finds
+    // nothing, since a mangled/relabeled name won't match a provider's own
+    // keyword-search index verbatim (see generateAssetQueryVariants).
+    const queryVariants = generateAssetQueryVariants(requestedAssetName);
+    const seenCandidateUrls = new Set<string>();
+    const providerCandidates: AssetSourceCandidate[] = [];
+    const providerIssues: ProviderSearchIssue[] = [];
+    for (const query of queryVariants) {
+      const variantResult = await sourceSearch({ query, assetName: requestedAssetName, kind: "model", targetPath });
+      providerIssues.push(...variantResult.issues);
+      for (const candidate of variantResult.candidates) {
+        if (seenCandidateUrls.has(candidate.url)) continue;
+        seenCandidateUrls.add(candidate.url);
+        providerCandidates.push(candidate);
+      }
+      // Stop once a variant returns a genuine API hit (HuggingFace/Civitai/
+      // ModelScope/token-authenticated GitHub search all set `apiUrl`).
+      // Ignore the GitHub-without-token and Comfy.ICU providers' constructed
+      // search-page placeholders (no `apiUrl`, fixed low score) -- those
+      // always return "a candidate" regardless of query quality, which would
+      // otherwise short-circuit the fuzzy fallback before it ever tries the
+      // stripped/tokenized variants that actually find mangled filenames.
+      if (variantResult.candidates.some((candidate) => candidate.apiUrl !== undefined)) break;
+    }
+
+    const candidates = [...remoteSearchResult.candidates, ...providerCandidates];
+    const searchIssues = [...remoteSearchResult.issues, ...providerIssues];
     providerCandidateCount += candidates.length;
     const downloaded = await downloadExactAssetIfAllowed(row.requested_name || row.asset_name, candidates, providerConfig);
     if (downloaded.downloaded) {
@@ -281,6 +318,13 @@ export async function ensureAssetAcquisitionJob(input: {
     if (downloaded.issue) searchIssues.push(downloaded.issue);
     unresolvedCount += 1;
     pendingDownloadCount += 1;
+    // Only worth an LLM judgment call when structured search found something
+    // ambiguous (not an exact filename match, since downloadExactAssetIfAllowed
+    // already handles the unambiguous case above) -- never for a plain "found
+    // nothing at all" row, and never merged into row state either way.
+    const fuzzyJudgment = candidates.length > 0 && input.fuzzyMatch
+      ? await input.fuzzyMatch({ requestedName: row.requested_name || row.asset_name, candidates }).catch(() => undefined)
+      : undefined;
     items.push({
       assetName: row.asset_name,
       requestedName: row.requested_name || row.asset_name,
@@ -292,6 +336,7 @@ export async function ensureAssetAcquisitionJob(input: {
       targetPath,
       candidates,
       searchIssues,
+      fuzzyJudgment,
       plannedActions: [
         "Exact file was not found in local search roots.",
         candidates.length
@@ -299,7 +344,10 @@ export async function ensureAssetAcquisitionJob(input: {
           : "Provider search did not find a confirmed candidate source.",
         remoteOrWebSources.length
           ? "Remote/web sources were provided, but downloads require a secure credential/proxy execution channel outside chat-persisted state."
-          : "No remote/web source was provided; operator must provide a local file path or approved source."
+          : "No remote/web source was provided; operator must provide a local file path or approved source.",
+        ...(fuzzyJudgment && fuzzyJudgment.confidence !== "none"
+          ? [`Fuzzy match judgment (${fuzzyJudgment.confidence} confidence): ${fuzzyJudgment.reason}`]
+          : [])
       ]
     });
   }
@@ -367,7 +415,14 @@ export async function ensureAssetAcquisitionJob(input: {
   };
   const jobPath = path.join(input.task.artifactPath, `${stepId}-acquisition-job.json`);
   const reportPath = path.join(input.task.artifactPath, `${stepId}-acquisition-report.md`);
+  const fuzzyJudgmentsPath = path.join(input.task.artifactPath, `${stepId}-fuzzy-match-judgments.json`);
   await fs.writeFile(jobPath, `${JSON.stringify(job, null, 2)}\n`, "utf8");
+  const fuzzyJudgments = items
+    .filter((item): item is AssetJobItem & { fuzzyJudgment: FuzzyJudgment } => Boolean(item.fuzzyJudgment))
+    .map((item) => ({ assetName: item.assetName, requestedName: item.requestedName, ...item.fuzzyJudgment }));
+  if (fuzzyJudgments.length > 0) {
+    await fs.writeFile(fuzzyJudgmentsPath, `${JSON.stringify(fuzzyJudgments, null, 2)}\n`, "utf8");
+  }
   await fs.writeFile(
     reportPath,
     [
@@ -505,7 +560,8 @@ function unresolvedAssetItems(items: AssetJobItem[]): AssetAcquisitionUnresolved
       targetPath: item.targetPath,
       candidateCount: item.candidates?.length ?? 0,
       searchIssueCount: item.searchIssues?.length ?? 0,
-      nextAction: item.plannedActions.join(" ")
+      nextAction: item.plannedActions.join(" "),
+      fuzzyJudgment: item.fuzzyJudgment
     }));
 }
 
@@ -978,6 +1034,51 @@ function customNodeEvidencePaths(evidence: string, workspacePath: string, comfyu
 
 function searchQueryForAsset(row: AssetRow): string {
   return (row.requested_name || row.asset_name).replace(/\.(safetensors|ckpt|pt|pth|onnx|gguf|bin)$/i, "");
+}
+
+const CJK_PATTERN = /[　-〿぀-ヿ㐀-䶿一-鿿豈-﫿]/g;
+
+/**
+ * Generates ordered, deduped fuzzy query variants for a requested asset
+ * filename, so provider search isn't limited to one raw-string lookup.
+ * Real workflows sometimes reference a file under a mangled/relabeled name
+ * (parenthetical strength-range hints, CJK descriptive words mixed into an
+ * otherwise-English model name, stale version suffixes) that won't match a
+ * provider's own keyword-search index even though the real file is trivially
+ * findable once the noise is stripped -- e.g.
+ * "Klein-大熊一致性consistency（0.4-1.0）.safetensors" only matches
+ * huggingface.co/dx8152/Flux2-Klein-9B-Consistency once reduced to
+ * "Klein consistency".
+ */
+export function generateAssetQueryVariants(name: string): string[] {
+  const variants: string[] = [];
+  const add = (value: string): void => {
+    const trimmed = value.trim().replace(/\s+/g, " ");
+    if (trimmed && !variants.includes(trimmed)) variants.push(trimmed);
+  };
+
+  const noExt = name.replace(/\.(safetensors|ckpt|pt|pth|onnx|gguf|bin)$/i, "");
+  add(noExt);
+
+  const noParens = noExt.replace(/[（(][^）)]*[）)]/g, " ");
+  add(noParens);
+
+  const asciiOnly = noParens
+    .replace(CJK_PATTERN, " ")
+    .replace(/\s*-\s*/g, "-")
+    .replace(/^-+|-+$/g, "");
+  add(asciiOnly);
+
+  const noVersion = asciiOnly.replace(/[-_]v\d+\b/gi, "");
+  add(noVersion);
+
+  const tokens = noVersion.split(/[-_\s]+/).map((token) => token.trim()).filter(Boolean);
+  if (tokens.length > 1) {
+    add(tokens.slice(0, 3).join(" "));
+    add(tokens.slice(0, 2).join(" "));
+  }
+
+  return variants.slice(0, 5);
 }
 
 function primaryModelRoot(modelRoots: string[], comfyuiRoot: string): string {

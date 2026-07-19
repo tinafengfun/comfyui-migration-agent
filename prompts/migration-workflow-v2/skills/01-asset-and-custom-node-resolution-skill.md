@@ -99,13 +99,16 @@ If a subjob exceeds the configured timeout, stalls below the minimum transfer ra
 
 ## Tool invocation
 
+**Read `01-acquisition-job.json` before calling the search tool yourself.** The backend already runs `ensureAssetAcquisitionJob` deterministically as soon as deterministic prep finds a gap, before this session starts. It tries the raw requested name first, then automatically fans out to fuzzy query variants (parenthetical-hint stripped, CJK-stripped, version-suffix-stripped) when the raw name finds nothing — this is how a workflow's own mangled/relabeled name for a model gets traced back to the real upload. For any item where that search found candidates but none is an exact filename match, an isolated LLM call already ran with its own `web_search`/`web_fetch` tool access to judge/verify them (or find the real source independently), written to `01-fuzzy-match-judgments.json` as `{assetName, matchedCandidateIndex, confidence, reason, suggestedUrl}`. Treat this as a strong starting point, not ground truth: cross-check the reasoning against the workflow's actual needs before recording a candidate as resolved, and never auto-apply a judgment without it going through the same human gate as any other unresolved item.
+
 Step 01 is the owner of the reusable asset acquisition/search/download tool. The expected call pattern is:
 
 1. consume `step01_work_queue` from Step 00;
-2. for each work item, call the tool in search mode with `assetName` or package name, query keys, kind (`model` or `custom_node`), expected target path, source context paths, and provider policy;
-3. review exact local/SSH/provider candidates and record them in `01-assets.csv` or `01-custom-nodes.md`;
-4. call the tool in download/clone mode only when the work item is exact enough and `ASSET_ACQUISITION_ENABLE_DOWNLOAD=1` or equivalent policy approval is present;
-5. verify size/checksum when available, update the ledger, and stop with a human gate if exactness or access is ambiguous.
+2. for each work item, first check whether `01-acquisition-job.json`/`01-fuzzy-match-judgments.json` already cover it -- only call the tool yourself for items the automated pass didn't reach or got wrong;
+3. when calling it yourself, use `assetName` or package name, query keys, kind (`model` or `custom_node`), expected target path, source context paths, and provider policy;
+4. review exact local/SSH/provider candidates and record them in `01-assets.csv` or `01-custom-nodes.md`;
+5. call the tool in download/clone mode only when the work item is exact enough and `ASSET_ACQUISITION_ENABLE_DOWNLOAD=1` or equivalent policy approval is present;
+6. verify size/checksum when available, update the ledger, and stop with a human gate if exactness or access is ambiguous.
 
 Step 00 does not need the search/download tool. It needs a separate read-only intake scanner. Shared helper code is acceptable only for target-path routing, redaction, local exact file checks, and query-key normalization; provider search and download execution must stay in Step 01.
 
@@ -274,4 +277,4 @@ Continuation edges must be explicit:
 
 `asset_name`, `requested_name`, `resolved_path`, `source`, `state`, `staged_path`, `custom_node_repo`, `custom_node_cache_path`, `wrapper_source_evidence`, `commit`, `install_status`, `acquisition_status`, `mirror_used`, `credential_recorded`, `size_bytes`, `checksum`, `source_node_count`, `dependency_scanned_node_count`, `missing_dependency_scan_node_ids`, `node_dependency_scan`, `provider_attempts`, `gap`.
 
-Write the primary outputs as `01-assets.csv`, `01-custom-nodes.md`, `01-node-dependency-scan.csv`, `01-acquisition-summary.json`, and `01-output-manifest.json`. When provider search/download/clone occurs, also write compact evidence artifacts such as `01-provider-search-models.json`, `01-custom-node-provider-search.json`, `01-custom-node-github-verify.txt`, and `01-custom-node-source-acquisition.json`.
+Write the primary outputs as `01-assets.csv`, `01-custom-nodes.md`, `01-node-dependency-scan.csv`, `01-acquisition-summary.json`, and `01-output-manifest.json`. When provider search/download/clone occurs, also write compact evidence artifacts such as `01-provider-search-models.json`, `01-custom-node-provider-search.json`, `01-custom-node-github-verify.txt`, and `01-custom-node-source-acquisition.json`. `01-acquisition-job.json` (backend-generated, deterministic search results across fuzzy query variants) and `01-fuzzy-match-judgments.json` (LLM-judged confidence/reasoning for ambiguous candidates) already exist by the time this session starts -- read them, don't overwrite them from scratch.

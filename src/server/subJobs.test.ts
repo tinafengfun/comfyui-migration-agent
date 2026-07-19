@@ -112,6 +112,44 @@ describe("sub job manager", () => {
     expect(remote?.candidateCount).toBe(1);
   });
 
+  it("reports the provider-discovery sub-job as blocked (not completed) when items remain unresolved", async () => {
+    const root = path.join(process.cwd(), ".demo-state", "tests", `subjobs-unresolved-${Date.now()}`);
+    const artifactPath = path.join(root, "artifacts");
+    await ensureDir(artifactPath);
+    const task: MigrationTask = {
+      id: "task-subjobs-unresolved",
+      name: "Subjobs unresolved",
+      status: "waiting_for_human",
+      workflowPath: path.join(root, "workflow.json"),
+      workspacePath: root,
+      artifactPath,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      steps: [{ id: "01", status: "waiting_for_human" }]
+    };
+    await fs.writeFile(
+      path.join(artifactPath, "01-acquisition-job.json"),
+      JSON.stringify(
+        {
+          status: "waiting_for_secure_download",
+          providerCandidateCount: 0,
+          customNodeCandidateCount: 0,
+          unresolvedCount: 2,
+          items: []
+        },
+        null,
+        2
+      ),
+      "utf8"
+    );
+
+    const manager = new SubJobManager();
+    const jobs = await manager.listTaskSubJobs(task);
+    const discovery = jobs.find((job) => job.id === "01-provider-discovery");
+    expect(discovery?.status).toBe("blocked");
+    expect(discovery?.message).toContain("2 item(s) remain unresolved");
+  });
+
   it("allows download sub-jobs through the demo download profile", async () => {
     delete process.env.ASSET_ACQUISITION_ENABLE_DOWNLOAD;
     process.env.MIGRATION_AGENT_DOWNLOAD_PROFILE = "demo";

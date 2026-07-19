@@ -116,6 +116,8 @@ Step 01 may not reach `resolved/staged` or `human gate` if any Step 00 node is m
 
 ## Tool invocation
 
+**The backend already ran structured provider search before this session started.** After deterministic prep (`01-assets.csv`/`01-custom-nodes.md`) finds a gap, the backend automatically runs the same provider search tool (HuggingFace/Civitai/ModelScope/GitHub) against multiple fuzzy query variants of each unresolved name (stripped parenthetical hints, stripped CJK descriptive words, stripped stale version suffixes) — read `01-acquisition-job.json` first; do not treat "not found locally" as license to skip straight to a human gate. If provider search still found only ambiguous candidates (not an exact filename match), an isolated LLM call already judged them and wrote `01-fuzzy-match-judgments.json` (confidence + reasoning per item, using its own `web_search`/`web_fetch` tool when the pre-fetched candidates weren't enough — this is how a mangled/relabeled filename like a workflow's own descriptive nickname for a LoRA gets traced back to its real upload). Review these before doing your own search: verify the judgment's reasoning against the workflow's actual needs (does the strength range/model family/purpose really match?) rather than re-running raw search from scratch. You may still use your own `web_search`/`web_fetch` tool for anything the automated pass didn't resolve or got wrong — never treat a fuzzy judgment as ground truth to auto-apply; a human still explicitly decides at the gate.
+
 Step 01 owns the provider search/download tool. Use it from `step01_work_queue`, not from ad hoc chat context:
 
 1. For each work item, run search using the Step 00 query keys, expected target path, allowed providers, and source context paths.
