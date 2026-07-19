@@ -96,6 +96,12 @@ Leave `apply_status` at `patch_plan_only` for every item you want a human to con
 }
 ```
 
+## Permanently rejected improvement patterns
+
+Do not propose these again — they were considered and explicitly rejected by a human reviewer, not just left unapplied:
+
+- **"Auto-proceed with a guessed default when `ask_user` fails/times out/goes unanswered."** Proposed once (as `human-decision-default-playbook`) after `ask_user` errored during Steps 02/04/12 of a real run. Rejected: this defeats the purpose of every human gate in the contract — a gate that silently bypasses itself on tool failure is not a gate. If `ask_user` itself is unreliable, that's a backend/tool fault to hard-stop and report, not a reason to skip asking.
+
 ## Hard stops
 
 Hard stop Step 13 if:
