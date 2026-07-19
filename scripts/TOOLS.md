@@ -39,6 +39,7 @@ auto-repairs the one confirmed prior corruption shape (a step's entry dropped ou
 | When | Tool | Command |
 |---|---|---|
 | Start/stop/restart/status ComfyUI on a node (local or ssh) | `remote-comfyui.mts` | `npx tsx scripts/remote-comfyui.mts --node <name> --action start\|stop\|restart\|status [--wait 150]` |
+| Decode node types from a workflow JSON against a running ComfyUI's /object_info | `decode-workflow-node-types.mts` | `npx tsx scripts/decode-workflow-node-types.mts <workflow.json> [--comfyui-url http://host:8188] [--format csv\|json] [--output <path>]` |
 
 Uses the reliable detached-launch pattern (launcher script on target + `setsid` +
 `ssh -n` + redirected fds). Do NOT hand-write an inline `ssh "... &"` — it hangs.
