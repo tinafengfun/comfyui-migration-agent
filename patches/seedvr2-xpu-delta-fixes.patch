@@ -1,0 +1,228 @@
+diff --git a/src/common/distributed/basic.py b/src/common/distributed/basic.py
+index d92610e..ab09d99 100644
+--- a/src/common/distributed/basic.py
++++ b/src/common/distributed/basic.py
+@@ -21,7 +21,7 @@ from datetime import timedelta
+ import torch
+ import torch.distributed as dist
+ from torch.nn.parallel import DistributedDataParallel
+-from ...optimization.memory_manager import is_mps_available
++from ...optimization.memory_manager import is_mps_available, is_xpu_available
+ 
+ def get_global_rank() -> int:
+     """
+@@ -50,6 +50,8 @@ def get_device() -> torch.device:
+     """
+     if is_mps_available():
+         return torch.device("mps")
++    if is_xpu_available():
++        return torch.device("xpu", get_local_rank())
+     return torch.device("cuda", get_local_rank())
+ 
+ 
+diff --git a/src/core/generation_phases.py b/src/core/generation_phases.py
+index 3b7e6ea..addd3c3 100644
+--- a/src/core/generation_phases.py
++++ b/src/core/generation_phases.py
+@@ -492,7 +492,7 @@ def encode_all_batches(
+             del transformed_video, rgb_video
+             
+             # Convert from VAE dtype to compute dtype and offload to avoid VRAM accumulation
+-            if ctx['tensor_offload_device'] is not None and (cond_latents[0].is_cuda or cond_latents[0].is_mps):
++            if ctx['tensor_offload_device'] is not None and (cond_latents[0].is_cuda or cond_latents[0].is_mps or getattr(cond_latents[0], "is_xpu", False)):
+                 ctx['all_latents'][encode_idx] = manage_tensor(
+                     tensor=cond_latents[0],
+                     target_device=ctx['tensor_offload_device'],
+@@ -731,7 +731,7 @@ def upscale_all_batches(
+             debug.end_timer(f"dit_inference_{upscale_idx+1}", f"DiT inference {upscale_idx+1}")
+             
+             # Offload upscaled latents to avoid VRAM accumulation
+-            if ctx['tensor_offload_device'] is not None and (upscaled_latents[0].is_cuda or upscaled_latents[0].is_mps):
++            if ctx['tensor_offload_device'] is not None and (upscaled_latents[0].is_cuda or upscaled_latents[0].is_mps or getattr(upscaled_latents[0], "is_xpu", False)):
+                 ctx['all_upscaled_latents'][upscale_idx] = manage_tensor(
+                     tensor=upscaled_latents[0],
+                     target_device=ctx['tensor_offload_device'],
+diff --git a/src/core/model_loader.py b/src/core/model_loader.py
+index 3ce1078..c1f4268 100644
+--- a/src/core/model_loader.py
++++ b/src/core/model_loader.py
+@@ -126,14 +126,24 @@ def load_quantized_state_dict(checkpoint_path: str, device: torch.device = torch
+             is_mps_alloc_error = device.type == "mps" and any(
+                 keyword in error_msg for keyword in ["watermark", "allocat", "memory"]
+             )
+-            
++            is_xpu_alloc_error = device.type == "xpu" and any(
++                keyword in error_msg for keyword in ["watermark", "allocat", "memory"]
++            )
++
+             if is_mps_alloc_error:
+                 # Transparent fallback - only log if debug enabled
+                 if debug:
+-                    debug.log("Using CPU intermediate loading for MPS compatibility", 
++                    debug.log("Using CPU intermediate loading for MPS compatibility",
+                             category="info", indent_level=1)
+                 state = load_safetensors_file(checkpoint_path, device="cpu")
+                 # Tensors will be moved to MPS during model.load_state_dict()
++            elif is_xpu_alloc_error:
++                # Transparent fallback - only log if debug enabled
++                if debug:
++                    debug.log("Using CPU intermediate loading for XPU compatibility",
++                            category="info", indent_level=1)
++                state = load_safetensors_file(checkpoint_path, device="cpu")
++                # Tensors will be moved to XPU during model.load_state_dict()
+             else:
+                 # Re-raise if it's a different error (file corruption, etc.)
+                 raise
+diff --git a/src/data/image/transforms/area_resize.py b/src/data/image/transforms/area_resize.py
+index fc025da..59992c3 100644
+--- a/src/data/image/transforms/area_resize.py
++++ b/src/data/image/transforms/area_resize.py
+@@ -19,7 +19,7 @@ import torch
+ from PIL import Image
+ from torchvision.transforms import functional as TVF
+ from torchvision.transforms.functional import InterpolationMode
+-from ....optimization.memory_manager import is_mps_available
++from ....optimization.memory_manager import is_mps_available, is_xpu_available
+ 
+ 
+ class AreaResize:
+@@ -32,7 +32,7 @@ class AreaResize:
+         self.max_area = max_area
+         self.downsample_only = downsample_only
+         self.interpolation = interpolation
+-        if is_mps_available():
++        if is_mps_available() or is_xpu_available():
+             self.interpolation = InterpolationMode.BILINEAR
+ 
+     def __call__(self, image: Union[torch.Tensor, Image.Image]):
+@@ -51,7 +51,7 @@ class AreaResize:
+ 
+         resized_height, resized_width = round(height * scale), round(width * scale)
+ 
+-        antialias = not (isinstance(image, torch.Tensor) and image.device.type == 'mps')
++        antialias = not (isinstance(image, torch.Tensor) and image.device.type in ('mps', 'xpu'))
+         return TVF.resize(
+             image,
+             size=(resized_height, resized_width),
+diff --git a/src/data/image/transforms/na_resize.py b/src/data/image/transforms/na_resize.py
+index e1111c7..f0879bd 100644
+--- a/src/data/image/transforms/na_resize.py
++++ b/src/data/image/transforms/na_resize.py
+@@ -18,7 +18,7 @@ from torchvision.transforms import CenterCrop, Compose, InterpolationMode, Resiz
+ 
+ from .area_resize import AreaResize
+ from .side_resize import SideResize
+-from ....optimization.memory_manager import is_mps_available
++from ....optimization.memory_manager import is_mps_available, is_xpu_available
+ 
+ def NaResize(
+     resolution: int,
+@@ -27,7 +27,7 @@ def NaResize(
+     max_resolution: int = 0,
+     interpolation: InterpolationMode = InterpolationMode.BICUBIC,
+ ):
+-    Interpolation = InterpolationMode.BILINEAR if is_mps_available() else interpolation
++    Interpolation = InterpolationMode.BILINEAR if (is_mps_available() or is_xpu_available()) else interpolation
+     if mode == "area":
+         return AreaResize(
+             max_area=resolution**2,
+diff --git a/src/data/image/transforms/side_resize.py b/src/data/image/transforms/side_resize.py
+index 01362ae..291999c 100644
+--- a/src/data/image/transforms/side_resize.py
++++ b/src/data/image/transforms/side_resize.py
+@@ -17,7 +17,7 @@ import torch
+ from PIL import Image
+ from torchvision.transforms import InterpolationMode
+ from torchvision.transforms import functional as TVF
+-from ....optimization.memory_manager import is_mps_available
++from ....optimization.memory_manager import is_mps_available, is_xpu_available
+ 
+ class SideResize:
+     def __init__(
+@@ -31,7 +31,7 @@ class SideResize:
+         self.max_size = max_size
+         self.downsample_only = downsample_only
+         self.interpolation = interpolation
+-        if is_mps_available():
++        if is_mps_available() or is_xpu_available():
+             self.interpolation = InterpolationMode.BILINEAR
+ 
+     def __call__(self, image: Union[torch.Tensor, Image.Image]):
+@@ -57,8 +57,8 @@ class SideResize:
+         else:
+             size = self.size
+ 
+-        # Resize to shortest edge (disable antialias only for MPS tensors - not supported)
+-        antialias = not (isinstance(image, torch.Tensor) and image.device.type == 'mps')
++        # Resize to shortest edge (disable antialias only for MPS/XPU tensors - not supported)
++        antialias = not (isinstance(image, torch.Tensor) and image.device.type in ('mps', 'xpu'))
+         resized = TVF.resize(image, size, self.interpolation, antialias=antialias)
+         
+         # Apply max_size constraint if specified
+diff --git a/src/optimization/compatibility.py b/src/optimization/compatibility.py
+index c462022..6279500 100644
+--- a/src/optimization/compatibility.py
++++ b/src/optimization/compatibility.py
+@@ -660,7 +660,11 @@ if not os.environ.get("SEEDVR2_OPTIMIZATIONS_LOGGED"):
+         print("💡 For best performance: pip install sageattention flash-attn triton")
+     else:
+         icon = "⚡" if num_available >= 2 else "⚠️ "
+-        print(f"{icon} SeedVR2 optimizations check: SageAttention {sage_status} | Flash Attention {flash_status} | Triton {triton_status}")
++        if hasattr(torch, "xpu") and torch.xpu.is_available():
++            # SageAttention/Flash Attention are CUDA-only; only Triton applies on XPU.
++            print(f"⚡ SeedVR2 optimizations check: Triton {triton_status}")
++        else:
++            print(f"{icon} SeedVR2 optimizations check: SageAttention {sage_status} | Flash Attention {flash_status} | Triton {triton_status}")
+         
+         # Build install suggestions for missing packages
+         missing = []
+@@ -760,7 +764,15 @@ class CompatibleDiT(torch.nn.Module):
+                 self.debug.start_timer("_force_nadit_precision")
+                 self._force_nadit_precision(target_dtype=self.compute_dtype)
+                 self.debug.end_timer("_force_nadit_precision", "NaDiT parameters/buffers conversion")
+-            
++
++        # XPU requires the same unified-dtype treatment as MPS (no autocast fallback)
++        if not skip_conversion and hasattr(torch, 'xpu') and torch.xpu.is_available():
++            if self.model_dtype != self.compute_dtype:
++                self.debug.log(f"Converting NaDiT parameters/buffers to {self.compute_dtype} for XPU backend", category="setup", force=True)
++                self.debug.start_timer("_force_nadit_precision")
++                self._force_nadit_precision(target_dtype=self.compute_dtype)
++                self.debug.end_timer("_force_nadit_precision", "NaDiT parameters/buffers conversion")
++
+         # Apply RoPE stabilization for numerical stability
+         self.debug.log(f"Stabilizing RoPE computations for numerical stability", category="setup")
+         self.debug.start_timer("_stabilize_rope_computations")
+@@ -798,6 +810,8 @@ class CompatibleDiT(torch.nn.Module):
+                     if module.rope.freqs.dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
+                         if module.rope.freqs.device.type == "mps":
+                             module.rope.freqs.data = module.rope.freqs.to("cpu").to(target_dtype).to("mps")
++                        elif module.rope.freqs.device.type == "xpu":
++                            module.rope.freqs.data = module.rope.freqs.to("cpu").to(target_dtype).to("xpu")
+                         else:
+                             module.rope.freqs.data = module.rope.freqs.to(target_dtype)
+                         converted += 1
+@@ -823,6 +837,11 @@ class CompatibleDiT(torch.nn.Module):
+                     temp_converted = temp_cpu.to(target_dtype)
+                     param.data = temp_converted.to("mps")
+                     del temp_cpu, temp_converted
++                elif param.device.type == "xpu":
++                    temp_cpu = param.data.to("cpu")
++                    temp_converted = temp_cpu.to(target_dtype)
++                    param.data = temp_converted.to("xpu")
++                    del temp_cpu, temp_converted
+                 else:
+                     param.data = param.data.to(target_dtype)
+                 converted_count += 1
+@@ -838,6 +857,11 @@ class CompatibleDiT(torch.nn.Module):
+                     temp_converted = temp_cpu.to(target_dtype)
+                     buffer.data = temp_converted.to("mps")
+                     del temp_cpu, temp_converted
++                elif buffer.device.type == "xpu":
++                    temp_cpu = buffer.data.to("cpu")
++                    temp_converted = temp_cpu.to(target_dtype)
++                    buffer.data = temp_converted.to("xpu")
++                    del temp_cpu, temp_converted
+                 else:
+                     buffer.data = buffer.data.to(target_dtype)
+                 converted_count += 1

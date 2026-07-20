@@ -1,0 +1,39 @@
+{
+  "recipeId": "ComfyUI-WanVideoWrapper-xpu-device-mismatch",
+  "version": "1.0.0",
+  "nodeType": "WanVideoModelLoader",
+  "modelPattern": "wan*",
+  "xpuSupport": "patched",
+  "patchClass": "functional_runtime_support",
+  "patchFile": "patches/wanvideowrapper-xpu-device-mismatch.patch",
+  "patchTarget": "custom_linear.py::apply_lora, apply_single_lora, _apply_lora_direct, _apply_single_lora_direct; wanvideo/modules/model.py::WanRMSNorm.forward, WanRMSNorm.forward_chunked, WanFusedRMSNorm.forward, WanLayerNorm.forward, WanAttentionBlock.get_mod, Head.get_mod",
+  "validationCommand": "python -m py_compile custom_linear.py wanvideo/modules/model.py",
+  "baseVersion": "kijai/ComfyUI-WanVideoWrapper@df8f3e4",
+  "knownIssues": [
+    "LoRA diff tensors (custom_linear.py's apply_lora/apply_single_lora, both the custom-op path and the '_direct' no-custom-op fallback path) were applied to a weight tensor without confirming both are on the same device, causing a device-mismatch RuntimeError whenever the LoRA delta and the base weight end up on different devices (e.g. block-swap CPU-offload moved the weight but not a cached LoRA diff, or multi-GPU placement).",
+    "WanRMSNorm/WanFusedRMSNorm/WanLayerNorm applied their weight/bias parameter to an input tensor `x` without checking device equality first — same class of bug, triggered whenever a norm layer's weights and the activation it's normalizing diverge in device (block-swap, multi-GPU, or XPU device-transfer timing differences from CUDA).",
+    "WanAttentionBlock.get_mod() and Head.get_mod() added a `modulation` tensor to an input `e` tensor without a device check — same underlying pattern, different call sites.",
+    "NOT FIXED (deliberately): Intel's llm-scaler-omni patch for this package also disables block-swap-to-CPU-offload entirely on non-CUDA devices (always keeps transformer blocks on main_device instead of swapping to offload_device), citing async-transfer correctness concerns with `block.to(device, non_blocking=True)` on XPU. This was not applied — it trades away a real VRAM-saving feature (block-swap exists specifically to let large Wan models fit in limited VRAM) for a correctness concern that hasn't been confirmed against this fork's current, significantly-evolved block-swap implementation (lynx/wananimate/s2v-audio/dual-controlnet features added since the omni patch was authored). If XPU users hit an actual race-condition/corruption bug during block-swap (not just a device-mismatch error, which is what this recipe's patch fixes), re-evaluate disabling non_blocking transfers specifically rather than disabling block-swap outright."
+  ],
+  "workarounds": [
+    {
+      "action": "Apply patches/wanvideowrapper-xpu-device-mismatch.patch: move the weight/diff/modulation tensor to the input tensor's device immediately before the arithmetic op, in both LoRA code paths and all three norm-layer forward methods plus both get_mod() call sites.",
+      "rationale": "Minimal, purely-additive device-agnostic fix — makes these ops resilient to weight/input device divergence from any cause (block-swap, multi-GPU, XPU), not XPU-specific.",
+      "tradeoff": "A per-forward-call device check/transfer has negligible overhead when devices already match (the common case) but adds a small cost when they don't; this is far cheaper than the alternative (crash)."
+    },
+    {
+      "action": "Do NOT apply Intel's block-swap-disable fix from the omni patch without first confirming a real, reproducible bug (not just a suspected one) on this fork's current block-swap implementation — see the knownIssues note above.",
+      "rationale": "Block-swap is a genuine VRAM-saving mechanism; disabling it by default trades away real functionality for a concern that may not apply to this evolved code.",
+      "tradeoff": "If a real XPU block-swap bug surfaces later, this needs a fresh investigation rather than reusing omni's blanket fix verbatim."
+    }
+  ],
+  "validationEvidence": "Applied and committed directly to ComfyUI-WanVideoWrapper on remote-124-12 (commit 2a4ccae), verified via py_compile and AST-parse (2026-07-20). Not yet exercised through a full ComfyUI workflow run using WanVideo nodes.",
+  "validatedOnWorkflows": [],
+  "provenance": {
+    "taskOrigin": "llm-scaler/omni/patches/extention_comfyui_wanvideowrapper.patch (Intel llm-scaler-omni)",
+    "evidenceArtifact": "llm-scaler/omni/patches/extention_comfyui_wanvideowrapper.patch",
+    "createdAt": "2026-07-20",
+    "approvedBy": "tinafengfun"
+  },
+  "retireCondition": "kijai/ComfyUI-WanVideoWrapper adds device-agnostic tensor placement to LoRA application and norm layers upstream."
+}

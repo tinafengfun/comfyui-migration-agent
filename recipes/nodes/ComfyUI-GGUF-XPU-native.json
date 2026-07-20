@@ -1,0 +1,28 @@
+{
+  "recipeId": "ComfyUI-GGUF-XPU-native",
+  "version": "1.0.0",
+  "nodeType": "UnetLoaderGGUF",
+  "modelPattern": "*.gguf",
+  "xpuSupport": "native",
+  "patchClass": "none",
+  "knownIssues": [
+    "The base ComfyUI-GGUF package (numz/city96 lineage, node types UnetLoaderGGUF/CLIPLoaderGGUF/etc.) dequantizes GGUF-quantized weights (Q4_0, Q4_K, Q8_0, ...) on the fly; the default dequant path has no XPU-accelerated kernel, only a slow generic fallback.",
+    "This is already resolved on this environment by a SEPARATE, dedicated package: ComfyUI-GGUF-XPU (installed alongside, not replacing, ComfyUI-GGUF), which adds Triton-based dequant kernels for Q4_0/Q4_K/Q8_0 selected via device.type checks, with automatic fallback to the original PyTorch path when Triton/XPU is unavailable. This is functionally the same fix Intel's llm-scaler-omni ships as a source patch (comfyui_gguf_xpu.patch) against the base package directly — this environment instead has it as a standalone add-on package, so xpuSupport is 'native' from the perspective of a migration onto this environment, not because GGUF itself is XPU-native upstream."
+  ],
+  "workarounds": [
+    {
+      "action": "No action needed on this environment — ComfyUI-GGUF-XPU is already installed and provides the Triton dequant kernels. On a NEW target environment without it, either install ComfyUI-GGUF-XPU alongside the base ComfyUI-GGUF package, or apply llm-scaler/omni/patches/comfyui_gguf_xpu.patch directly to ComfyUI-GGUF's dequant.py/dequant_triton.py.",
+      "rationale": "Avoids re-deriving a dequant-kernel patch from scratch; both the standalone package and Intel's source patch solve the same problem.",
+      "tradeoff": "Requires Triton to be installed and working on the target for the accelerated path; falls back safely to the slow path otherwise, so this is a performance-only recipe, not a correctness blocker."
+    }
+  ],
+  "validationEvidence": "ComfyUI-GGUF-XPU installed at /home/intel/tianfeng/comfy/ComfyUI/custom_nodes/ComfyUI-GGUF-XPU (own git history, commit 4b8a633 'Initially add Intel XPU dequant optimizations for GGUF models (Q4_0, Q4_K, Q8_0)'), confirmed present via grep for triton/xpu references and dequant_triton.py file existence (2026-07-20).",
+  "validatedOnWorkflows": [],
+  "provenance": {
+    "taskOrigin": "llm-scaler/omni/patches/comfyui_gguf_xpu.patch (Intel llm-scaler-omni) -- cross-referenced against this environment's actual installed state",
+    "evidenceArtifact": "llm-scaler/omni/patches/comfyui_gguf_xpu.patch",
+    "createdAt": "2026-07-20",
+    "approvedBy": "tinafengfun"
+  },
+  "retireCondition": "Base ComfyUI-GGUF package adds native XPU/Triton dequant kernels upstream, making the separate ComfyUI-GGUF-XPU add-on package unnecessary."
+}

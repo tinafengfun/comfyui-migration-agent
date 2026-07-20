@@ -7,7 +7,9 @@ trigger:
   condition:
     anyOf:
       - nodeType: "AIO_Preprocessor"
-      - nodeType: "DepthAnythingPreprocessor"
+      - nodeType: "Depth_Anything_Preprocessor"
+      - nodeType: "Depth_Anything_V2_Preprocessor"
+      - nodeType: "Zoe_Depth_Anything_Preprocessor"
       - nodeType: "PatchSageAttentionKJ"
 provenance:
   taskOrigin: "manual"
@@ -17,7 +19,9 @@ provenance:
 
 ## XPU attention/preprocessor fallback
 
-When the source workflow contains attention-based preprocessors (`AIO_Preprocessor`, `DepthAnythingPreprocessor`), these nodes may fail on Intel XPU due to missing attention operator implementations.
+When the source workflow contains attention-based preprocessors (`AIO_Preprocessor`, `Depth_Anything_Preprocessor`, `Depth_Anything_V2_Preprocessor`, `Zoe_Depth_Anything_Preprocessor`), these nodes may fail on Intel XPU due to missing attention operator implementations.
+
+Note: `Depth_Anything_V2_Preprocessor` (comfyui_controlnet_aux) also had a separate, simpler bug — its internal device detection hardcoded `cuda`/`mps`/`cpu` with no XPU branch, defaulting to CPU regardless of this attention concern. See the `comfyui_controlnet_aux-depth-anything-v2-xpu-device` recipe for that fix; it's independent of the attention-operator fallback below.
 
 1. **Operator check**: These processors often use `scaled_dot_product_attention` or flash attention, which may not be dispatched to the XPU backend on current `torch_xpu` builds. Check `torch.xpu.is_available()` and whether the attention kernel is registered.
 2. **Fallback policy**: If the operator is missing, route these nodes to CPU via `device=cpu` runtime policy. The quality impact is zero for deterministic preprocessors (depth, canny); only latency increases.

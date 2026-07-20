@@ -1,0 +1,31 @@
+{
+  "recipeId": "comfyui_controlnet_aux-depth-anything-v2-xpu-device",
+  "version": "1.0.0",
+  "nodeType": "Depth_Anything_V2_Preprocessor",
+  "xpuSupport": "patched",
+  "patchClass": "functional_runtime_support",
+  "patchFile": "patches/depth-anything-v2-xpu-device.patch",
+  "patchTarget": "src/custom_controlnet_aux/depth_anything_v2/dpt.py::DepthAnythingV2.image2tensor, DepthAnythingV2.infer_image",
+  "validationCommand": "python -c \"import torch; from src.custom_controlnet_aux.depth_anything_v2.dpt import DepthAnythingV2\" # then instantiate the model and confirm image2tensor's DEVICE resolves to the model's real device, not CPU, on an XPU system",
+  "baseVersion": "Fannovel16/comfyui_controlnet_aux@e8b689a (v1.1.5)",
+  "knownIssues": [
+    "dpt.py's DepthAnythingV2.image2tensor() hardcodes `DEVICE = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'` with no XPU branch — on an XPU system this silently falls back to CPU, since neither cuda nor mps is available. No crash, just silent slowdown (and a device-mismatch crash later if the caller doesn't also correct it) — easy to miss because there's no error message pointing at the real cause.",
+    "The only caller, infer_image(), had a pre-existing local workaround (moving the returned image to the model's own device after calling image2tensor) that papers over the symptom for that one call path, but the root cause inside image2tensor itself was still present and would bite any future/different caller."
+  ],
+  "workarounds": [
+    {
+      "action": "Apply patches/depth-anything-v2-xpu-device.patch: change image2tensor()'s DEVICE resolution to `next(self.parameters()).device` (device-agnostic, matches the pattern used elsewhere in this codebase for ControlNet-aux nodes) instead of a hardcoded cuda/mps/cpu chain.",
+      "rationale": "Fixes at the root so any current or future caller of image2tensor() gets the correct device automatically, rather than relying on each caller to independently work around it.",
+      "tradeoff": "None — this is a strict correctness fix with no behavior change on CUDA/MPS/CPU systems, only adds correct behavior on XPU."
+    }
+  ],
+  "validationEvidence": "Applied and committed directly to comfyui_controlnet_aux on remote-124-12 (commit 14fa2a9), verified via py_compile syntax check (2026-07-20). Not yet exercised through a full ComfyUI workflow run using this specific preprocessor.",
+  "validatedOnWorkflows": [],
+  "provenance": {
+    "taskOrigin": "llm-scaler/omni/patches/comfyui_controlnet_aux_depth_anything_v2_xpu.patch (Intel llm-scaler-omni)",
+    "evidenceArtifact": "llm-scaler/omni/patches/comfyui_controlnet_aux_depth_anything_v2_xpu.patch",
+    "createdAt": "2026-07-20",
+    "approvedBy": "tinafengfun"
+  },
+  "retireCondition": "Fannovel16/comfyui_controlnet_aux adds XPU-aware device detection to depth_anything_v2/dpt.py upstream."
+}
