@@ -1,9 +1,10 @@
 import express from "express";
+import multer from "multer";
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { CreateTaskRequest, GpuNodeVerifyResult, GpuNodeWriteRequest, MigrationTask } from "../shared/types";
 import { classifyArtifact, listArtifactFiles, readArtifactText } from "./artifacts";
-import { processUploadedReplacement, FileValidationError } from "./assetReplacement";
+import { processUploadedReplacement, FileValidationError, MAX_FILE_SIZE_BYTES } from "./assetReplacement";
 import { loadConfig } from "./config";
 import { ensureDir, safeJoin } from "./fsUtils";
 import { MigrationOrchestrator } from "./orchestrator";
@@ -43,6 +44,16 @@ await orchestrator.reconcileStaleActiveTasks(
 
 const app = express();
 app.use(express.json({ limit: "200mb" }));
+
+// Uploaded media/model files are streamed straight to disk (not buffered in
+// memory or base64-encoded through the JSON body parser above) -- the JSON
+// limit above is unrelated to and far smaller than what this route allows.
+const uploadTmpDir = path.join(config.workspaceRoot, ".tmp-uploads");
+await ensureDir(uploadTmpDir);
+const upload = multer({
+  storage: multer.diskStorage({ destination: uploadTmpDir }),
+  limits: { fileSize: MAX_FILE_SIZE_BYTES }
+});
 
 app.get("/api/health", (_req, res) => {
   res.json({
@@ -451,27 +462,31 @@ app.post("/api/tasks/:taskId/run-report", async (req, res, next) => {
   }
 });
 
-app.post("/api/tasks/:taskId/upload-media", async (req, res, next) => {
+app.post("/api/tasks/:taskId/upload-media", upload.single("file"), async (req, res, next) => {
+  const cleanup = () => req.file && fs.unlink(req.file.path).catch(() => {});
   try {
-    const task = await store.getTask(req.params.taskId);
+    const task = await store.getTask(String(req.params.taskId));
     if (!task) {
+      await cleanup();
       res.status(404).json({ error: "Task not found" });
       return;
     }
-    const { filename, contentBase64, targetFilename } = req.body as { filename?: string; contentBase64?: string; targetFilename?: string };
-    if (!filename || !contentBase64) {
-      res.status(400).json({ error: "filename and contentBase64 are required" });
+    if (!req.file) {
+      res.status(400).json({ error: "file is required (multipart field name: file)" });
       return;
     }
+    const targetFilename = (req.body as { targetFilename?: string }).targetFilename || req.file.originalname;
     const result = await processUploadedReplacement({
       task,
-      filename,
-      targetFilename: targetFilename || filename,
-      contentBase64,
+      filename: req.file.originalname,
+      targetFilename,
+      filePath: req.file.path,
+      fileSizeBytes: req.file.size,
       comfyuiRoot: config.comfyuiRoot
     });
     res.status(201).json(result);
   } catch (error) {
+    await cleanup();
     if (error instanceof FileValidationError) {
       res.status(400).json({ error: error.message });
       return;
@@ -575,7 +590,14 @@ app.get("/api/tasks/:taskId/events/stream", async (req, res, next) => {
     const unsubscribe = orchestrator.subscribe(task.id, (event) => {
       res.write(`data: ${JSON.stringify(event)}\n\n`);
     });
-    req.on("close", unsubscribe);
+    // Keep the connection alive during long, quiet steps (real GPU work can
+    // go minutes without a progress event) -- a `:` comment line is ignored
+    // by EventSource per spec, but resets any intermediary's idle timeout.
+    const heartbeat = setInterval(() => res.write(":heartbeat\n\n"), 15_000);
+    req.on("close", () => {
+      clearInterval(heartbeat);
+      unsubscribe();
+    });
   } catch (error) {
     next(error);
   }
@@ -674,6 +696,19 @@ app.post("/api/fixtures/zimage", async (_req, res, next) => {
   } catch (error) {
     next(error);
   }
+});
+
+app.use((error: unknown, _req: express.Request, res: express.Response, next: express.NextFunction) => {
+  if (error instanceof multer.MulterError) {
+    const status = error.code === "LIMIT_FILE_SIZE" ? 413 : 400;
+    const message =
+      error.code === "LIMIT_FILE_SIZE"
+        ? `File too large. Maximum: ${MAX_FILE_SIZE_BYTES / (1024 * 1024 * 1024)} GB.`
+        : `Upload rejected: ${error.message}`;
+    res.status(status).json({ error: message });
+    return;
+  }
+  next(error);
 });
 
 app.use((error: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {

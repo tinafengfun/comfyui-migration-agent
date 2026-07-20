@@ -79,11 +79,20 @@ function shouldRefreshTaskState(event: AgentEvent): boolean {
   return false;
 }
 
+export type ConnectionState = "connected" | "reconnecting";
+
+// Base reconnect delay when the browser gives up retrying on its own
+// (EventSource readyState === CLOSED). Backs off up to a cap so a genuinely
+// down backend doesn't spam reconnect attempts forever.
+const RECONNECT_BASE_MS = 2_000;
+const RECONNECT_MAX_MS = 30_000;
+
 export function useEventStream(taskId: string | undefined) {
   const [events, setEvents] = useState<AgentEvent[]>([]);
   const [activities, setActivities] = useState<Map<string, ActivityLine[]>>(new Map());
   const [needsRefresh, setNeedsRefresh] = useState(0);
   const [needsArtifactRefresh, setNeedsArtifactRefresh] = useState(0);
+  const [connectionState, setConnectionState] = useState<ConnectionState>("connected");
   const eventsRef = useRef(events);
   eventsRef.current = events;
 
@@ -91,39 +100,72 @@ export function useEventStream(taskId: string | undefined) {
     if (!taskId) return;
     setEvents([]);
     setActivities(new Map());
+    setConnectionState("connected");
 
-    const source = new EventSource(
-      `/api/tasks/${taskId}/events/stream?limit=80`
-    );
+    let stopped = false;
+    let source: EventSource | undefined;
+    let reconnectAttempt = 0;
+    let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
 
-    source.onmessage = (message) => {
-      const event = JSON.parse(message.data) as AgentEvent;
+    const connect = () => {
+      if (stopped) return;
+      source = new EventSource(`/api/tasks/${taskId}/events/stream?limit=80`);
 
-      setEvents((current) => {
-        if (current.some((item) => item.id === event.id)) return current;
-        return [...current, event].slice(-EVENT_MEMORY_LIMIT);
-      });
+      source.onopen = () => {
+        reconnectAttempt = 0;
+        setConnectionState("connected");
+      };
 
-      // Extract activity for agent view
-      const activity = extractActivity(event);
-      if (activity && event.stepId) {
-        setActivities((current) => {
-          const next = new Map(current);
-          const stepActivities = [...(next.get(event.stepId!) ?? []), activity].slice(-ACTIVITY_CAP);
-          next.set(event.stepId!, stepActivities);
-          return next;
+      source.onmessage = (message) => {
+        const event = JSON.parse(message.data) as AgentEvent;
+
+        setEvents((current) => {
+          if (current.some((item) => item.id === event.id)) return current;
+          return [...current, event].slice(-EVENT_MEMORY_LIMIT);
         });
-      }
 
-      if (shouldRefreshTaskState(event)) {
-        setNeedsRefresh((n) => n + 1);
-      }
-      if (["step_completed", "step_failed", "hard_stop", "human_question", "step_summary", "reflection_proposed"].includes(event.type)) {
-        setNeedsArtifactRefresh((n) => n + 1);
-      }
+        // Extract activity for agent view
+        const activity = extractActivity(event);
+        if (activity && event.stepId) {
+          setActivities((current) => {
+            const next = new Map(current);
+            const stepActivities = [...(next.get(event.stepId!) ?? []), activity].slice(-ACTIVITY_CAP);
+            next.set(event.stepId!, stepActivities);
+            return next;
+          });
+        }
+
+        if (shouldRefreshTaskState(event)) {
+          setNeedsRefresh((n) => n + 1);
+        }
+        if (["step_completed", "step_failed", "hard_stop", "human_question", "step_summary", "reflection_proposed"].includes(event.type)) {
+          setNeedsArtifactRefresh((n) => n + 1);
+        }
+      };
+
+      source.onerror = () => {
+        if (stopped) return;
+        setConnectionState("reconnecting");
+        // EventSource retries on its own for a transient drop, but when the
+        // browser gives up (readyState CLOSED -- e.g. the server rejected
+        // the connection outright) it will never retry by itself, so we
+        // must recreate it manually with backoff.
+        if (source?.readyState === EventSource.CLOSED) {
+          source.close();
+          const delay = Math.min(RECONNECT_BASE_MS * 2 ** reconnectAttempt, RECONNECT_MAX_MS);
+          reconnectAttempt += 1;
+          reconnectTimer = setTimeout(connect, delay);
+        }
+      };
     };
 
-    return () => source.close();
+    connect();
+
+    return () => {
+      stopped = true;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      source?.close();
+    };
   }, [taskId]);
 
   // Pending questions: only the latest unanswered question per step
@@ -144,5 +186,5 @@ export function useEventStream(taskId: string | undefined) {
     return [...latest.values()];
   })();
 
-  return { events, activities, pendingQuestions, needsRefresh, needsArtifactRefresh };
+  return { events, activities, pendingQuestions, needsRefresh, needsArtifactRefresh, connectionState };
 }

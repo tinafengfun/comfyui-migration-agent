@@ -17,7 +17,12 @@ const ALLOWED_EXTENSIONS = new Set([
   "mp3", "wav", "ogg", "flac"
 ]);
 
-const MAX_FILE_SIZE_BYTES = 500 * 1024 * 1024; // 500 MB
+// Uploads are streamed to disk via multer (see index.ts), so the limit only
+// needs to reflect what's practical to push through a browser upload -- not
+// an in-memory buffering concern. Most LoRAs are 50MB-2GB; very large
+// checkpoints (10GB+) are impractical over a browser upload regardless and
+// should be placed on disk/NFS directly.
+export const MAX_FILE_SIZE_BYTES = 4 * 1024 * 1024 * 1024; // 4 GB
 const INPUT_MEDIA_EXTENSIONS = new Set([
   "png", "jpg", "jpeg", "webp", "gif", "bmp", "tiff", "tif",
   "mp4", "mov", "webm", "avi", "mkv",
@@ -31,7 +36,7 @@ export class FileValidationError extends Error {
   }
 }
 
-function validateFile(filename: string, contentBase64: string): void {
+function validateFile(filename: string, sizeBytes: number): void {
   const ext = path.extname(filename).toLowerCase().replace(/^\./, "");
   if (!ext) {
     throw new FileValidationError(`File has no extension: ${filename}`);
@@ -41,10 +46,9 @@ function validateFile(filename: string, contentBase64: string): void {
       `File type ".${ext}" is not allowed. Allowed types: images (png, jpg, webp, ...), video (mp4, mov, ...), models (safetensors, gguf, ...).`
     );
   }
-  const sizeBytes = Math.ceil(contentBase64.length * 3 / 4);
   if (sizeBytes > MAX_FILE_SIZE_BYTES) {
     throw new FileValidationError(
-      `File too large: ${(sizeBytes / (1024 * 1024)).toFixed(1)} MB. Maximum: 500 MB.`
+      `File too large: ${(sizeBytes / (1024 * 1024)).toFixed(1)} MB. Maximum: ${MAX_FILE_SIZE_BYTES / (1024 * 1024 * 1024)} GB.`
     );
   }
 }
@@ -61,14 +65,16 @@ async function placeFile(
   comfyuiInputDir: string | undefined,
   taskInputDir: string | undefined,
   targetFilename: string,
-  buffer: Buffer
+  sourcePath: string
 ): Promise<string[]> {
   const placedPaths: string[] = [];
 
+  // Copy (not read-into-memory) from the multer temp file at sourcePath to
+  // every destination -- streams at the OS level regardless of file size.
   // Always write to artifacts/input-media/
   const artifactPath = path.join(artifactMediaDir, targetFilename);
   await ensureDir(artifactMediaDir);
-  await fs.writeFile(artifactPath, buffer);
+  await fs.copyFile(sourcePath, artifactPath);
   placedPaths.push(artifactPath);
 
   // If input media, copy to both ComfyUI/input/ and task workspace inputs/
@@ -77,14 +83,14 @@ async function placeFile(
     if (comfyuiInputDir) {
       await ensureDir(comfyuiInputDir);
       const comfyuiPath = path.join(comfyuiInputDir, targetFilename);
-      await fs.writeFile(comfyuiPath, buffer);
+      await fs.copyFile(sourcePath, comfyuiPath);
       placedPaths.push(comfyuiPath);
     }
     // Task workspace inputs/ (used by Step 05 launched ComfyUI with --input-directory)
     if (taskInputDir) {
       await ensureDir(taskInputDir);
       const taskInputPath = path.join(taskInputDir, targetFilename);
-      await fs.writeFile(taskInputPath, buffer);
+      await fs.copyFile(sourcePath, taskInputPath);
       placedPaths.push(taskInputPath);
     }
   }
@@ -261,55 +267,60 @@ export async function processUploadedReplacement(input: {
   task: MigrationTask;
   filename: string;
   targetFilename: string;
-  contentBase64: string;
+  filePath: string;
+  fileSizeBytes: number;
   comfyuiRoot: string;
   stepId?: string;
 }): Promise<UploadReplacementResult> {
-  const { task, filename, contentBase64, comfyuiRoot } = input;
+  const { task, filename, filePath, fileSizeBytes, comfyuiRoot } = input;
   const targetFilename = path.basename(input.targetFilename || input.filename);
   const stepId = input.stepId ?? "01";
 
-  // 1. Validate
-  validateFile(targetFilename, contentBase64);
+  try {
+    // 1. Validate
+    validateFile(targetFilename, fileSizeBytes);
 
-  // 2. Decode
-  const buffer = Buffer.from(contentBase64, "base64");
+    // 2. Place file (copies from the multer temp path; original is cleaned up in `finally`)
+    const artifactMediaDir = path.join(task.artifactPath, "input-media");
+    const comfyuiInputDir = path.join(comfyuiRoot, "input");
+    const taskInputDir = path.join(task.workspacePath, "inputs");
+    const placedPaths = await placeFile(artifactMediaDir, comfyuiInputDir, taskInputDir, targetFilename, filePath);
 
-  // 3. Place file
-  const artifactMediaDir = path.join(task.artifactPath, "input-media");
-  const comfyuiInputDir = path.join(comfyuiRoot, "input");
-  const taskInputDir = path.join(task.workspacePath, "inputs");
-  const placedPaths = await placeFile(artifactMediaDir, comfyuiInputDir, taskInputDir, targetFilename, buffer);
+    // 3. Update CSV
+    const primaryPath = placedPaths[0];
+    await updateAssetCsv(task.artifactPath, targetFilename, primaryPath);
 
-  // 4. Update CSV
-  const primaryPath = placedPaths[0];
-  await updateAssetCsv(task.artifactPath, targetFilename, primaryPath);
+    // 4. Re-evaluate gate
+    const gateResult = await reevaluateGate(task.artifactPath, stepId);
 
-  // 5. Re-evaluate gate
-  const gateResult = await reevaluateGate(task.artifactPath, stepId);
-
-  // 6. Register with running ComfyUI via upload API (best-effort)
-  if (isInputMedia(targetFilename)) {
-    const apiUrl = await getComfyUIApiUrl(task);
-    if (apiUrl) {
-      try {
-        await registerImageWithComfyUI(apiUrl, primaryPath, targetFilename);
-        placedPaths.push(`comfyui-api:${targetFilename}`);
-      } catch (err) {
-        console.warn(`[upload] ComfyUI API registration failed (non-fatal): ${err instanceof Error ? err.message : err}`);
+    // 5. Register with running ComfyUI via upload API (best-effort)
+    if (isInputMedia(targetFilename)) {
+      const apiUrl = await getComfyUIApiUrl(task);
+      if (apiUrl) {
+        try {
+          await registerImageWithComfyUI(apiUrl, primaryPath, targetFilename);
+          placedPaths.push(`comfyui-api:${targetFilename}`);
+        } catch (err) {
+          console.warn(`[upload] ComfyUI API registration failed (non-fatal): ${err instanceof Error ? err.message : err}`);
+        }
       }
     }
-  }
 
-  return {
-    uploaded: true,
-    path: primaryPath,
-    filename: targetFilename,
-    originalName: path.basename(filename),
-    resolved: gateResult.resolved,
-    remainingGaps: gateResult.remainingGaps,
-    placedPaths
-  };
+    return {
+      uploaded: true,
+      path: primaryPath,
+      filename: targetFilename,
+      originalName: path.basename(filename),
+      resolved: gateResult.resolved,
+      remainingGaps: gateResult.remainingGaps,
+      placedPaths
+    };
+  } finally {
+    // The multer temp file has been copied to its real destination(s) above
+    // (or validation failed before any copy happened) -- either way it must
+    // not linger in the temp upload directory.
+    await fs.unlink(filePath).catch(() => {});
+  }
 }
 
 // ── ComfyUI API helpers ──

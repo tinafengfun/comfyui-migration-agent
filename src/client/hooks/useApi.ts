@@ -12,6 +12,15 @@ import type {
 
 export type ArtifactListItem = Pick<ArtifactRecord, "relativePath" | "kind" | "path">;
 
+export type UploadMediaResult = {
+  uploaded: boolean;
+  filename: string;
+  originalName: string;
+  resolved: boolean;
+  remainingGaps: number;
+  placedPaths: string[];
+};
+
 export function useApi() {
   const fetchSteps = useCallback(async (): Promise<MigrationStepDefinition[]> => {
     const res = await fetch("/api/steps");
@@ -120,6 +129,15 @@ export function useApi() {
     return data.subJobs ?? [];
   }, []);
 
+  const startSubJob = useCallback(async (taskId: string, subJobId: string): Promise<SubJob> => {
+    const res = await fetch(`/api/tasks/${taskId}/subjobs/${encodeURIComponent(subJobId)}/start`, {
+      method: "POST"
+    });
+    if (!res.ok) throw new Error(await res.text());
+    const data = await res.json();
+    return data.subJob;
+  }, []);
+
   const fetchProgressNarrative = useCallback(async (taskId: string): Promise<ProgressNarrative | undefined> => {
     const res = await fetch(`/api/tasks/${taskId}/progress`);
     if (!res.ok) return undefined;
@@ -145,29 +163,55 @@ export function useApi() {
     return res.json();
   }, []);
 
-  const uploadMedia = useCallback(async (taskId: string, file: File, targetFilename?: string): Promise<{
-    uploaded: boolean;
-    filename: string;
-    originalName: string;
-    resolved: boolean;
-    remainingGaps: number;
-    placedPaths: string[];
-  }> => {
-    const contentBase64 = await new Promise<string>((resolve) => {
-      const reader = new FileReader();
-      reader.onload = () => {
-        const dataUrl = reader.result as string;
-        resolve(dataUrl.split(",", 2)[1]);
+  // Must match src/server/assetReplacement.ts's MAX_FILE_SIZE_BYTES (4 GB) --
+  // checked client-side so an oversized file fails fast instead of uploading
+  // for minutes before the server rejects it.
+  const MAX_UPLOAD_SIZE_BYTES = 4 * 1024 * 1024 * 1024;
+
+  const uploadMedia = useCallback((
+    taskId: string,
+    file: File,
+    targetFilename?: string,
+    onProgress?: (percent: number) => void
+  ): Promise<UploadMediaResult> => {
+    if (file.size > MAX_UPLOAD_SIZE_BYTES) {
+      const maxGb = MAX_UPLOAD_SIZE_BYTES / (1024 * 1024 * 1024);
+      return Promise.reject(
+        new Error(`File too large: ${(file.size / (1024 * 1024)).toFixed(1)} MB. Maximum: ${maxGb} GB.`)
+      );
+    }
+    return new Promise((resolve, reject) => {
+      const formData = new FormData();
+      formData.append("file", file, file.name);
+      if (targetFilename) formData.append("targetFilename", targetFilename);
+
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", `/api/tasks/${taskId}/upload-media`);
+      xhr.upload.onprogress = (event) => {
+        if (onProgress && event.lengthComputable) {
+          onProgress(Math.round((event.loaded / event.total) * 100));
+        }
       };
-      reader.readAsDataURL(file);
+      xhr.onload = () => {
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(xhr.responseText);
+        } catch {
+          parsed = undefined;
+        }
+        if (xhr.status >= 200 && xhr.status < 300) {
+          resolve(parsed as UploadMediaResult);
+        } else {
+          const message =
+            parsed && typeof parsed === "object" && "error" in parsed
+              ? String((parsed as { error: unknown }).error)
+              : xhr.responseText || `Upload failed (${xhr.status})`;
+          reject(new Error(message));
+        }
+      };
+      xhr.onerror = () => reject(new Error("Upload failed: network error"));
+      xhr.send(formData);
     });
-    const res = await fetch(`/api/tasks/${taskId}/upload-media`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ filename: file.name, contentBase64, targetFilename })
-    });
-    if (!res.ok) throw new Error(await res.text());
-    return res.json();
   }, []);
 
   const fetchGateSignal = useCallback(async (taskId: string, stepId: string): Promise<{
@@ -248,7 +292,7 @@ export function useApi() {
     fetchSteps, fetchTasks, createTask, deleteTask,
     runUntilGate, runStep, resumeStep, rerunStep, hardStop,
     answerQuestion, uploadMedia, fetchArtifacts, fetchArtifactContent,
-    fetchDecisions, fetchSubJobs, fetchProgressNarrative,
+    fetchDecisions, fetchSubJobs, startSubJob, fetchProgressNarrative,
     fetchHealth, runPreflight, generateRunReport, fetchGateSignal, fetchGpuNodes,
     createGpuNode, updateGpuNode, deleteGpuNode, verifyGpuNode
   };

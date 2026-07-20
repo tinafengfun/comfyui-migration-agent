@@ -103,20 +103,23 @@ function App() {
   const [selectedArtifact, setSelectedArtifact] = useState<string | undefined>();
   const [artifactContent, setArtifactContent] = useState("");
   const [decisions, setDecisions] = useState<HumanDecision[]>([]);
+  const [subJobs, setSubJobs] = useState<SubJob[]>([]);
+  const [startingSubJobId, setStartingSubJobId] = useState<string | undefined>();
   const [progressNarrative, setProgressNarrative] = useState<ProgressNarrative | undefined>();
   const [health, setHealth] = useState<HealthStatus | undefined>();
   const [preflight, setPreflight] = useState<PreflightState>({ status: "idle" });
   const [uploadError, setUploadError] = useState<string | undefined>();
   const [uploadSuccess, setUploadSuccess] = useState<string | undefined>();
+  const [uploadProgress, setUploadProgress] = useState<number | undefined>();
   const [gpuNodes, setGpuNodes] = useState<GpuNodeInfo[]>([]);
   const [defaultGpuNode, setDefaultGpuNode] = useState<string | undefined>();
   const [selectedGpuNode, setSelectedGpuNode] = useState<string | undefined>();
   const [nodeManagerOpen, setNodeManagerOpen] = useState(false);
   const [questionDrafts, setQuestionDrafts] = useState<Record<string, string>>({});
-  const [rightTab, setRightTab] = useState<"detail" | "artifacts">("detail");
+  const [rightTab, setRightTab] = useState<"detail" | "artifacts" | "subjobs">("detail");
 
   // Event stream
-  const { events, activities, pendingQuestions, needsRefresh, needsArtifactRefresh } =
+  const { events, activities, pendingQuestions, needsRefresh, needsArtifactRefresh, connectionState } =
     useEventStream(selectedTaskId);
 
   // Derived
@@ -213,6 +216,7 @@ function App() {
     if (!selectedTaskId) return;
     setArtifacts([]);
     setDecisions([]);
+    setSubJobs([]);
     setProgressNarrative(undefined);
     setSelectedArtifact(undefined);
     setArtifactContent("");
@@ -220,13 +224,15 @@ function App() {
   }, [selectedTaskId]);
 
   async function loadTaskData(taskId: string) {
-    const [arts, decs, narr] = await Promise.all([
+    const [arts, decs, narr, jobs] = await Promise.all([
       api.fetchArtifacts(taskId),
       api.fetchDecisions(taskId),
-      api.fetchProgressNarrative(taskId)
+      api.fetchProgressNarrative(taskId),
+      api.fetchSubJobs(taskId)
     ]);
     setArtifacts(arts);
     setDecisions(decs);
+    setSubJobs(jobs);
     if (narr) setProgressNarrative(narr);
   }
 
@@ -259,12 +265,27 @@ function App() {
     await api.answerQuestion(selectedTaskId, event.id, answer, freeform);
   }
 
+  async function handleStartSubJob(subJobId: string) {
+    if (!selectedTaskId) return;
+    setStartingSubJobId(subJobId);
+    try {
+      const updated = await api.startSubJob(selectedTaskId, subJobId);
+      setSubJobs((current) => current.map((j) => (j.id === updated.id ? updated : j)));
+    } catch (err) {
+      setUploadError(err instanceof Error ? err.message : "Failed to start sub-job");
+    } finally {
+      setStartingSubJobId(undefined);
+    }
+  }
+
   async function uploadMedia(taskId: string, file: File) {
     const missingName = pendingQuestions.length > 0
       ? extractMissingFilename(pendingQuestions[0])
       : undefined;
     try {
-      const result = await api.uploadMedia(taskId, file, missingName);
+      setUploadProgress(0);
+      const result = await api.uploadMedia(taskId, file, missingName, setUploadProgress);
+      setUploadProgress(undefined);
       setUploadError(undefined);
 
       if (result.resolved) {
@@ -286,6 +307,7 @@ function App() {
       // Auto-clear success message after 8 seconds
       setTimeout(() => setUploadSuccess(undefined), 8000);
     } catch (err) {
+      setUploadProgress(undefined);
       setUploadError(err instanceof Error ? err.message : "Upload failed");
     }
   }
@@ -304,6 +326,15 @@ function App() {
         <div className="header-left">
           <h1>XPU Migration Agent</h1>
           <span className={`health-dot ${health?.ok ? "ok" : ""}`} title="API health" />
+          {selectedTaskId && (
+            <span
+              className={`health-dot ${connectionState === "connected" ? "ok" : "reconnecting"}`}
+              title={connectionState === "connected" ? "Live updates connected" : "Reconnecting to live updates…"}
+            />
+          )}
+          {selectedTaskId && connectionState === "reconnecting" && (
+            <span className="step-progress-label reconnecting-label">Reconnecting…</span>
+          )}
           {stepStats.total > 0 && (
             <span className="step-progress-label">{stepStats.completed}/{stepStats.total} steps ({stepStats.percent}%)</span>
           )}
@@ -375,6 +406,7 @@ function App() {
                 onAnswer={answerQuestion}
                 onOpenArtifact={openArtifact}
                 onUploadMedia={uploadMedia}
+                uploadProgress={uploadProgress}
                 decisions={decisions}
                 allEvents={events}
                 taskId={selectedTaskId}
@@ -390,6 +422,9 @@ function App() {
               <button className={`tab ${rightTab === "artifacts" ? "active" : ""}`} onClick={() => setRightTab("artifacts")}>
                 Artifacts
               </button>
+              <button className={`tab ${rightTab === "subjobs" ? "active" : ""}`} onClick={() => setRightTab("subjobs")}>
+                Sub-jobs{subJobs.length > 0 ? ` (${subJobs.length})` : ""}
+              </button>
               {selectedArtifact && <span className="tab-info">{selectedArtifact.split("/").pop()}</span>}
             </div>
 
@@ -404,13 +439,19 @@ function App() {
                 onResumeStep={(stepId) => selectedTaskId && void api.resumeStep(selectedTaskId, stepId)}
                 onRerunStep={(stepId) => selectedTaskId && void api.rerunStep(selectedTaskId, stepId)}
               />
-            ) : (
+            ) : rightTab === "artifacts" ? (
               <ArtifactBrowser
                 artifacts={artifacts}
                 selectedPath={selectedArtifact}
                 content={artifactContent}
                 taskId={selectedTaskId}
                 onSelect={openArtifact}
+              />
+            ) : (
+              <SubJobList
+                subJobs={subJobs}
+                startingSubJobId={startingSubJobId}
+                onStart={handleStartSubJob}
               />
             )}
           </div>
@@ -976,6 +1017,7 @@ function AssetUploadPanel({ event, taskId, api, onAnswer, onResolved }: {
   const [items, setItems] = useState<GateSignalItem[]>([]);
   const [statusMap, setStatusMap] = useState<Record<string, ItemStatus>>({});
   const [errorMap, setErrorMap] = useState<Record<string, string>>({});
+  const [progressMap, setProgressMap] = useState<Record<string, number>>({});
   const [unmatched, setUnmatched] = useState<Array<{ file: File; targetItem?: GateSignalItem }>>([]);
   const [bulkMsg, setBulkMsg] = useState<string>("");
   const multiInputRef = useRef<HTMLInputElement>(null);
@@ -1020,8 +1062,11 @@ function AssetUploadPanel({ event, taskId, api, onAnswer, onResolved }: {
   async function uploadOne(file: File, targetName: string): Promise<boolean> {
     setStatusMap((m) => ({ ...m, [targetName]: "uploading" }));
     setErrorMap((m) => ({ ...m, [targetName]: "" }));
+    setProgressMap((m) => ({ ...m, [targetName]: 0 }));
     try {
-      const result = await api.uploadMedia(taskId, file, targetName);
+      const result = await api.uploadMedia(taskId, file, targetName, (percent) =>
+        setProgressMap((m) => ({ ...m, [targetName]: percent }))
+      );
       if (result.uploaded) {
         setStatusMap((m) => ({ ...m, [targetName]: "resolved" }));
         // Refresh gate signal to sync with backend state
@@ -1035,6 +1080,12 @@ function AssetUploadPanel({ event, taskId, api, onAnswer, onResolved }: {
       setStatusMap((m) => ({ ...m, [targetName]: "failed" }));
       setErrorMap((m) => ({ ...m, [targetName]: err instanceof Error ? err.message : String(err) }));
       return false;
+    } finally {
+      setProgressMap((m) => {
+        const next = { ...m };
+        delete next[targetName];
+        return next;
+      });
     }
   }
 
@@ -1109,7 +1160,11 @@ function AssetUploadPanel({ event, taskId, api, onAnswer, onResolved }: {
               </span>
               <div className="asset-item-info">
                 <span className="asset-item-name">{basename(item.name)}</span>
-                <span className="asset-item-kind">{item.kind}</span>
+                <span className="asset-item-kind">
+                  {status === "uploading" && progressMap[item.name] !== undefined
+                    ? `uploading… ${progressMap[item.name]}%`
+                    : item.kind}
+                </span>
               </div>
               {status !== "resolved" && status !== "uploading" && (
                 <button className="btn btn-sm" onClick={() => handlePerItemClick(item.name)}>
@@ -1194,13 +1249,14 @@ function AssetUploadPanel({ event, taskId, api, onAnswer, onResolved }: {
 }
 
 /* ── Human Interaction ── */
-function HumanInteraction({ questions, drafts, onDraftChange, onAnswer, onOpenArtifact, onUploadMedia, decisions, allEvents, taskId, api }: {
+function HumanInteraction({ questions, drafts, onDraftChange, onAnswer, onOpenArtifact, onUploadMedia, uploadProgress, decisions, allEvents, taskId, api }: {
   questions: AgentEvent[];
   drafts: Record<string, string>;
   onDraftChange: (eventId: string, val: string) => void;
   onAnswer: (event: AgentEvent, answer: string, freeform: boolean) => void;
   onOpenArtifact: (path: string) => void;
   onUploadMedia: (taskId: string, file: File) => void;
+  uploadProgress?: number;
   decisions: HumanDecision[];
   allEvents: AgentEvent[];
   taskId?: string;
@@ -1270,6 +1326,7 @@ function HumanInteraction({ questions, drafts, onDraftChange, onAnswer, onOpenAr
               onDraftChange={(val) => onDraftChange(chatDraftKey, val)}
               onAnswer={(answer) => onAnswer(event, answer, true)}
               onUploadMedia={() => handleFileSelect(event.id)}
+              uploadProgress={uploadProgress}
               hasMissingMedia={hasMissingMedia}
               chatEndRef={chatEndRef}
             />
@@ -1336,7 +1393,7 @@ function HumanInteraction({ questions, drafts, onDraftChange, onAnswer, onOpenAr
 }
 
 /* ── Interactive Chat for SDK agent questions ── */
-function InteractiveChat({ event, stepId, decisions, allEvents, draft, onDraftChange, onAnswer, onUploadMedia, hasMissingMedia, chatEndRef }: {
+function InteractiveChat({ event, stepId, decisions, allEvents, draft, onDraftChange, onAnswer, onUploadMedia, uploadProgress, hasMissingMedia, chatEndRef }: {
   event: AgentEvent;
   stepId: string;
   decisions: HumanDecision[];
@@ -1345,6 +1402,7 @@ function InteractiveChat({ event, stepId, decisions, allEvents, draft, onDraftCh
   onDraftChange: (val: string) => void;
   onAnswer: (answer: string) => void;
   onUploadMedia: () => void;
+  uploadProgress?: number;
   hasMissingMedia: boolean;
   chatEndRef: React.RefObject<HTMLDivElement | null>;
 }) {
@@ -1426,8 +1484,13 @@ function InteractiveChat({ event, stepId, decisions, allEvents, draft, onDraftCh
       </div>
       <div className="chat-input-area">
         {hasMissingMedia && (
-          <button className="btn chat-action-btn" onClick={onUploadMedia} title="Upload file">
-            Attach
+          <button
+            className="btn chat-action-btn"
+            onClick={onUploadMedia}
+            disabled={uploadProgress !== undefined}
+            title="Upload file"
+          >
+            {uploadProgress !== undefined ? `Uploading… ${uploadProgress}%` : "Attach"}
           </button>
         )}
         <textarea
@@ -1497,6 +1560,47 @@ function ArtifactBrowser({ artifacts, selectedPath, content, taskId, onSelect }:
           <pre className="preview-content">{content}</pre>
         </div>
       )}
+    </div>
+  );
+}
+
+function SubJobList({ subJobs, startingSubJobId, onStart }: {
+  subJobs: SubJob[];
+  startingSubJobId?: string;
+  onStart: (subJobId: string) => void;
+}) {
+  if (subJobs.length === 0) {
+    return <p className="muted subjob-empty">No sub-jobs for this task.</p>;
+  }
+  return (
+    <div className="subjob-list">
+      {subJobs.map((job) => (
+        <div key={job.id} className={`subjob-row subjob-${job.status}`}>
+          <div className="subjob-info">
+            <span className="subjob-title">{job.title}</span>
+            <span className="subjob-meta">
+              {job.stepId ? `step ${job.stepId} · ` : ""}
+              {job.type}
+              {job.candidateCount !== undefined ? ` · ${job.candidateCount} candidate(s)` : ""}
+            </span>
+            {job.message && <span className="subjob-message">{job.message}</span>}
+            {job.progress?.percent !== undefined && (
+              <span className="subjob-message">{job.progress.percent}% downloaded</span>
+            )}
+            {job.error && <span className="subjob-error">{job.error}</span>}
+          </div>
+          <span className={`subjob-status-badge subjob-status-${job.status}`}>{job.status}</span>
+          {job.canStart && (
+            <button
+              className="btn btn-sm"
+              disabled={startingSubJobId === job.id}
+              onClick={() => onStart(job.id)}
+            >
+              {startingSubJobId === job.id ? "Starting…" : "Start"}
+            </button>
+          )}
+        </div>
+      ))}
     </div>
   );
 }
