@@ -96,12 +96,18 @@ export class CopilotSdkRunner {
             20 * 60 * 1000
         : process.env.MIGRATION_AGENT_STEP_TIMEOUT_MS ?? defaultTimeout
     );
+    // No total-length cap by default: real steps (07/08/09 in particular) run
+    // actual GPU inference/benchmarks and can legitimately take well over an
+    // hour. A flat wall-clock ceiling here would kill a session that's still
+    // actively working. Staleness is instead caught by noProgressTimeoutMs
+    // above, which resets on every tool call / streaming delta -- a session
+    // that's truly stuck (not just slow) still fails fast. Set
+    // MIGRATION_AGENT_STEP_MAX_MS / MIGRATION_AGENT_PHASE1_MAX_MS explicitly
+    // if a hard total-length cap is ever wanted again.
     const maxRuntimeMs = Number(
       isPhase1Driver
-        ? process.env.MIGRATION_AGENT_PHASE1_MAX_MS ??
-            process.env.MIGRATION_AGENT_STEP_MAX_MS ??
-            6 * 60 * 60 * 1000
-        : process.env.MIGRATION_AGENT_STEP_MAX_MS ?? 30 * 60 * 1000
+        ? process.env.MIGRATION_AGENT_PHASE1_MAX_MS ?? process.env.MIGRATION_AGENT_STEP_MAX_MS ?? 0
+        : process.env.MIGRATION_AGENT_STEP_MAX_MS ?? 0
     );
     const sdkIdleTimeoutMs = Number(
       process.env.MIGRATION_AGENT_SDK_IDLE_TIMEOUT_MS ??
