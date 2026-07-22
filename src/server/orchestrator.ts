@@ -99,6 +99,7 @@ class HumanGatePauseError extends Error {
 interface StepSdkRunner {
   preflight?: CopilotSdkRunner["preflight"];
   runFreeformSession?: CopilotSdkRunner["runFreeformSession"];
+  abortTask?: CopilotSdkRunner["abortTask"];
   runStep(
     job: Parameters<CopilotSdkRunner["runStep"]>[0],
     emit: AgentEventSink,
@@ -2088,6 +2089,12 @@ export class MigrationOrchestrator {
     // task so any lock the winding-down run re-acquires is ignored.
     this.hardStoppedTaskIds.add(input.taskId);
     this.releaseTaskRuns(input.taskId);
+    // Actually terminate the in-flight SDK client too, not just orchestrator
+    // bookkeeping -- previously a hard-stopped task's CLI subprocess kept
+    // running unsupervised (confirmed live: a wedged session kept burning CPU
+    // for 20+ minutes after this endpoint reported success). Best-effort: a
+    // task with no SDK step in flight (or already finished) has nothing to abort.
+    await this.sdkRunner.abortTask?.(input.taskId).catch(() => undefined);
     await this.store.appendArtifact({
       taskId: input.taskId,
       stepId: input.stepId,
@@ -2893,6 +2900,11 @@ export class MigrationOrchestrator {
    */
   private async killComfyUIForTask(task: MigrationTask): Promise<number> {
     const node = this.lookupTaskNode(task);
+    if (node?.runtime === "docker") {
+      return node.kind === "ssh"
+        ? this.killRemoteDockerComfyUI(task, node)
+        : this.killLocalDockerComfyUI(task);
+    }
     if (node?.kind === "ssh") {
       return this.killRemoteComfyUI(task, node);
     }
@@ -2902,6 +2914,54 @@ export class MigrationOrchestrator {
   /** Backwards-compatible local-only kill; preserved for callers that want local behaviour. */
   private async killComfyUIProcessesForTask(task: MigrationTask): Promise<number> {
     return this.killLocalComfyUI(task);
+  }
+
+  /** Deterministic per-task container name used by Step 05's docker launch flow. */
+  private static dockerContainerName(task: MigrationTask): string {
+    return `comfyui-${task.id}`;
+  }
+
+  /** runtime=docker, kind=local: tear down the per-task container by name. */
+  private async killLocalDockerComfyUI(task: MigrationTask): Promise<number> {
+    const name = MigrationOrchestrator.dockerContainerName(task);
+    return new Promise((resolve) => {
+      execFile("docker", ["rm", "-f", name], { timeout: 30_000 }, (err) => {
+        if (err) {
+          // Not necessarily a failure — container may simply not exist (never launched, or already reaped).
+          console.warn(`[killLocalDockerComfyUI] 'docker rm -f ${name}' — ${err.message}`);
+          resolve(0);
+          return;
+        }
+        resolve(1);
+      });
+    });
+  }
+
+  /** runtime=docker, kind=ssh: tear down the per-task container by name on the remote node. */
+  private async killRemoteDockerComfyUI(task: MigrationTask, node: GpuNode): Promise<number> {
+    if (!node.ssh) return 0;
+    const name = MigrationOrchestrator.dockerContainerName(task);
+    const sshTarget = `${node.ssh.user}@${node.ssh.host}`;
+    const sshArgs = [
+      "-p", String(node.ssh.port ?? 22),
+      ...(node.ssh.key_path ? ["-i", node.ssh.key_path] : []),
+      "-o", "BatchMode=yes",
+      "-o", "ConnectTimeout=10",
+      sshTarget,
+      `docker rm -f ${name} || true`
+    ];
+    return new Promise((resolve) => {
+      execFile("ssh", sshArgs, { timeout: 30_000 }, (err) => {
+        if (err) {
+          console.warn(
+            `[killRemoteDockerComfyUI] SSH docker rm failed for task ${task.id} on ${sshTarget} — ${err.message}`
+          );
+          resolve(0);
+          return;
+        }
+        resolve(1);
+      });
+    });
   }
 
   private async killLocalComfyUI(task: MigrationTask): Promise<number> {

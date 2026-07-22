@@ -1,0 +1,30 @@
+{
+  "recipeId": "ComfyUI-KJNodes-fp16-accum-xpu-guard",
+  "version": "1.0.0",
+  "nodeType": "ModelPatchTorchSettings",
+  "xpuSupport": "patched",
+  "patchClass": "functional_runtime_support",
+  "patchFile": "patches/kjnodes-xpu-fp16-guard.patch",
+  "patchTarget": "nodes/model_optimization_nodes.py::ModelPatchTorchSettings.patch",
+  "validationCommand": "python -c \"import torch; assert not torch.cuda.is_available()\" # then run the node and confirm no AttributeError on torch.backends.cuda",
+  "baseVersion": "kijai/ComfyUI-KJNodes@38cccdee6a484a702e4ac1a8b9a3cee0c4ed83f4",
+  "knownIssues": [
+    "ModelPatchTorchSettings.patch() unconditionally reads/writes torch.backends.cuda.matmul.allow_fp16_accumulation, which doesn't exist on the XPU (or any non-CUDA) backend — crashes on load for any workflow that includes this node on an XPU target, even though the node has nothing to do with attention/kernel specifics that would justify a CUDA-only limitation."
+  ],
+  "workarounds": [
+    {
+      "action": "Apply patches/kjnodes-xpu-fp16-guard.patch: return the cloned model unchanged (skip the CUDA-specific fp16-accumulation toggle entirely) when torch.cuda.is_available() is false.",
+      "rationale": "Minimal, correctness-only guard — the fp16-accumulation setting has no XPU equivalent to apply, so the safest behavior is a no-op rather than a crash.",
+      "tradeoff": "None on XPU (the setting simply isn't applied, matching the fact that it never had an XPU implementation to begin with)."
+    }
+  ],
+  "validationEvidence": "Discovered as an uncommitted local-only fix on local-xpu's disk (never committed to git) while consolidating this package onto the shared NFS custom_nodes tree during llm-scaler-omni bundle adoption; recovered, committed, and propagated to the shared copy (commits d2234da locally / 43df8e6 on the shared tree) on 2026-07-22.",
+  "validatedOnWorkflows": [],
+  "provenance": {
+    "taskOrigin": "llm-scaler-omni bundle adoption (custom_nodes consolidation pass)",
+    "evidenceArtifact": "patches/kjnodes-xpu-fp16-guard.patch",
+    "createdAt": "2026-07-22",
+    "approvedBy": "tinafengfun"
+  },
+  "retireCondition": "kijai/ComfyUI-KJNodes adds a torch.cuda.is_available() (or torch.xpu-aware) guard around this setting upstream."
+}

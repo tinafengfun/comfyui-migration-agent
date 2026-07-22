@@ -1,0 +1,31 @@
+{
+  "recipeId": "ComfyUI-RMBG-onnxruntime-cuda-conflict",
+  "version": "1.0.0",
+  "nodeType": "SAM3Segment",
+  "xpuSupport": "patched",
+  "patchClass": "runtime_policy",
+  "patchFile": "patches/extension_comfyui_rmbg.patch",
+  "patchTarget": "requirements.txt (dependency selection, not source code)",
+  "validationCommand": "python -c \"import onnxruntime; print(onnxruntime.get_device()); assert 'CUDAExecutionProvider' not in onnxruntime.get_available_providers() or True\" # real check: import succeeds at all, no libcudart error",
+  "baseVersion": "1038lab/ComfyUI-RMBG@d7402513f23f58db7d56754b02a4f51a148b4941",
+  "knownIssues": [
+    "This package's own requirements.txt (as shipped, including in Intel's XPU-patched version via extension_comfyui_rmbg.patch) lists both `onnxruntime>=1.15.0` and `onnxruntime-gpu>=1.15.0`. Both PyPI distributions install into the exact same `onnxruntime` Python import namespace — installing both in one environment means whichever lands on disk last silently wins. In a plain pip install of this requirements.txt, onnxruntime-gpu (CUDA-only) ends up winning, and the resulting `onnxruntime` module fails to import at all on a CUDA-less XPU host with `ImportError: libcudart.so.13: cannot open shared object file`.",
+    "This failure is not scoped to just this package: since custom nodes share one Python environment, it also silently broke `comfyui-reactor`'s own onnxruntime usage, even though ReActor's own requirements.txt correctly specifies `onnxruntime-openvino` (not GPU) — confirmed live: both packages failed to import with the identical libcudart error until this was fixed."
+  ],
+  "workarounds": [
+    {
+      "action": "After installing this package's requirements.txt (or any batch of custom-node requirements that includes it), explicitly `pip uninstall -y onnxruntime onnxruntime-gpu onnxruntime-openvino` then `pip install onnxruntime-openvino` last, so the OpenVINO build (which supports CPU/iGPU/dGPU inference, unlike the CUDA-only GPU build) is the one that actually lands in site-packages.",
+      "rationale": "onnxruntime-openvino is the correct backend for Intel hardware generally (used by comfyui-reactor already) and provides real acceleration paths RMBG can also use, unlike a plain CPU-only onnxruntime.",
+      "tradeoff": "Must be re-applied any time these packages' requirements.txt get reinstalled from scratch in one batch — order-of-installation isn't a durable fix, only a targeted final correction is."
+    }
+  ],
+  "validationEvidence": "Reproduced live inside intel/llm-scaler-vllm:1.4 container during llm-scaler-omni bundle adoption: ComfyUI-RMBG and comfyui-reactor both failed import with libcudart.so.13 after a bulk pip install pass; fixed by uninstalling onnxruntime/onnxruntime-gpu and reinstalling onnxruntime-openvino, confirmed both packages import cleanly on a subsequent container launch (2026-07-22).",
+  "validatedOnWorkflows": [],
+  "provenance": {
+    "taskOrigin": "llm-scaler-omni bundle adoption (Phase 2 full-parity node install)",
+    "evidenceArtifact": "docs/xpu-bundle-provenance.md",
+    "createdAt": "2026-07-22",
+    "approvedBy": "tinafengfun"
+  },
+  "retireCondition": "ComfyUI-RMBG's own requirements.txt drops the onnxruntime-gpu line (or splits it into an optional CUDA-only extra), making the plain install order-independent."
+}

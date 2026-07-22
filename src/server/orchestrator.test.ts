@@ -108,6 +108,87 @@ describe("migration orchestrator", () => {
     expect(await store.listDecisions(task.id)).toHaveLength(0);
   });
 
+  it("terminateWithHardStop actually aborts the in-flight SDK client, not just orchestrator bookkeeping", async () => {
+    // Regression test for a real bug: hard-stopping a task only cleared
+    // activeStepRuns/hardStoppedTaskIds and left the SDK's CLI subprocess
+    // running unsupervised -- confirmed live, a wedged session kept burning
+    // CPU for 20+ minutes after this endpoint reported success.
+    const root = path.join(process.cwd(), ".demo-state", "tests", `orchestrator-abort-${Date.now()}`);
+    const config: AppConfig = {
+      port: 0,
+      projectRoot: root,
+      workspaceRoot: path.join(root, "workspaces"),
+      stateRoot: path.join(root, "state"),
+      draftDocRoot: root,
+      comfyuiRoot: "/tmp/comfy",
+      modelRoots: ["/home/intel/hf_models"],
+      gpuNodesPath: path.join(root, "gpu-nodes.json"),
+      autoApproveAgentPermissions: false
+    };
+    await ensureDir(config.workspaceRoot);
+    const store = new StateStore(config);
+    await store.initialize();
+    const abortedTaskIds: string[] = [];
+    const orchestrator = new MigrationOrchestrator(
+      config,
+      store,
+      [{ id: "00", name: "Intake", requiredOutput: "00-intake-preflight.md", humanIntervention: "x" }],
+      {
+        runStep: async () => ({ sessionId: "unused", summary: "unused" }),
+        abortTask: async (taskId: string) => {
+          abortedTaskIds.push(taskId);
+          return true;
+        }
+      }
+    );
+
+    const task = await orchestrator.createTask({
+      name: "AbortTest",
+      workflowFileName: "workflow.json",
+      workflowJson: { nodes: [], links: [] }
+    });
+    await orchestrator.terminateWithHardStop({
+      taskId: task.id,
+      stepId: "00",
+      reason: "test hard stop"
+    });
+
+    expect(abortedTaskIds).toEqual([task.id]);
+  });
+
+  it("terminateWithHardStop tolerates an sdkRunner with no abortTask (backward compatible)", async () => {
+    const root = path.join(process.cwd(), ".demo-state", "tests", `orchestrator-abort-missing-${Date.now()}`);
+    const config: AppConfig = {
+      port: 0,
+      projectRoot: root,
+      workspaceRoot: path.join(root, "workspaces"),
+      stateRoot: path.join(root, "state"),
+      draftDocRoot: root,
+      comfyuiRoot: "/tmp/comfy",
+      modelRoots: ["/home/intel/hf_models"],
+      gpuNodesPath: path.join(root, "gpu-nodes.json"),
+      autoApproveAgentPermissions: false
+    };
+    await ensureDir(config.workspaceRoot);
+    const store = new StateStore(config);
+    await store.initialize();
+    const orchestrator = new MigrationOrchestrator(
+      config,
+      store,
+      [{ id: "00", name: "Intake", requiredOutput: "00-intake-preflight.md", humanIntervention: "x" }],
+      { runStep: async () => ({ sessionId: "unused", summary: "unused" }) }
+    );
+    const task = await orchestrator.createTask({
+      name: "NoAbort",
+      workflowFileName: "workflow.json",
+      workflowJson: { nodes: [], links: [] }
+    });
+
+    await expect(
+      orchestrator.terminateWithHardStop({ taskId: task.id, stepId: "00", reason: "test" })
+    ).resolves.toBeDefined();
+  });
+
   it("marks a generic SDK step complete when its required artifact already exists", async () => {
     const root = path.join(process.cwd(), ".demo-state", "tests", `orchestrator-artifact-${Date.now()}`);
     const config: AppConfig = {

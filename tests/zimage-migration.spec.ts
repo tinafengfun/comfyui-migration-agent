@@ -38,6 +38,9 @@ import {
 // "full": continue to the final step the pipeline reaches.
 const DEPTH = (process.env.MIGRATION_DEPTH ?? "launch") as "launch" | "full";
 const LAUNCH_TARGET = "05"; // Step 05 = Environment Deployment (ComfyUI launched on XPU)
+// Optional: target a specific gpu-nodes.json entry (e.g. PW_GPU_NODE=remote-124-12).
+// Unset uses the registry's default_node, same as today.
+const GPU_NODE = process.env.PW_GPU_NODE;
 
 // Per-step overall wall-clock budgets (DeepSeek calls are slow).
 const POLL_MS = 15_000;
@@ -123,9 +126,9 @@ test.describe("Z-Image 双采 migration @migration", () => {
   test("drives the 双采 migration through every step with the frontend reflecting state", async ({ page, request }) => {
     test.setTimeout(DEPTH === "full" ? FULL_BUDGET_MS : LAUNCH_BUDGET_MS);
 
-    const task = await createTask(request, { workflowFileName: "zimage-shuangcai.json" });
+    const task = await createTask(request, { workflowFileName: "zimage-shuangcai.json", gpuNode: GPU_NODE });
     const taskId = task.id;
-    console.log(`\n=== 双采 migration task ${taskId} (depth=${DEPTH}) ===`);
+    console.log(`\n=== 双采 migration task ${taskId} (depth=${DEPTH}, gpuNode=${GPU_NODE ?? "default"}) ===`);
     let lastSeenStep = "00";
 
     try {

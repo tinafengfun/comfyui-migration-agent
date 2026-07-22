@@ -1,0 +1,14 @@
+diff --git a/nodes/model_optimization_nodes.py b/nodes/model_optimization_nodes.py
+index c257564..3086efb 100644
+--- a/nodes/model_optimization_nodes.py
++++ b/nodes/model_optimization_nodes.py
+@@ -326,6 +326,9 @@ class ModelPatchTorchSettings:
+ 
+     def patch(self, model, enable_fp16_accumulation):        
+         model_clone = model.clone()
++        # Guard: torch.backends.cuda may not exist on XPU/other backends
++        if not torch.cuda.is_available():
++            return (model_clone,)
+ 
+         def patch_enable_fp16_accum(model):
+             logging.info("Patching torch settings: torch.backends.cuda.matmul.allow_fp16_accumulation = True")

@@ -1,0 +1,26 @@
+{
+  "recipeId": "ComfyUI-AdvancedLivePortrait-output-dir-mkdir",
+  "version": "1.0.0",
+  "nodeType": "SaveExpData",
+  "xpuSupport": "native",
+  "patchClass": "none",
+  "knownIssues": [
+    "This package's nodes.py does `os.mkdir(exp_data_dir)` (not os.makedirs) at import time, unconditionally assuming ComfyUI's output directory already exists as a real directory. This is an upstream packaging bug unrelated to XPU/CUDA and not touched by Intel's extension_comfyui-advancedliveportrait.patch — but it surfaces specifically in a fresh, ephemeral runtime=docker container that copies in a ComfyUI checkout that has never actually been launched before (no output/ directory has ever been created on disk), causing a FileNotFoundError that aborts this node's registration entirely."
+    ],
+  "workarounds": [
+    {
+      "action": "Ensure the ComfyUI output directory (and input directory, for similar node packages) exists BEFORE the real ComfyUI process starts — e.g. `docker exec <container> mkdir -p /comfyui/outputs /comfyui/input` right after the container is created/copy-in'd but before the final `docker start`, per the Step 05 docker-runtime skill.",
+      "rationale": "Operational fix at the container-launch layer, not a source patch — avoids modifying third-party node code for what is fundamentally an environment-setup ordering issue, and defensively benefits any other node with a similar assumption.",
+      "tradeoff": "Only relevant to runtime=docker nodes with the fresh-copy-in model; bare-metal comfyui_root checkouts that have run at least once already have this directory and never hit the bug."
+    }
+  ],
+  "validationEvidence": "Reproduced live: a fresh runtime=docker container copy-in of the full custom_nodes bundle failed to register ComfyUI-AdvancedLivePortrait's nodes with FileNotFoundError: '/comfyui/outputs/exp_data' during llm-scaler-omni bundle adoption Phase 2 smoke testing; confirmed root cause via traceback (nodes.py line 531, os.mkdir not os.makedirs) (2026-07-22).",
+  "validatedOnWorkflows": [],
+  "provenance": {
+    "taskOrigin": "llm-scaler-omni bundle adoption (Phase 2 full-parity node install, container smoke test)",
+    "evidenceArtifact": "prompts/migration-workflow-v2/skills/05-environment-deployment-skill.md",
+    "createdAt": "2026-07-22",
+    "approvedBy": "tinafengfun"
+  },
+  "retireCondition": "PowerHouseMan/ComfyUI-AdvancedLivePortrait changes nodes.py to os.makedirs(exp_data_dir, exist_ok=True) upstream, or the migration-agent's own Step 05 docker-runtime flow permanently bakes output-directory pre-creation into every launch (in which case this recipe becomes redundant documentation, not an active workaround)."
+}

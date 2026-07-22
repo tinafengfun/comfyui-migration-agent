@@ -212,4 +212,61 @@ describe("gpuNodes", () => {
     expect(result.ok).toBe(false);
     expect(result.detail).toContain("127.0.0.1:1");
   });
+
+  it("rejects runtime=docker without docker_image", async () => {
+    const root = path.join(process.cwd(), ".demo-state", "tests", `gn-docker-bad-${Date.now()}`);
+    await fs.mkdir(root, { recursive: true });
+    const cfg = makeConfig(root);
+    await fs.writeFile(
+      cfg.gpuNodesPath,
+      JSON.stringify({
+        default_node: "d",
+        nodes: [
+          {
+            name: "d", kind: "local", comfyui_root: "/tmp/comfy",
+            venv_python: "/venv/bin/python3", model_roots: ["/m"],
+            api_host: "127.0.0.1", api_port: 8188, runtime: "docker"
+          }
+        ]
+      }),
+      "utf8"
+    );
+    expect(() => loadGpuNodes(cfg)).toThrow(/runtime="docker".*docker_image/);
+  });
+
+  it("loads runtime=docker + docker_image from JSON and renders them for the Step 05 skill", async () => {
+    const root = path.join(process.cwd(), ".demo-state", "tests", `gn-docker-ok-${Date.now()}`);
+    await fs.mkdir(root, { recursive: true });
+    const cfg = makeConfig(root);
+    await fs.writeFile(
+      cfg.gpuNodesPath,
+      JSON.stringify({
+        default_node: "d",
+        nodes: [
+          {
+            name: "d", kind: "local", comfyui_root: "/tmp/comfy",
+            venv_python: "/shared/venv/bin/python3", model_roots: ["/m"],
+            api_host: "127.0.0.1", api_port: 8188,
+            runtime: "docker", docker_image: "intel/llm-scaler-vllm:1.4"
+          }
+        ]
+      }),
+      "utf8"
+    );
+    const reg = loadGpuNodes(cfg);
+    expect(reg.nodes[0].runtime).toBe("docker");
+    expect(reg.nodes[0].docker_image).toBe("intel/llm-scaler-vllm:1.4");
+    const block = renderGpuNodeBlock(reg.nodes[0], "task-docker");
+    expect(block).toContain("runtime: docker");
+    expect(block).toContain("docker_image: intel/llm-scaler-vllm:1.4");
+  });
+
+  it("renderGpuNodeBlock defaults to 'runtime: bare' when unset", () => {
+    const root = path.join(process.cwd(), ".demo-state", "tests", `gn-bare-${Date.now()}`);
+    const cfg = makeConfig(root);
+    const reg = loadGpuNodes(cfg);
+    const block = renderGpuNodeBlock(reg.nodes[0], "task-bare");
+    expect(block).toContain("runtime: bare");
+    expect(block).not.toContain("docker_image:");
+  });
 });

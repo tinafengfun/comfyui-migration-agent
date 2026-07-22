@@ -97,6 +97,15 @@ Step 01 may run longer than Step 00, but it must not become an unbounded backgro
 
 If a subjob exceeds the configured timeout, stalls below the minimum transfer rate, needs credentials, or returns ambiguous candidates, stop that subjob and document the blocker factually. The system will create `gate-signal.json` if human intervention is needed. Do not keep the SDK session alive just to wait for uncertain external downloads.
 
+### Safe model-file inspection (never `cat` a checkpoint)
+
+Model/checkpoint files (`.safetensors`, `.gguf`, `.ckpt`, `.pt`, `.bin`, ...) are routinely tens of gigabytes. Confirmed live: a session judged one of these files "suspiciously small" from `ls -la`'s reported size, then ran an unbounded `cat` on it to "investigate further" — the path was actually a **symlink**, `ls -la`'s size column for a symlink is the byte-length of the link-target *string*, not the target file's size, and the dereferenced target was a real 17GB file. The `cat` hung for 20+ minutes and wedged the whole session; killing the `cat` process afterward did not recover it, since the session had already begun buffering the output.
+
+- Never run `cat`, `less`, or any other full-content-reading command against a model/checkpoint file, or against any path before confirming what it resolves to.
+- To check whether a path is a symlink before trusting its `ls -la` size: look for the `l` file-type bit / `->` target in `ls -la`, or use `test -L <path>`.
+- To get a file's *real* size (dereferencing symlinks): `stat -L -c '%s' <path>` or `du -h -L <path>` — never infer real size from a bare symlink's own listing.
+- If binary content must be previewed (e.g. a magic-byte/format check), always cap it explicitly: `file <path>` or `head -c 64 <path> | xxd` — never an uncapped read.
+
 ## Tool invocation
 
 **Read `01-acquisition-job.json` before calling the search tool yourself.** The backend already runs `ensureAssetAcquisitionJob` deterministically as soon as deterministic prep finds a gap, before this session starts. It tries the raw requested name first, then automatically fans out to fuzzy query variants (parenthetical-hint stripped, CJK-stripped, version-suffix-stripped) when the raw name finds nothing — this is how a workflow's own mangled/relabeled name for a model gets traced back to the real upload. For any item where that search found candidates but none is an exact filename match, an isolated LLM call already ran with its own `web_search`/`web_fetch` tool access to judge/verify them (or find the real source independently), written to `01-fuzzy-match-judgments.json` as `{assetName, matchedCandidateIndex, confidence, reason, suggestedUrl}`. Treat this as a strong starting point, not ground truth: cross-check the reasoning against the workflow's actual needs before recording a candidate as resolved, and never auto-apply a judgment without it going through the same human gate as any other unresolved item.

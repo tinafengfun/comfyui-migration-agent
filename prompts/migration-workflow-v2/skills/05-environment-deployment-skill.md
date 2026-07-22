@@ -84,6 +84,65 @@ Use to create a reproducible Intel XPU ComfyUI baseline.
 
    Use `--listen 0.0.0.0` on the remote so the migration agent can reach it across the network. Do NOT use `--listen 127.0.0.1` for an ssh node — the agent's HTTP calls will time out.
 
+   ### runtime=docker (either kind — check the `## GPU node` block's `runtime`/`docker_image` fields)
+
+   When `runtime: docker`, ComfyUI runs inside a container derived from `docker_image` (e.g. Intel's `intel/llm-scaler-vllm:1.4`) instead of a bare subprocess. That image supplies the oneAPI/PyTorch-XPU stack only — **never use its own ComfyUI or vLLM components**. For these nodes `venv_python` points at a *persisted, `--system-site-packages` venv living on the shared NFS mount* (e.g. `/nfs_share/venv-container-xpu/bin/python3` — visible inside the container for free since it's under the bind-mounted `model_roots` path), not a path under `comfyui_root`. It inherits the image's own torch-xpu/oneAPI packages and has ComfyUI's `requirements.txt` (plus custom-node requirements) layered on top — install missing deps into it with `pip --python <venv_python> install ...` from a throwaway container, never by touching the image itself. Pass it to `--entrypoint`, not the image's default `bash -c "vllm serve"` entrypoint.
+
+   **Every container invocation needs the corporate proxy env vars, not just interactive installs.** ComfyUI itself auto-`pip install`s missing custom-node dependencies at import time (observed live: `diffusers==0.27.2` for `ComfyUI-WanVideoWrapper`) — without `https_proxy`/`http_proxy` set in the container's environment, that subprocess hangs indefinitely on an unreachable network rather than failing fast. Always include `-e https_proxy=http://proxy.ims.intel.com:911 -e http_proxy=http://proxy.ims.intel.com:911 -e no_proxy=localhost,127.0.0.1` on every `docker create`/`docker run` for this runtime, launch or otherwise.
+
+   **Copy in, don't bind-mount, the thing under test.** Each task gets its own ephemeral container; this task's `comfyui_root` (ComfyUI core + `custom_nodes/`, already staged/patched by earlier steps) is `docker cp`'d in fresh, giving per-task isolation instead of sharing one mutable mount across concurrent tasks. `model_roots` stay bind-mounted (large, shared, read-mostly) at identical host paths so no model-path rewriting is needed.
+
+   Container name is always `comfyui-${TASK_ID}` — this exact name is what the orchestrator's `killComfyUIForTask` uses for `docker rm -f` teardown, so do not deviate from it.
+
+   GPU device/group flags differ per host — resolve them at launch time, never hardcode a GID:
+
+   ```bash
+   RENDER_GIDS=$(stat -c '%g' /dev/dri/render* | sort -u)
+   GROUP_ADD_FLAGS=""
+   for gid in $RENDER_GIDS; do GROUP_ADD_FLAGS="${GROUP_ADD_FLAGS} --group-add ${gid}"; done
+   ```
+
+   Three sharp edges to get right, all confirmed by direct testing:
+
+   1. The image's `ENTRYPOINT` is `["bash", "-c", "vllm serve"]` — a fixed script string, not something that accepts appended args. Any command given after the image name is silently ignored unless you pass `--entrypoint "${VENV_PYTHON}"` explicitly; without it, the container runs `vllm serve` instead of ComfyUI.
+   2. `docker cp` has no exclude flag, and `comfyui_root` can contain large, irrelevant-to-launch directories (a local `models/` cache, `output/`, `temp/`, `.venv`, or on the dev machine this very agent's own deployed copy under `agent-demo/`) — never copy those in. Build the copy-in as a `tar` stream with excludes.
+   3. `docker cp` cannot create a destination directory when its source is a tar stream on stdin (only when the source is a real host path), and the container isn't started yet so its filesystem has nothing but the base image. Stage the filtered copy on the host first, then `docker cp` that staging directory in (this form *does* auto-create the destination), then remove the staging copy. Use a container path outside the image's own reserved dirs — `/comfyui` is safe; the image's `/llm` is used by its own vLLM install and `/workspace` doesn't exist.
+
+   ```bash
+   docker create --name "comfyui-${TASK_ID}" --network host --device /dev/dri ${GROUP_ADD_FLAGS} \
+     --entrypoint "${VENV_PYTHON}" \
+     -e https_proxy=http://proxy.ims.intel.com:911 -e http_proxy=http://proxy.ims.intel.com:911 \
+     -e no_proxy=localhost,127.0.0.1 \
+     $(for m in "${MODEL_ROOTS[@]}"; do echo -n "-v ${m}:${m} "; done) \
+     "${DOCKER_IMAGE}" /comfyui/main.py \
+       --port "${COMFYUI_PORT:-8188}" --listen 127.0.0.1 \
+       --extra-model-paths-yaml /comfyui/05-extra-model-paths.yaml \
+       --output-directory /comfyui/outputs \
+       <conservative Intel XPU flags>
+
+   STAGING=$(mktemp -d)
+   tar -C "${COMFYUI_ROOT}" \
+     --exclude=./models --exclude=./output --exclude=./temp --exclude=./input \
+     --exclude=./.venv --exclude=./.venv-xpu --exclude=./agent-demo \
+     --exclude=./tests --exclude=./tests-unit --exclude=./docs \
+     --exclude=__pycache__ \
+     -cf - . | tar -xf - -C "${STAGING}"
+   mkdir -p "${STAGING}/outputs" "${STAGING}/input"
+   docker cp "${STAGING}/." "comfyui-${TASK_ID}:/comfyui"
+   rm -rf "${STAGING}"
+   docker start "comfyui-${TASK_ID}"
+   ```
+
+   **Pre-create `/comfyui/outputs` (and `/comfyui/input`) in the staging directory, not via `docker exec` after start.** At least one custom node (`ComfyUI-AdvancedLivePortrait`) does `os.mkdir()` (not `os.makedirs()`) against a subdirectory of the output dir at import time, assuming it already exists — confirmed live: a fresh copy-in container without a pre-existing `outputs/` directory fails that node's import with `FileNotFoundError`. A `docker exec ... mkdir` *after* `docker start` doesn't reliably fix this: the container's PID 1 *is* ComfyUI itself (no init system to exec into before it runs), so there's no window to exec into before node imports begin — it only appears to work by accidental import-order timing luck (confirmed: this genuinely raced and passed once, which is not a fix, just luck). Create the directories in the staging directory before `docker cp`, so they're present in the very first filesystem view the container sees.
+
+   **The exclude patterns must be anchored with `./` (top-level only).** An unanchored `--exclude=models` matches *any* directory named `models` anywhere in the tree — including the genuinely-needed source directory `comfy/ldm/models/` — and silently breaks the copy (confirmed live: this produced `ModuleNotFoundError: No module named 'comfy.ldm.models'`). `__pycache__` is the one exception left unanchored, since excluding it at every depth is actually intended.
+
+   (`--extra-model-paths-yaml`/`--output-directory` here are container-internal paths written into the copied tree, not the host workspace path — the host workspace isn't visible inside the container. `custom_nodes/` symlinks into the shared NFS tree resolve correctly inside the container because `model_roots` — which includes that same NFS mount — is bind-mounted at an identical path.)
+
+   SSH (`kind=ssh`): wrap the same `docker create` / `docker cp` / `docker start` sequence over SSH, using the remote's `${REMOTE_COMFYUI_ROOT}` as the `docker cp` source and `--network host` so the existing remote `api_host:api_port` reachability assumption still holds. Use `--listen 0.0.0.0` inside the container command, same rationale as the bare-metal ssh flow above.
+
+   Verify with `docker ps --filter "name=comfyui-${TASK_ID}"` in addition to the usual `/object_info` poll. On rerun/cleanup, `docker rm -f "comfyui-${TASK_ID}"` before creating a new one — containers are ephemeral, never reused across tasks.
+
    ### Common notes (both kinds)
 
    - `cd "${COMFYUI_ROOT}" &&` (local) or `cd '${REMOTE_COMFYUI_ROOT}' &&` (ssh) is load-bearing — without it, `from utils.install_util import ...` and other top-level imports can fail.
@@ -91,7 +150,7 @@ Use to create a reproducible Intel XPU ComfyUI baseline.
    - Subsequent steps (07, 08, 12) inherit this server; do not relaunch unless the process died.
    - Conservative default flags: prefer `--reserve-vram 1` and `--disable-dynamic-vram` for smoke; widen only when Step 08 capacity evidence permits.
    - If the workflow selected CPU-only placement (e.g. FP8 TE CPU-offload path), launch with `--cpu` and pin CLIPLoader `device=cpu` via runtime-policy JSON in Step 08 rather than relaunching.
-   - The orchestrator's `killComfyUIForTask` routes on `node_kind`: local → `pgrep -f main.py.*${WORKSPACE}`; ssh → SSH `pkill -f 'main.py.*--port ${COMFYUI_PORT}'`. The agent does not need to tear down manually on rerun.
+   - The orchestrator's `killComfyUIForTask` routes on the node's `runtime` first, then `kind`: `runtime=docker` → `docker rm -f comfyui-${TASK_ID}` (local or via SSH); `runtime=bare` (default) → local `pgrep -f main.py.*${WORKSPACE}` or SSH `pkill -f 'main.py.*--port ${COMFYUI_PORT}'`. The agent does not need to tear down manually on rerun.
 9. Verify startup and backend node registration through `/system_stats` and `/object_info`.
 10. For frontend-only LiteGraph nodes, record source evidence from web extension registration code instead of requiring `/object_info`.
 11. Preserve logs and API evidence before moving to prompt validation.

@@ -90,14 +90,14 @@ export async function listGpuNodes(request: APIRequestContext) {
 /** Create a task from the bundled 双采 fixture (or an explicit path/json). */
 export async function createTask(
   request: APIRequestContext,
-  opts: { workflowFileName?: string; workflowJson?: unknown; fixturePath?: string } = {}
+  opts: { workflowFileName?: string; workflowJson?: unknown; fixturePath?: string; gpuNode?: string } = {}
 ): Promise<TaskState> {
   const fixturePath = opts.fixturePath ?? FIXTURE_PATH;
   const workflowJson = opts.workflowJson ?? JSON.parse(fs.readFileSync(fixturePath, "utf8"));
   const workflowFileName = opts.workflowFileName ?? path.basename(fixturePath);
   const r = await request.post(`${API}/api/tasks`, {
     headers: { "Content-Type": "application/json" },
-    data: { workflowFileName, workflowJson },
+    data: { workflowFileName, workflowJson, ...(opts.gpuNode ? { gpuNode: opts.gpuNode } : {}) },
   });
   if (r.status() !== 201) {
     throw new Error(`createTask -> ${r.status()}: ${await r.text()}`);

@@ -1,0 +1,22 @@
+diff --git a/src/raylight/nodes.py b/src/raylight/nodes.py
+index 483668d..ac01405 100644
+--- a/src/raylight/nodes.py
++++ b/src/raylight/nodes.py
+@@ -49,6 +49,17 @@ def _resolve_module_dir(module):
+ 
+ 
+ def _resolve_repo_root():
++    # Prefer ComfyUI's own already-known root (folder_paths.base_path) over
++    # walking up from __file__: Path.resolve() follows symlinks, and this
++    # package is installed as a symlink into custom_nodes/ pointing at a
++    # shared NFS source tree outside the ComfyUI checkout entirely — the
++    # parent-walk would never find main.py/execution.py from there.
++    base_path = getattr(folder_paths, "base_path", None)
++    if base_path:
++        candidate = Path(base_path).resolve()
++        if (candidate / 'main.py').exists() and (candidate / 'execution.py').exists():
++            return candidate
++
+     current = Path(__file__).resolve()
+     for parent in current.parents:
+         if (parent / 'main.py').exists() and (parent / 'execution.py').exists():

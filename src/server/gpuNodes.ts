@@ -30,6 +30,16 @@ export interface GpuNodeSsh {
 
 export type GpuNodeKind = "local" | "ssh";
 export type ModelShare = "nfs_same_path" | "none";
+/**
+ * "bare": existing behaviour — `venv_python main.py` as a plain subprocess.
+ * "docker": Step 05 launches ComfyUI inside a container derived from
+ * `docker_image` (e.g. Intel's `intel/llm-scaler-vllm:1.4`, used only for its
+ * oneAPI/PyTorch-XPU stack — never that image's own ComfyUI/vLLM components).
+ * The task's comfyui_root is `docker cp`'d into the container per-run (not
+ * bind-mounted), so concurrent tasks don't share a mutable mount; model_roots
+ * are bind-mounted since they're large/shared and read-mostly.
+ */
+export type GpuNodeRuntime = "bare" | "docker";
 
 export interface GpuNode {
   name: string;
@@ -43,6 +53,8 @@ export interface GpuNode {
   launch_flags?: string[];
   ssh?: GpuNodeSsh;
   model_share?: ModelShare;
+  runtime?: GpuNodeRuntime;
+  docker_image?: string;
 }
 
 export interface GpuNodeRegistry {
@@ -117,6 +129,8 @@ export function renderGpuNodeBlock(node: GpuNode, taskId: string): string {
   lines.push(`- venv_python: ${node.venv_python}`);
   lines.push(`- model_roots: ${node.model_roots.join(":") || "(none)"}`);
   if (node.model_share) lines.push(`- model_share: ${node.model_share}`);
+  lines.push(`- runtime: ${node.runtime ?? "bare"}`);
+  if (node.docker_image) lines.push(`- docker_image: ${node.docker_image}`);
   if (node.launch_flags?.length) lines.push(`- launch_flags: ${node.launch_flags.join(" ")}`);
   if (node.kind === "ssh" && node.ssh) {
     const port = node.ssh.port ?? 22;
@@ -203,6 +217,7 @@ export async function verifyNode(node: GpuNode, timeoutMs = 10_000): Promise<Gpu
 
 async function verifyLocal(node: GpuNode, timeoutMs: number): Promise<GpuNodeVerifyResult> {
   const url = `${nodeApiUrl(node)}/system_stats`;
+  const dockerSuffix = node.runtime === "docker" ? await checkLocalDockerImage(node) : "";
   try {
     const { stdout } = await execFileAsync(
       "curl",
@@ -213,14 +228,25 @@ async function verifyLocal(node: GpuNode, timeoutMs: number): Promise<GpuNodeVer
     const hasXpu = Boolean(parsed.system?.xpu ?? parsed.system?.devices?.length);
     return {
       ok: true,
-      detail: `ComfyUI responded at ${url}${hasXpu ? " (XPU device info present)" : ""}`
+      detail: `ComfyUI responded at ${url}${hasXpu ? " (XPU device info present)" : ""}${dockerSuffix}`
     };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     return {
       ok: false,
-      detail: `Could not reach ${url} — ${msg}`
+      detail: `Could not reach ${url} — ${msg}${dockerSuffix}`
     };
+  }
+}
+
+/** For runtime=docker nodes, confirm the pinned image is already pulled (avoids a surprise pull mid-task). */
+async function checkLocalDockerImage(node: GpuNode): Promise<string> {
+  if (!node.docker_image) return "; runtime=docker but docker_image is unset";
+  try {
+    await execFileAsync("docker", ["image", "inspect", node.docker_image], { timeout: 10_000 });
+    return `; docker image ${node.docker_image} present`;
+  } catch {
+    return `; docker image ${node.docker_image} NOT found locally — run 'docker pull ${node.docker_image}'`;
   }
 }
 
@@ -229,22 +255,33 @@ async function verifySsh(node: GpuNode, timeoutMs: number): Promise<GpuNodeVerif
     return { ok: false, detail: "kind=ssh but ssh block is missing" };
   }
   const port = node.ssh.port ?? 22;
+  const dockerCheck =
+    node.runtime === "docker" && node.docker_image
+      ? `; docker image inspect ${shellQuote(node.docker_image)} >/dev/null 2>&1 && echo docker_image_found || echo docker_image_missing`
+      : "";
   const args = [
     "-p", String(port),
     "-o", "BatchMode=yes",
     "-o", "ConnectTimeout=10",
     ...(node.ssh.key_path ? ["-i", node.ssh.key_path] : []),
     `${node.ssh.user}@${node.ssh.host}`,
-    `echo OK; uname -n; test -f ${shellQuote(node.comfyui_root + "/main.py")} && echo main_py_found || echo main_py_missing`
+    `echo OK; uname -n; test -f ${shellQuote(node.comfyui_root + "/main.py")} && echo main_py_found || echo main_py_missing${dockerCheck}`
   ];
   try {
     const { stdout } = await execFileAsync("ssh", args, { timeout: timeoutMs + 5_000 });
     const lines = stdout.trim().split("\n");
     const host = lines[1] ?? "(unknown host)";
     const mainPy = lines[2] === "main_py_found" ? "main.py present" : "main.py MISSING";
+    const dockerLine = lines[3];
+    const dockerSuffix =
+      node.runtime === "docker"
+        ? dockerLine === "docker_image_found"
+          ? `; docker image ${node.docker_image} present`
+          : `; docker image ${node.docker_image} NOT found — run 'docker pull ${node.docker_image}' on ${node.ssh.host}`
+        : "";
     return {
       ok: true,
-      detail: `SSH OK to ${node.ssh.user}@${node.ssh.host} (${host}); ${mainPy}`
+      detail: `SSH OK to ${node.ssh.user}@${node.ssh.host} (${host}); ${mainPy}${dockerSuffix}`
     };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -336,6 +373,14 @@ function normalizeNode(raw: unknown, index: number, sourcePath: string): GpuNode
   const vram_gb = typeof o.vram_gb === "number" ? o.vram_gb : undefined;
   const model_share: ModelShare | undefined =
     o.model_share === "nfs_same_path" || o.model_share === "none" ? o.model_share : undefined;
+  const runtime: GpuNodeRuntime | undefined =
+    o.runtime === "docker" || o.runtime === "bare" ? o.runtime : undefined;
+  const docker_image = typeof o.docker_image === "string" ? o.docker_image : undefined;
+  if (runtime === "docker" && !docker_image) {
+    throw new Error(
+      `gpu-nodes.json node "${name}" has runtime="docker" but is missing "docker_image"`
+    );
+  }
 
   let ssh: GpuNodeSsh | undefined;
   if (kind === "ssh") {
@@ -368,6 +413,8 @@ function normalizeNode(raw: unknown, index: number, sourcePath: string): GpuNode
     launch_flags,
     vram_gb,
     model_share,
+    runtime,
+    docker_image,
     ssh
   };
 }

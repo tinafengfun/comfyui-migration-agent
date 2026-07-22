@@ -48,7 +48,35 @@ export class SdkStepTimeoutError extends Error {
 }
 
 export class CopilotSdkRunner {
+  // Tracks the live CopilotClient for each in-flight task so a hard stop
+  // (terminateWithHardStop) can actually reach and kill it. Previously hard
+  // stop only cleared orchestrator-side bookkeeping and left the SDK's CLI
+  // subprocess running -- confirmed live: a session wedged processing a huge
+  // buffered tool-output blob kept burning CPU for 20+ minutes after the
+  // orchestrator considered the task stopped, and had to be `kill -9`'d by hand.
+  private readonly activeClientsByTask = new Map<string, CopilotClient>();
+
   constructor(private readonly config: AppConfig) {}
+
+  /**
+   * Best-effort hard-stop for a task's in-flight SDK client, called from
+   * terminateWithHardStop. Races the SDK's graceful `stop()` against a short
+   * timeout, then falls back to `forceStop()` (SIGKILL to the CLI process) --
+   * exactly the pattern the SDK's own `forceStop` docs recommend, which
+   * nothing in this file previously did. Returns false if no client was
+   * tracked for this task (already finished, or never an SDK step).
+   */
+  async abortTask(taskId: string): Promise<boolean> {
+    const client = this.activeClientsByTask.get(taskId);
+    if (!client) return false;
+    try {
+      await withTimeout(client.stop(), 5_000, "gracefully stop Copilot SDK client on hard stop");
+    } catch {
+      await client.forceStop().catch(() => undefined);
+    }
+    this.activeClientsByTask.delete(taskId);
+    return true;
+  }
 
   async preflight(): Promise<{ ok: true; modelsAvailable: number | null }> {
     const gitHubToken = this.getExplicitGitHubToken();
@@ -79,6 +107,7 @@ export class CopilotSdkRunner {
   ): Promise<SdkRunResult> {
     const gitHubToken = this.getExplicitGitHubToken();
     const client = this.createClient(job.workspacePath, gitHubToken);
+    this.activeClientsByTask.set(job.taskId, client);
     const prompt = serializeStepJobForAgent(job);
     const isPhase1Driver = job.stepId === "phase1";
     // Use a persistent sessionId per task so steps can resume context from prior steps
@@ -326,7 +355,17 @@ export class CopilotSdkRunner {
               )
             : undefined
         )
-        .catch((error) => recorder.recordCleanupError("client.stop", error));
+        .catch((error) =>
+          // stop() failed or timed out (e.g. a wedged CLI subprocess unresponsive
+          // to graceful shutdown) -- forceStop() SIGKILLs it directly, per the
+          // SDK's own documented fallback pattern. Without this, a wedged
+          // subprocess is silently leaked running in the background.
+          client
+            .forceStop()
+            .catch(() => undefined)
+            .finally(() => recorder.recordCleanupError("client.stop", error))
+        )
+        .finally(() => this.activeClientsByTask.delete(job.taskId));
     }
   }
 
@@ -389,7 +428,11 @@ export class CopilotSdkRunner {
       if (session) {
         await withTimeout(session.disconnect(), 5_000, "disconnect Copilot SDK session").catch(() => undefined);
       }
-      await withTimeout(client.stop(), 5_000, "stop Copilot SDK client").catch(() => undefined);
+      // Same fallback as runStep: if graceful stop() times out (wedged CLI
+      // subprocess), forceStop() SIGKILLs it directly rather than leaking it.
+      await withTimeout(client.stop(), 5_000, "stop Copilot SDK client").catch(() =>
+        client.forceStop().catch(() => undefined)
+      );
     }
   }
 
