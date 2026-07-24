@@ -155,6 +155,22 @@ export function useApi() {
     []
   );
 
+  const adoptCoreNodeRecipeDraft = useCallback(
+    async (taskId: string, stepId: string, nodeType: string): Promise<{ recipePath: string; patchPath: string }> => {
+      const res = await fetch(
+        `/api/tasks/${taskId}/steps/${encodeURIComponent(stepId)}/custom-nodes/${encodeURIComponent(nodeType)}/adopt-recipe-draft`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({})
+        }
+      );
+      if (!res.ok) throw new Error(await res.text());
+      return res.json();
+    },
+    []
+  );
+
   const fetchProgressNarrative = useCallback(async (taskId: string): Promise<ProgressNarrative | undefined> => {
     const res = await fetch(`/api/tasks/${taskId}/progress`);
     if (!res.ok) return undefined;
@@ -315,7 +331,7 @@ export function useApi() {
     fetchSteps, fetchTasks, createTask, deleteTask,
     runUntilGate, runStep, resumeStep, rerunStep, hardStop,
     answerQuestion, uploadMedia, fetchArtifacts, fetchArtifactContent,
-    fetchDecisions, fetchSubJobs, startSubJob, downloadSuggestedSource, fetchProgressNarrative,
+    fetchDecisions, fetchSubJobs, startSubJob, downloadSuggestedSource, adoptCoreNodeRecipeDraft, fetchProgressNarrative,
     fetchHealth, runPreflight, generateRunReport, fetchGateSignal, fetchGpuNodes,
     createGpuNode, updateGpuNode, deleteGpuNode, verifyGpuNode, syncGpuNodeDockerImage
   };

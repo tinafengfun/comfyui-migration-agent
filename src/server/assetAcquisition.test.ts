@@ -388,4 +388,285 @@ describe("asset acquisition job", () => {
       })
     ]);
   });
+
+  it("searches by the real node type (not the useless 'comfy-core' hint) for a workflow-tagged-core node missing locally (Tier 1)", async () => {
+    // Regression test for the resolution-side generalization: a node the
+    // workflow tags cnr_id: comfy-core but that isn't in this build (see
+    // intakePreflight.ts's isCustomNode fix) has packageHint "comfy-core" --
+    // useless as a search query. The existing generic custom-node repo
+    // search should query by nodeType instead, so it can still surface a
+    // legacy/compat package the same way any other unresolved custom node
+    // search would.
+    const root = path.join(process.cwd(), ".demo-state", "tests", `asset-acquisition-core-tier1-${Date.now()}`);
+    const artifactPath = path.join(root, "artifacts");
+    const recipesRoot = path.join(root, "recipes-empty");
+    await ensureDir(artifactPath);
+    await ensureDir(recipesRoot);
+    const task: MigrationTask = {
+      id: "task-core-tier1",
+      name: "Core node tier 1",
+      status: "waiting_for_human",
+      workflowPath: path.join(root, "workflow.json"),
+      workspacePath: root,
+      artifactPath,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      steps: [{ id: "01", status: "waiting_for_human" }]
+    };
+    await fs.writeFile(
+      path.join(artifactPath, "01-assets.csv"),
+      [
+        "asset_name,requested_name,resolved_path,source,state,staged_path,custom_node_repo,custom_node_cache_path,wrapper_source_evidence,commit,install_status,acquisition_status,mirror_used,credential_recorded,gap",
+        ""
+      ].join("\n"),
+      "utf8"
+    );
+    await fs.writeFile(
+      path.join(artifactPath, "01-custom-nodes.md"),
+      [
+        "| Node type | Source package or repo | Installed/source evidence | State | Human action |",
+        "| --- | --- | --- | --- | --- |",
+        "| TextEncodeBooguEdit | comfy-core | comfy-core (missing locally) | source unknown | Provide upstream commit or legacy package |",
+        ""
+      ].join("\n"),
+      "utf8"
+    );
+
+    const queries: string[] = [];
+    const result = await ensureAssetAcquisitionJob({
+      task,
+      modelRoots: [path.join(root, "models")],
+      comfyuiRoot: path.join(root, "ComfyUI"),
+      humanContext: "",
+      redactedHumanContext: "",
+      recipesRoot,
+      sourceSearch: async (input) => {
+        queries.push(input.query);
+        return {
+          config: {
+            profileName: "test",
+            enableNetworkSearch: true,
+            allowInsecureTls: false,
+            requestTimeoutSeconds: 1,
+            maxResultsPerProvider: 1,
+            huggingFaceEndpoint: "https://huggingface.co",
+            modelScopeEndpoint: "https://modelscope.cn",
+            hasHuggingFaceToken: false,
+            hasCivitaiToken: false,
+            hasGitHubToken: false,
+            proxyConfigured: false,
+            enableDownload: false,
+            explicitHuggingFaceFiles: [],
+            huggingFaceFallbackEndpoints: [],
+            tokenEnvNames: { huggingface: [], civitai: [], github: [] },
+            proxyEnvNames: []
+          },
+          issues: [],
+          candidates: []
+        };
+      }
+    });
+
+    expect(queries).toEqual(["TextEncodeBooguEdit"]);
+    const job = JSON.parse(await fs.readFile(result.jobPath, "utf8")) as {
+      customNodeItems: Array<{ packageHint: string; nodeType: string; status: string }>;
+    };
+    expect(job.customNodeItems[0]).toMatchObject({ packageHint: "comfy-core", nodeType: "TextEncodeBooguEdit" });
+  });
+
+  it("drafts a recipe via upstream discovery for a workflow-tagged-core node with no existing recipe (Tier 2)", async () => {
+    const root = path.join(process.cwd(), ".demo-state", "tests", `asset-acquisition-core-tier2-${Date.now()}`);
+    const artifactPath = path.join(root, "artifacts");
+    const recipesRoot = path.join(root, "recipes-empty");
+    await ensureDir(artifactPath);
+    await ensureDir(recipesRoot);
+    const task: MigrationTask = {
+      id: "task-core-tier2",
+      name: "Core node tier 2",
+      status: "waiting_for_human",
+      workflowPath: path.join(root, "workflow.json"),
+      workspacePath: root,
+      artifactPath,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      steps: [{ id: "01", status: "waiting_for_human" }]
+    };
+    await fs.writeFile(
+      path.join(artifactPath, "01-assets.csv"),
+      [
+        "asset_name,requested_name,resolved_path,source,state,staged_path,custom_node_repo,custom_node_cache_path,wrapper_source_evidence,commit,install_status,acquisition_status,mirror_used,credential_recorded,gap",
+        ""
+      ].join("\n"),
+      "utf8"
+    );
+    await fs.writeFile(
+      path.join(artifactPath, "01-custom-nodes.md"),
+      [
+        "| Node type | Source package or repo | Installed/source evidence | State | Human action |",
+        "| --- | --- | --- | --- | --- |",
+        "| TextEncodeBooguEdit | comfy-core | comfy-core (missing locally) | source unknown | Provide upstream commit or legacy package |",
+        ""
+      ].join("\n"),
+      "utf8"
+    );
+
+    let discoverCalls = 0;
+    const result = await ensureAssetAcquisitionJob({
+      task,
+      modelRoots: [path.join(root, "models")],
+      comfyuiRoot: path.join(root, "ComfyUI"),
+      humanContext: "",
+      redactedHumanContext: "",
+      recipesRoot,
+      sourceSearch: async () => ({
+        config: {
+          profileName: "test",
+          enableNetworkSearch: true,
+          allowInsecureTls: false,
+          requestTimeoutSeconds: 1,
+          maxResultsPerProvider: 1,
+          huggingFaceEndpoint: "https://huggingface.co",
+          modelScopeEndpoint: "https://modelscope.cn",
+          hasHuggingFaceToken: false,
+          hasCivitaiToken: false,
+          hasGitHubToken: false,
+          proxyConfigured: false,
+          enableDownload: false,
+          explicitHuggingFaceFiles: [],
+          huggingFaceFallbackEndpoints: [],
+          tokenEnvNames: { huggingface: [], civitai: [], github: [] },
+          proxyEnvNames: []
+        },
+        issues: [],
+        candidates: []
+      }),
+      discoverCoreNodeRecipe: async ({ nodeType, patchFile }) => {
+        discoverCalls += 1;
+        return {
+          recipe: {
+            recipeId: `${nodeType}-core-support-draft`,
+            version: "0.1.0",
+            nodeType,
+            xpuSupport: "unknown",
+            patchFile,
+            knownIssues: ["Auto-drafted; not yet validated."],
+            provenance: { taskOrigin: task.id, createdAt: "2026-07-24" }
+          },
+          patchContent: "diff --git a/comfy_extras/nodes_boogu.py b/comfy_extras/nodes_boogu.py\n",
+          discovery: {
+            found: true,
+            confidence: "high",
+            commitSha: "abc1234",
+            filesTouched: ["comfy_extras/nodes_boogu.py"],
+            reason: "confirmed via merge commit diff"
+          }
+        };
+      }
+    });
+
+    expect(discoverCalls).toBe(1);
+    const job = JSON.parse(await fs.readFile(result.jobPath, "utf8")) as {
+      customNodeItems: Array<{
+        nodeType: string;
+        coreNodeRecipeDraft?: { recipe: { recipeId: string }; discovery: { confidence: string } };
+      }>;
+    };
+    expect(job.customNodeItems[0]?.coreNodeRecipeDraft).toMatchObject({
+      recipe: { recipeId: "TextEncodeBooguEdit-core-support-draft" },
+      discovery: { confidence: "high" }
+    });
+    const stagedPatch = await fs.readFile(
+      path.join(root, "artifacts", "staged-recipes", "TextEncodeBooguEdit-core-support.patch"),
+      "utf8"
+    );
+    expect(stagedPatch).toContain("nodes_boogu.py");
+  });
+
+  it("skips upstream discovery entirely when a recipe already covers this node type (Tier 2 short-circuit)", async () => {
+    const root = path.join(process.cwd(), ".demo-state", "tests", `asset-acquisition-core-has-recipe-${Date.now()}`);
+    const artifactPath = path.join(root, "artifacts");
+    const recipesRoot = path.join(root, "recipes-existing");
+    await ensureDir(artifactPath);
+    await ensureDir(recipesRoot);
+    await fs.writeFile(
+      path.join(recipesRoot, "TextEncodeBooguEdit-core-support.json"),
+      JSON.stringify({
+        recipeId: "TextEncodeBooguEdit-core-support",
+        version: "1.0.0",
+        nodeType: "TextEncodeBooguEdit",
+        xpuSupport: "patched",
+        patchFile: "patches/TextEncodeBooguEdit-core-support.patch",
+        knownIssues: ["already reviewed"],
+        provenance: { taskOrigin: "earlier-task", createdAt: "2026-07-01", approvedBy: "tinafengfun" }
+      }),
+      "utf8"
+    );
+    const task: MigrationTask = {
+      id: "task-core-has-recipe",
+      name: "Core node has recipe",
+      status: "waiting_for_human",
+      workflowPath: path.join(root, "workflow.json"),
+      workspacePath: root,
+      artifactPath,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      steps: [{ id: "01", status: "waiting_for_human" }]
+    };
+    await fs.writeFile(
+      path.join(artifactPath, "01-assets.csv"),
+      [
+        "asset_name,requested_name,resolved_path,source,state,staged_path,custom_node_repo,custom_node_cache_path,wrapper_source_evidence,commit,install_status,acquisition_status,mirror_used,credential_recorded,gap",
+        ""
+      ].join("\n"),
+      "utf8"
+    );
+    await fs.writeFile(
+      path.join(artifactPath, "01-custom-nodes.md"),
+      [
+        "| Node type | Source package or repo | Installed/source evidence | State | Human action |",
+        "| --- | --- | --- | --- | --- |",
+        "| TextEncodeBooguEdit | comfy-core | comfy-core (missing locally) | source unknown | Provide upstream commit or legacy package |",
+        ""
+      ].join("\n"),
+      "utf8"
+    );
+
+    let discoverCalls = 0;
+    await ensureAssetAcquisitionJob({
+      task,
+      modelRoots: [path.join(root, "models")],
+      comfyuiRoot: path.join(root, "ComfyUI"),
+      humanContext: "",
+      redactedHumanContext: "",
+      recipesRoot,
+      sourceSearch: async () => ({
+        config: {
+          profileName: "test",
+          enableNetworkSearch: true,
+          allowInsecureTls: false,
+          requestTimeoutSeconds: 1,
+          maxResultsPerProvider: 1,
+          huggingFaceEndpoint: "https://huggingface.co",
+          modelScopeEndpoint: "https://modelscope.cn",
+          hasHuggingFaceToken: false,
+          hasCivitaiToken: false,
+          hasGitHubToken: false,
+          proxyConfigured: false,
+          enableDownload: false,
+          explicitHuggingFaceFiles: [],
+          huggingFaceFallbackEndpoints: [],
+          tokenEnvNames: { huggingface: [], civitai: [], github: [] },
+          proxyEnvNames: []
+        },
+        issues: [],
+        candidates: []
+      }),
+      discoverCoreNodeRecipe: async () => {
+        discoverCalls += 1;
+        throw new Error("should not be called when a recipe already exists");
+      }
+    });
+
+    expect(discoverCalls).toBe(0);
+  });
 });

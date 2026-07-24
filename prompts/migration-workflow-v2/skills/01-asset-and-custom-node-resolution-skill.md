@@ -72,6 +72,8 @@ For each custom-node entry in the report, verify the local directory state:
 
 Do NOT downgrade an `environment gap` determination back to `source known`. If the deterministic backend prep already identified a directory as `environment gap` in `01-custom-nodes.md`, preserve that determination and surface it to Step 05 for remediation.
 
+If `00-intake-preflight.md` flagged a node's source package as `comfy-core (missing locally)` (an upstream-core node the workflow tags native but that isn't registered in this build), carry that exact value forward verbatim into `01-custom-nodes.md`'s package/source column for that node — do not paraphrase it into a plain package-name guess or drop it. The backend's automatic upstream-recipe discovery only recognizes this literal marker.
+
 Required completion fields:
 
 ```text

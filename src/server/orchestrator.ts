@@ -17,6 +17,7 @@ import {
   type AssetAcquisitionUnresolvedItem
 } from "./assetAcquisition";
 import { judgeFuzzyMatch, type FreeformSessionRunner } from "./assetFuzzyMatch";
+import { discoverCoreNodeRecipe } from "./coreNodeRecipeDiscovery";
 import { ensureAssetPrep } from "./assetPrep";
 import { checkRequiredArtifactCompletion, checkRequiredArtifactGate } from "./artifactCompletion";
 import { analyzeRunReport } from "./evolutionAnalyzer";
@@ -423,6 +424,19 @@ export class MigrationOrchestrator {
                     // sessionIds containing them outright. Sanitize instead
                     // of embedding requestedName verbatim.
                     sessionId: `${task.id}-01-fuzzy-${sanitizeSessionIdSegment(requestedName)}`
+                  })
+              : undefined,
+            discoverCoreNodeRecipe: this.sdkRunner.runFreeformSession
+              ? async ({ nodeType, patchFile }) =>
+                  discoverCoreNodeRecipe({
+                    nodeType,
+                    comfyuiRoot: this.config.comfyuiRoot,
+                    taskId: task.id,
+                    patchFile,
+                    runner: this.sdkRunner as FreeformSessionRunner,
+                    cwd: task.artifactPath,
+                    sessionId: `${task.id}-01-core-node-${sanitizeSessionIdSegment(nodeType)}`,
+                    evidenceArtifact: `${stepId}-acquisition-report.md`
                   })
               : undefined
           });

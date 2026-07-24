@@ -1094,6 +1094,51 @@ function parseFuzzyJudgments(raw: string): Record<string, FuzzyJudgmentInfo> {
   return result;
 }
 
+type CoreNodeRecipeDraftInfo = {
+  nodeType: string;
+  confidence: "high" | "medium" | "low" | "none";
+  reason: string;
+  patchTarget?: string;
+};
+
+/**
+ * A "custom node source" gate item's name is the package hint (e.g.
+ * "comfy-core" for every node the workflow tags native-but-missing-locally,
+ * see intakePreflight.ts's isCustomNode fix) -- not a per-node-type unique
+ * key, so more than one drafted recipe can share one gate row's name. Keyed
+ * by that shared name, with an array of per-nodeType drafts underneath, so
+ * each gets its own card and its own adopt action.
+ */
+function parseCoreNodeRecipeDrafts(raw: string): Record<string, CoreNodeRecipeDraftInfo[]> {
+  const result: Record<string, CoreNodeRecipeDraftInfo[]> = {};
+  try {
+    const parsed = JSON.parse(raw) as {
+      customNodeItems?: Array<{
+        packageHint?: string;
+        nodeType?: string;
+        coreNodeRecipeDraft?: { discovery?: { confidence?: string; reason?: string }; recipe?: { patchTarget?: string } };
+      }>;
+    };
+    for (const item of parsed.customNodeItems ?? []) {
+      const draft = item.coreNodeRecipeDraft;
+      if (!item.packageHint || !item.nodeType || !draft?.discovery) continue;
+      const confidence = draft.discovery.confidence;
+      if (confidence !== "high" && confidence !== "medium" && confidence !== "low" && confidence !== "none") continue;
+      const list = result[item.packageHint] ?? [];
+      list.push({
+        nodeType: item.nodeType,
+        confidence,
+        reason: draft.discovery.reason ?? "",
+        patchTarget: draft.recipe?.patchTarget
+      });
+      result[item.packageHint] = list;
+    }
+  } catch {
+    // Older/malformed acquisition job files just mean no drafts to show.
+  }
+  return result;
+}
+
 function basename(p: string): string {
   const norm = p.replace(/\\/g, "/");
   const parts = norm.split("/");
@@ -1125,6 +1170,8 @@ function AssetUploadPanel({ event, taskId, api, onAnswer, onResolved }: {
   const [bulkMsg, setBulkMsg] = useState<string>("");
   const [freeformText, setFreeformText] = useState<string>("");
   const [fuzzyJudgments, setFuzzyJudgments] = useState<Record<string, FuzzyJudgmentInfo>>({});
+  const [coreNodeRecipeDrafts, setCoreNodeRecipeDrafts] = useState<Record<string, CoreNodeRecipeDraftInfo[]>>({});
+  const [adoptedRecipes, setAdoptedRecipes] = useState<Record<string, "adopting" | "adopted" | string>>({});
   const multiInputRef = useRef<HTMLInputElement>(null);
   const perItemInputRef = useRef<HTMLInputElement>(null);
   const [perItemTarget, setPerItemTarget] = useState<string>("");
@@ -1153,10 +1200,22 @@ function AssetUploadPanel({ event, taskId, api, onAnswer, onResolved }: {
     try {
       const raw = await api.fetchArtifactContent(taskId, `artifacts/${stepId}-acquisition-job.json`);
       setFuzzyJudgments(parseFuzzyJudgments(raw));
+      setCoreNodeRecipeDrafts(parseCoreNodeRecipeDrafts(raw));
     } catch {
       setFuzzyJudgments({});
+      setCoreNodeRecipeDrafts({});
     }
   }, [api, taskId, stepId]);
+
+  async function adoptRecipeDraft(nodeType: string) {
+    setAdoptedRecipes((m) => ({ ...m, [nodeType]: "adopting" }));
+    try {
+      await api.adoptCoreNodeRecipeDraft(taskId, stepId, nodeType);
+      setAdoptedRecipes((m) => ({ ...m, [nodeType]: "adopted" }));
+    } catch (err) {
+      setAdoptedRecipes((m) => ({ ...m, [nodeType]: err instanceof Error ? err.message : String(err) }));
+    }
+  }
 
   useEffect(() => {
     void refreshItems();
@@ -1320,6 +1379,7 @@ function AssetUploadPanel({ event, taskId, api, onAnswer, onResolved }: {
         {items.map((item) => {
           const status = statusMap[item.name] ?? "pending";
           const suggestion = fuzzyJudgments[item.name];
+          const recipeDrafts = coreNodeRecipeDrafts[item.name] ?? [];
           return (
             <div key={item.name} className="asset-item">
               <div className={`asset-item-row ${status}`}>
@@ -1366,6 +1426,34 @@ function AssetUploadPanel({ event, taskId, api, onAnswer, onResolved }: {
                   </button>
                 </div>
               )}
+              {recipeDrafts.map((draft) => {
+                const adoptState = adoptedRecipes[draft.nodeType];
+                return (
+                  <div key={draft.nodeType} className={`asset-item-suggestion confidence-${draft.confidence}`}>
+                    <span className="asset-suggestion-reason">
+                      <strong>{draft.nodeType}</strong> — drafted a candidate recipe from upstream ComfyUI history
+                    </span>
+                    <span className={`asset-confidence-badge confidence-${draft.confidence}`}>
+                      {draft.confidence} confidence
+                    </span>
+                    <span className="asset-suggestion-reason">{draft.reason}</span>
+                    {draft.patchTarget && <span className="asset-suggestion-reason">touches: {draft.patchTarget}</span>}
+                    {adoptState === "adopted" ? (
+                      <span className="asset-url-verified ok">✓ recipe adopted — Step 05 will apply it automatically next run</span>
+                    ) : adoptState && adoptState !== "adopting" ? (
+                      <span className="asset-url-verified fail">✗ {adoptState}</span>
+                    ) : (
+                      <button
+                        className="btn btn-sm btn-primary"
+                        disabled={adoptState === "adopting"}
+                        onClick={() => void adoptRecipeDraft(draft.nodeType)}
+                      >
+                        {adoptState === "adopting" ? "Adopting…" : "Adopt this drafted recipe"}
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           );
         })}

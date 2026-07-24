@@ -15,6 +15,8 @@ import {
 } from "./assetSourceProviders";
 import { demoModelRoot } from "./config";
 import type { FuzzyJudgment } from "./assetFuzzyMatch";
+import { findRecipesForNode, type Recipe } from "./recipeLibrary";
+import type { CoreNodeDiscoveryResult } from "./coreNodeRecipeDiscovery";
 
 const execFileAsync = promisify(execFile);
 
@@ -79,6 +81,19 @@ interface CustomNodeJobItem {
   plannedActions: string[];
   candidates: AssetSourceCandidate[];
   searchIssues: ProviderSearchIssue[];
+  /**
+   * Only populated for a node the workflow tags `cnr_id: comfy-core` that
+   * isn't registered in this build (see intakePreflight.ts's isCustomNode),
+   * when no existing recipes/nodes/*.json already covers it and upstream
+   * discovery found a plausible introducing commit. Advisory only -- never
+   * auto-applied; a human must explicitly adopt it (see
+   * coreNodeRecipeDiscovery.ts).
+   */
+  coreNodeRecipeDraft?: {
+    recipe: Recipe;
+    patchContent: string;
+    discovery: CoreNodeDiscoveryResult;
+  };
 }
 
 interface CustomNodeRow {
@@ -160,6 +175,20 @@ export async function ensureAssetAcquisitionJob(input: {
     requestedName: string;
     candidates: AssetSourceCandidate[];
   }) => Promise<FuzzyJudgment | undefined>;
+  /**
+   * Only called for a custom-node row the workflow tags `cnr_id: comfy-core`
+   * that isn't registered locally AND that no existing recipe already
+   * covers (see coreNodeRecipeDiscovery.ts). Advisory only -- never merged
+   * into any resolved/cloned state; only surfaces a draft a human can
+   * explicitly adopt. Omit to skip discovery entirely (e.g. in tests, or
+   * when no SDK runner is available).
+   */
+  discoverCoreNodeRecipe?: (input: {
+    nodeType: string;
+    patchFile: string;
+  }) => Promise<{ recipe: Recipe; patchContent: string; discovery: CoreNodeDiscoveryResult } | undefined>;
+  /** Override for findRecipesForNode's lookup dir; tests only. Defaults to the real recipes/ tree. */
+  recipesRoot?: string;
 }): Promise<AssetAcquisitionJobResult> {
   const stepId = input.stepId ?? "01";
   const assetsPath = path.join(input.task.artifactPath, `${stepId}-assets.csv`);
@@ -358,7 +387,9 @@ export async function ensureAssetAcquisitionJob(input: {
       workspacePath: input.task.workspacePath,
       comfyuiRoot: input.comfyuiRoot,
       providerConfig,
-      sourceSearch
+      sourceSearch,
+      discoverCoreNodeRecipe: input.discoverCoreNodeRecipe,
+      recipesRoot: input.recipesRoot
     });
     customNodeCandidateCount += item.candidates.length;
     customNodeItems.push(item);
@@ -787,7 +818,55 @@ async function remoteFileSize(login: string, remotePath: string): Promise<number
   return Number.isFinite(value) ? value : undefined;
 }
 
+/**
+ * Wraps resolveCustomNodeSource with Tier 2 discovery: when a node the
+ * workflow tags `cnr_id: comfy-core` turns out unresolved AND no existing
+ * recipe already covers it, ask (best-effort) for a drafted recipe from
+ * upstream commit history instead of leaving a human to hand-author one
+ * from scratch every time this happens. See coreNodeRecipeDiscovery.ts.
+ */
 async function ensureCustomNodeSource(input: {
+  customNode: CustomNodeRow;
+  workspacePath: string;
+  comfyuiRoot: string;
+  providerConfig: SourceProviderConfig;
+  sourceSearch: (queryInput: {
+    query: string;
+    assetName?: string;
+    kind: "model" | "custom_node";
+    targetPath?: string;
+  }) => Promise<SearchResult>;
+  discoverCoreNodeRecipe?: (input: {
+    nodeType: string;
+    patchFile: string;
+  }) => Promise<{ recipe: Recipe; patchContent: string; discovery: CoreNodeDiscoveryResult } | undefined>;
+  recipesRoot?: string;
+}): Promise<CustomNodeJobItem> {
+  const item = await resolveCustomNodeSource(input);
+  const isUnresolvedCoreNode =
+    input.customNode.packageHint === "comfy-core" && item.status !== "source_known" && item.status !== "source_cloned";
+  if (!isUnresolvedCoreNode || !input.discoverCoreNodeRecipe) return item;
+  if (findRecipesForNode(item.nodeType, undefined, input.recipesRoot).length > 0) return item;
+
+  const patchFile = path.join("artifacts", "staged-recipes", `${item.nodeType}-core-support.patch`);
+  const draft = await input.discoverCoreNodeRecipe({ nodeType: item.nodeType, patchFile }).catch(() => undefined);
+  if (!draft) return item;
+
+  const absolutePatchPath = path.join(input.workspacePath, patchFile);
+  await fs.mkdir(path.dirname(absolutePatchPath), { recursive: true }).catch(() => undefined);
+  await fs.writeFile(absolutePatchPath, draft.patchContent, "utf8").catch(() => undefined);
+
+  return {
+    ...item,
+    coreNodeRecipeDraft: draft,
+    plannedActions: [
+      ...item.plannedActions,
+      `Drafted a candidate recipe from upstream history (confidence: ${draft.discovery.confidence}) -- review before adopting.`
+    ]
+  };
+}
+
+async function resolveCustomNodeSource(input: {
   customNode: CustomNodeRow;
   workspacePath: string;
   comfyuiRoot: string;
@@ -843,7 +922,12 @@ async function ensureCustomNodeSource(input: {
   }
 
   const search = await input.sourceSearch({
-    query: input.customNode.packageHint,
+    // "comfy-core" (the workflow's own cnr_id tag, see intakePreflight.ts's
+    // isCustomNode) is a useless search query on its own -- search by the
+    // real node class name instead so the existing repo-search fallback can
+    // still surface a legacy/compat custom-node package for this case (same
+    // generic mechanism every other custom node already uses).
+    query: input.customNode.packageHint === "comfy-core" ? input.customNode.nodeType : input.customNode.packageHint,
     kind: "custom_node"
   });
   const cloneCandidate = search.candidates.find(isHighConfidenceGitHubRepoCandidate);

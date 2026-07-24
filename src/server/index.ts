@@ -5,6 +5,8 @@ import path from "node:path";
 import type { CreateTaskRequest, GpuNodeVerifyResult, GpuNodeWriteRequest, MigrationTask } from "../shared/types";
 import { classifyArtifact, listArtifactFiles, readArtifactText } from "./artifacts";
 import { processUploadedReplacement, FileValidationError, MAX_FILE_SIZE_BYTES } from "./assetReplacement";
+import { promoteCoreNodeRecipeDraft } from "./recipePromotion";
+import type { Recipe } from "./recipeLibrary";
 import { loadConfig } from "./config";
 import { ensureDir, safeJoin } from "./fsUtils";
 import { MigrationOrchestrator } from "./orchestrator";
@@ -705,6 +707,42 @@ app.post("/api/tasks/:taskId/steps/:stepId/assets/:assetName/download-suggested-
       res.status(409).json({ error: message });
       return;
     }
+    next(error);
+  }
+});
+
+// Promotes a human-approved core-node recipe draft (see
+// coreNodeRecipeDiscovery.ts, surfaced in the web UI alongside a
+// "comfy-core but missing locally" custom-node gap) from task-local staging
+// into the real recipes/nodes/ + patches/ trees. This is the ONLY path that
+// writes there for a drafted recipe -- Steps 02/04/05's existing recipe
+// injection and patch-adaptation-protocol then pick it up automatically,
+// exactly like any hand-authored recipe.
+app.post("/api/tasks/:taskId/steps/:stepId/custom-nodes/:nodeType/adopt-recipe-draft", async (req, res, next) => {
+  try {
+    const task = await store.getTask(req.params.taskId);
+    if (!task) {
+      res.status(404).json({ error: "Task not found" });
+      return;
+    }
+    const jobPath = path.join(task.artifactPath, `${req.params.stepId}-acquisition-job.json`);
+    const job = JSON.parse(await fs.readFile(jobPath, "utf8")) as {
+      customNodeItems?: Array<{ nodeType: string; coreNodeRecipeDraft?: { recipe: Recipe } }>;
+    };
+    const item = job.customNodeItems?.find((i) => i.nodeType === req.params.nodeType);
+    const draft = item?.coreNodeRecipeDraft;
+    if (!draft || !draft.recipe.patchFile) {
+      res.status(404).json({ error: `No recipe draft found for node type ${req.params.nodeType}` });
+      return;
+    }
+    const body = req.body as { approvedBy?: string };
+    const result = await promoteCoreNodeRecipeDraft({
+      recipe: draft.recipe,
+      stagedPatchPath: path.join(task.workspacePath, draft.recipe.patchFile),
+      approvedBy: body.approvedBy?.trim() || "web-ui-operator"
+    });
+    res.status(200).json(result);
+  } catch (error) {
     next(error);
   }
 });
