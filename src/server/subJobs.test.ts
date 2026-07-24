@@ -289,6 +289,20 @@ describe("sub job manager", () => {
         ),
         "utf8"
       );
+      // Same regression fixture as the suggested-url test below — the fix
+      // lives in the shared completion path, so the pre-existing
+      // provider-candidate download route must also update the ledger now.
+      await fs.writeFile(
+        path.join(artifactPath, "01-assets.csv"),
+        "asset_name,requested_name,resolved_path,source,state,staged_path,custom_node_repo,custom_node_cache_path,wrapper_source_evidence,commit,install_status,acquisition_status,mirror_used,credential_recorded,gap\n" +
+          '"missing.safetensors","missing.safetensors","","","source unknown","","","","","","missing","unresolved","none","false","not staged"\n',
+        "utf8"
+      );
+      await fs.writeFile(
+        path.join(artifactPath, "01-gate-signal.json"),
+        JSON.stringify({ items: [{ name: "missing.safetensors", kind: "model asset", action: "provide" }] }, null, 2),
+        "utf8"
+      );
       const manager = new SubJobManager();
       const pending = (await manager.listTaskSubJobs(task)).find((job) => job.assetName === "missing.safetensors");
       expect(pending?.canStart).toBe(true);
@@ -299,6 +313,200 @@ describe("sub job manager", () => {
       expect(completed.provider).toBe("huggingface");
       expect(completed.progress?.downloadedBytes).toBe(11);
       expect(await fs.readFile(targetPath, "utf8")).toBe("download-ok");
+
+      const csv = await fs.readFile(path.join(artifactPath, "01-assets.csv"), "utf8");
+      expect(csv).toContain("human_provided");
+      await expect(fs.readFile(path.join(artifactPath, "01-gate-signal.json"), "utf8")).rejects.toThrow();
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
+    }
+  });
+
+  it("startSubJobForSuggestedUrl downloads a human-approved fuzzyJudgment.suggestedUrl end-to-end", async () => {
+    process.env.ASSET_ACQUISITION_ENABLE_DOWNLOAD = "1";
+    const server = http.createServer((req, res) => {
+      if (req.url === "/suggested") {
+        res.writeHead(200, { "Content-Type": "application/octet-stream", "Content-Length": "13" });
+        res.end("suggested-src");
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("Unexpected test server address");
+      const root = path.join(process.cwd(), ".demo-state", "tests", `subjobs-suggested-${Date.now()}`);
+      const artifactPath = path.join(root, "artifacts");
+      const targetPath = path.join(root, "models", "suggested.safetensors");
+      await ensureDir(artifactPath);
+      const task: MigrationTask = {
+        id: "task-subjobs-suggested",
+        name: "Subjobs suggested",
+        status: "waiting_for_human",
+        workflowPath: path.join(root, "workflow.json"),
+        workspacePath: root,
+        artifactPath,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        steps: [{ id: "01", status: "waiting_for_human" }]
+      };
+      // Note: no `candidates` array at all here -- fuzzyJudgment.suggestedUrl
+      // never went through the structured provider-search pipeline, only
+      // `targetPath` is required for startSubJobForSuggestedUrl to work.
+      await fs.writeFile(
+        path.join(artifactPath, "01-acquisition-job.json"),
+        JSON.stringify(
+          {
+            status: "waiting_for_secure_download",
+            items: [
+              {
+                assetName: "suggested.safetensors",
+                status: "pending_secure_download",
+                targetPath
+              }
+            ],
+            customNodeItems: []
+          },
+          null,
+          2
+        ),
+        "utf8"
+      );
+      // Regression fixture for the real bug this closes: a completed
+      // download used to leave 01-assets.csv/the gate-signal file untouched,
+      // so the web UI showed the item as resolved (client-only optimism)
+      // while Step 01's own gate still considered it an open gap.
+      await fs.writeFile(
+        path.join(artifactPath, "01-assets.csv"),
+        "asset_name,requested_name,resolved_path,source,state,staged_path,custom_node_repo,custom_node_cache_path,wrapper_source_evidence,commit,install_status,acquisition_status,mirror_used,credential_recorded,gap\n" +
+          '"suggested.safetensors","suggested.safetensors","","","source unknown","","","","","","missing","unresolved","none","false","not staged"\n',
+        "utf8"
+      );
+      await fs.writeFile(
+        path.join(artifactPath, "01-gate-signal.json"),
+        JSON.stringify({ items: [{ name: "suggested.safetensors", kind: "model asset", action: "provide" }] }, null, 2),
+        "utf8"
+      );
+
+      const manager = new SubJobManager();
+      const started = await manager.startSubJobForSuggestedUrl(
+        task,
+        "suggested.safetensors",
+        `http://127.0.0.1:${address.port}/suggested`
+      );
+      expect(started.status).toBe("running");
+
+      const completed = await waitForSubJobStatus(manager, task, started.id, "completed");
+      expect(completed.provider).toBe("suggested-url");
+      expect(completed.progress?.downloadedBytes).toBe(13);
+      expect(await fs.readFile(targetPath, "utf8")).toBe("suggested-src");
+
+      // The actual regression check: ledger + gate-signal must reflect
+      // resolution, not just the in-memory SubJob status above.
+      const csv = await fs.readFile(path.join(artifactPath, "01-assets.csv"), "utf8");
+      expect(csv).toContain("human_provided");
+      expect(csv).toContain(",present,complete,");
+      await expect(fs.readFile(path.join(artifactPath, "01-gate-signal.json"), "utf8")).rejects.toThrow();
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
+    }
+  });
+
+  it("startSubJobForSuggestedUrl rejects a non-http(s) URL without touching the download-enabled gate", async () => {
+    process.env.ASSET_ACQUISITION_ENABLE_DOWNLOAD = "1";
+    const root = path.join(process.cwd(), ".demo-state", "tests", `subjobs-suggested-bad-url-${Date.now()}`);
+    const artifactPath = path.join(root, "artifacts");
+    await ensureDir(artifactPath);
+    const task: MigrationTask = {
+      id: "task-subjobs-suggested-bad",
+      name: "Subjobs suggested bad url",
+      status: "waiting_for_human",
+      workflowPath: path.join(root, "workflow.json"),
+      workspacePath: root,
+      artifactPath,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      steps: [{ id: "01", status: "waiting_for_human" }]
+    };
+    const manager = new SubJobManager();
+    await expect(
+      manager.startSubJobForSuggestedUrl(task, "whatever.safetensors", "not-a-url")
+    ).rejects.toThrow(/http/i);
+  });
+
+  it("startSubJobForSuggestedUrl refuses when download execution is disabled", async () => {
+    delete process.env.ASSET_ACQUISITION_ENABLE_DOWNLOAD;
+    delete process.env.MIGRATION_AGENT_DOWNLOAD_PROFILE;
+    const root = path.join(process.cwd(), ".demo-state", "tests", `subjobs-suggested-disabled-${Date.now()}`);
+    const artifactPath = path.join(root, "artifacts");
+    await ensureDir(artifactPath);
+    const task: MigrationTask = {
+      id: "task-subjobs-suggested-disabled",
+      name: "Subjobs suggested disabled",
+      status: "waiting_for_human",
+      workflowPath: path.join(root, "workflow.json"),
+      workspacePath: root,
+      artifactPath,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      steps: [{ id: "01", status: "waiting_for_human" }]
+    };
+    const manager = new SubJobManager();
+    await expect(
+      manager.startSubJobForSuggestedUrl(task, "whatever.safetensors", "https://example.com/file.safetensors")
+    ).rejects.toThrow(/disabled/i);
+  });
+
+  it("rejects a 200-OK HTML error page masquerading as the requested binary asset", async () => {
+    // Regression test for a real incident: a suggested-source URL redirected
+    // to a live HTML page (HuggingFace's own generic page, HTTP 200) instead
+    // of 404ing outright. Without sizeBytes/sha256 to check against (true for
+    // any LLM-suggested URL, which never went through structured provider
+    // search), the old validateDownloadedFile had nothing to catch this with.
+    process.env.ASSET_ACQUISITION_ENABLE_DOWNLOAD = "1";
+    const server = http.createServer((req, res) => {
+      res.writeHead(200, { "Content-Type": "text/html" });
+      res.end("<!doctype html><html><head><title>Not Found</title></head><body>nope</body></html>");
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("Unexpected test server address");
+      const root = path.join(process.cwd(), ".demo-state", "tests", `subjobs-html-masquerade-${Date.now()}`);
+      const artifactPath = path.join(root, "artifacts");
+      const targetPath = path.join(root, "models", "corrupt.safetensors");
+      await ensureDir(artifactPath);
+      const task: MigrationTask = {
+        id: "task-subjobs-html-masquerade",
+        name: "Subjobs html masquerade",
+        status: "waiting_for_human",
+        workflowPath: path.join(root, "workflow.json"),
+        workspacePath: root,
+        artifactPath,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        steps: [{ id: "01", status: "waiting_for_human" }]
+      };
+      await fs.writeFile(
+        path.join(artifactPath, "01-acquisition-job.json"),
+        JSON.stringify(
+          { status: "waiting_for_secure_download", items: [{ assetName: "corrupt.safetensors", status: "pending_secure_download", targetPath }], customNodeItems: [] },
+          null,
+          2
+        ),
+        "utf8"
+      );
+      const manager = new SubJobManager();
+      const started = await manager.startSubJobForSuggestedUrl(task, "corrupt.safetensors", `http://127.0.0.1:${address.port}/dead-link`);
+      expect(started.status).toBe("running");
+
+      const failed = await waitForSubJobStatus(manager, task, started.id, "waiting_for_human");
+      expect(failed.error).toContain("HTML page");
+      // Must not be left on disk as if it were a real asset, and must not be
+      // silently accepted into the ledger.
+      await expect(fs.readFile(targetPath, "utf8")).rejects.toThrow();
     } finally {
       await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
     }

@@ -474,6 +474,7 @@ button, input, select, textarea { font: inherit; }
   padding: 3px 10px; border-radius: 999px; text-transform: uppercase; letter-spacing: 0.5px;
 }
 .asset-item-list { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; }
+.asset-item { display: flex; flex-direction: column; gap: 4px; }
 .asset-item-row {
   display: flex; align-items: center; gap: 10px;
   padding: 8px 10px; border-radius: 6px; background: #fff;
@@ -489,6 +490,27 @@ button, input, select, textarea { font: inherit; }
 .asset-item-error { font-size: 11px; color: #ef4444; }
 .asset-empty { padding: 8px; font-size: 13px; }
 .btn-sm { font-size: 12px; padding: 3px 10px; }
+
+/* Step 01's own recommended-source research, surfaced per asset */
+.asset-item-suggestion {
+  display: flex; flex-direction: column; gap: 4px;
+  margin-left: 26px; padding: 8px 10px; border-radius: 6px;
+  background: #f9fafb; border: 1px solid #e5e7eb; font-size: 12px;
+}
+.asset-confidence-badge {
+  align-self: flex-start; font-size: 10px; font-weight: 700; text-transform: uppercase;
+  letter-spacing: 0.5px; padding: 2px 8px; border-radius: 999px; color: white;
+}
+.asset-confidence-badge.confidence-high { background: #16a34a; }
+.asset-confidence-badge.confidence-medium { background: #d97706; }
+.asset-confidence-badge.confidence-low { background: #9ca3af; }
+.asset-confidence-badge.confidence-none { background: #6b7280; }
+.asset-suggestion-reason { color: #374151; }
+.asset-suggestion-link { color: #2563eb; word-break: break-all; font-size: 11px; }
+.asset-url-verified { font-size: 11px; }
+.asset-url-verified.ok { color: #16a34a; }
+.asset-url-verified.fail { color: #dc2626; font-weight: 600; }
+.asset-url-verified.unknown { color: #9ca3af; }
 
 .subjob-empty { padding: 12px; font-size: 13px; }
 .subjob-list { display: flex; flex-direction: column; gap: 6px; padding: 10px; }

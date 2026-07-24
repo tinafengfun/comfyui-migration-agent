@@ -316,4 +316,76 @@ describe("asset acquisition job", () => {
       expect.objectContaining({ packageHint: "ComfyUI-QwenVL", status: "source_known" })
     ]);
   });
+
+  it("recognizes an already-installed custom node even when the evidence column is prose, not a path (real bug)", async () => {
+    // Regression test for a real incident: 01-custom-nodes.md's 5-column
+    // table format ("Node type | Source package or repo | Installed/source
+    // evidence | State | Human action") had "package hint from workflow
+    // only" in the evidence column for rgthree-comfy -- prose, not a
+    // filesystem path. customNodeEvidencePaths() only recognizes evidence
+    // strings that are absolute or start with "custom_nodes/"/"cache/", so
+    // it returned [] and the existence check always missed the package even
+    // though it was genuinely installed (symlinked from the shared NFS
+    // tree), falling through to a doomed `git clone` into a directory that
+    // already exists -- surfaced live as a spurious "clone failed" human
+    // gate for a package that needed no action at all.
+    const root = path.join(process.cwd(), ".demo-state", "tests", `asset-acquisition-prose-evidence-${Date.now()}`);
+    const artifactPath = path.join(root, "artifacts");
+    const comfyuiRoot = path.join(root, "ComfyUI");
+    const installedNodeDir = path.join(comfyuiRoot, "custom_nodes", "rgthree-comfy");
+    await ensureDir(artifactPath);
+    await ensureDir(installedNodeDir);
+    const task: MigrationTask = {
+      id: "task-asset-acquisition-prose-evidence",
+      name: "Asset acquisition prose evidence",
+      status: "waiting_for_human",
+      workflowPath: path.join(root, "workflow.json"),
+      workspacePath: root,
+      artifactPath,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      steps: [{ id: "01", status: "waiting_for_human" }]
+    };
+    await fs.writeFile(
+      path.join(artifactPath, "01-assets.csv"),
+      [
+        "asset_name,requested_name,resolved_path,source,state,staged_path,custom_node_repo,custom_node_cache_path,wrapper_source_evidence,commit,install_status,acquisition_status,mirror_used,credential_recorded,gap",
+        ""
+      ].join("\n"),
+      "utf8"
+    );
+    await fs.writeFile(
+      path.join(artifactPath, "01-custom-nodes.md"),
+      [
+        "| Node type | Source package or repo | Installed/source evidence | State | Human action |",
+        "| --- | --- | --- | --- | --- |",
+        "| Image Comparer (rgthree) | rgthree-comfy | package hint from workflow only | source known | none |",
+        ""
+      ].join("\n"),
+      "utf8"
+    );
+
+    const result = await ensureAssetAcquisitionJob({
+      task,
+      modelRoots: [path.join(root, "models")],
+      comfyuiRoot,
+      humanContext: "",
+      redactedHumanContext: "",
+      sourceSearch: async () => {
+        throw new Error("source search should not run for an already-installed custom node");
+      }
+    });
+
+    expect(result.customNodeCandidateCount).toBe(0);
+    const job = JSON.parse(await fs.readFile(result.jobPath, "utf8")) as {
+      customNodeItems: Array<{ packageHint: string; status: string; sourcePath?: string }>;
+    };
+    expect(job.customNodeItems).toEqual([
+      expect.objectContaining({
+        packageHint: "rgthree-comfy",
+        status: "source_known",
+        sourcePath: installedNodeDir
+      })
+    ]);
+  });
 });

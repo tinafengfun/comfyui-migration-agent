@@ -1,11 +1,28 @@
+import http from "node:http";
 import { describe, expect, it } from "vitest";
 import type { AssetSourceCandidate } from "./assetSourceProviders";
 import {
   buildFuzzyJudgmentPrompt,
   judgeFuzzyMatch,
   parseFuzzyJudgmentResponse,
+  verifyUrlReachable,
   type FreeformSessionRunner
 } from "./assetFuzzyMatch";
+
+async function withTestServer(
+  handler: http.RequestListener,
+  run: (baseUrl: string) => Promise<void>
+): Promise<void> {
+  const server = http.createServer(handler);
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("Unexpected test server address");
+    await run(`http://127.0.0.1:${address.port}`);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+}
 
 function makeCandidate(overrides: Partial<AssetSourceCandidate> = {}): AssetSourceCandidate {
   return {
@@ -148,5 +165,130 @@ describe("judgeFuzzyMatch", () => {
       sessionId: "s"
     });
     expect(result).toBeUndefined();
+  });
+
+  it("verifies suggestedUrl reachability and attaches the result to the judgment", async () => {
+    await withTestServer(
+      (req, res) => {
+        res.writeHead(200);
+        res.end();
+      },
+      async (baseUrl) => {
+        const stubRunner: FreeformSessionRunner = {
+          async runFreeformSession(input) {
+            return {
+              sessionId: input.sessionId,
+              summary: `{"matchedCandidateIndex": null, "confidence": "medium", "reason": "found via search", "suggestedUrl": "${baseUrl}/model.safetensors"}`
+            };
+          }
+        };
+        const result = await judgeFuzzyMatch({
+          requestedName: "x.safetensors",
+          candidates: [],
+          runner: stubRunner,
+          cwd: "/tmp",
+          sessionId: "s"
+        });
+        expect(result?.urlVerified).toBe(true);
+        expect(result?.urlVerifiedDetail).toBe("HTTP 200");
+      }
+    );
+  });
+
+  it("flags a suggestedUrl that doesn't actually resolve, without dropping the judgment", async () => {
+    await withTestServer(
+      (req, res) => {
+        res.writeHead(404);
+        res.end();
+      },
+      async (baseUrl) => {
+        const stubRunner: FreeformSessionRunner = {
+          async runFreeformSession(input) {
+            return {
+              sessionId: input.sessionId,
+              summary: `{"matchedCandidateIndex": null, "confidence": "medium", "reason": "found via search", "suggestedUrl": "${baseUrl}/does-not-exist.safetensors"}`
+            };
+          }
+        };
+        const result = await judgeFuzzyMatch({
+          requestedName: "x.safetensors",
+          candidates: [],
+          runner: stubRunner,
+          cwd: "/tmp",
+          sessionId: "s"
+        });
+        expect(result?.confidence).toBe("medium");
+        expect(result?.urlVerified).toBe(false);
+        expect(result?.urlVerifiedDetail).toBe("HTTP 404");
+      }
+    );
+  });
+});
+
+describe("verifyUrlReachable", () => {
+  it("reports reachable:true for a 200 response", async () => {
+    await withTestServer(
+      (req, res) => {
+        res.writeHead(200);
+        res.end();
+      },
+      async (baseUrl) => {
+        const result = await verifyUrlReachable(`${baseUrl}/ok`);
+        expect(result.reachable).toBe(true);
+        expect(result.detail).toBe("HTTP 200");
+      }
+    );
+  });
+
+  it("reports reachable:false for a 404 response", async () => {
+    await withTestServer(
+      (req, res) => {
+        res.writeHead(404);
+        res.end();
+      },
+      async (baseUrl) => {
+        const result = await verifyUrlReachable(`${baseUrl}/missing`);
+        expect(result.reachable).toBe(false);
+        expect(result.detail).toBe("HTTP 404");
+      }
+    );
+  });
+
+  it("follows a redirect and reports the final status", async () => {
+    await withTestServer(
+      (req, res) => {
+        if (req.url === "/redirect") {
+          res.writeHead(302, { Location: "/final" });
+          res.end();
+          return;
+        }
+        res.writeHead(200);
+        res.end();
+      },
+      async (baseUrl) => {
+        const result = await verifyUrlReachable(`${baseUrl}/redirect`);
+        expect(result.reachable).toBe(true);
+        expect(result.detail).toBe("HTTP 200");
+      }
+    );
+  });
+
+  it("reports reachable:false when the connection is refused", async () => {
+    // Nothing listens on this port (server created and immediately closed).
+    const server = http.createServer();
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("Unexpected test server address");
+    const port = address.port;
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+
+    const result = await verifyUrlReachable(`http://127.0.0.1:${port}/unreachable`);
+    expect(result.reachable).toBe(false);
+  });
+
+  it("rejects a non-http(s) value without spawning curl", async () => {
+    const result = await verifyUrlReachable("not-a-url");
+    expect(result.reachable).toBe(false);
+    expect(result.detail).toContain("not an http(s) URL");
   });
 });

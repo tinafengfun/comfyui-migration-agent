@@ -138,6 +138,23 @@ export function useApi() {
     return data.subJob;
   }, []);
 
+  const downloadSuggestedSource = useCallback(
+    async (taskId: string, stepId: string, assetName: string, url: string): Promise<SubJob> => {
+      const res = await fetch(
+        `/api/tasks/${taskId}/steps/${encodeURIComponent(stepId)}/assets/${encodeURIComponent(assetName)}/download-suggested-source`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ url })
+        }
+      );
+      if (!res.ok) throw new Error(await res.text());
+      const data = await res.json();
+      return data.subJob;
+    },
+    []
+  );
+
   const fetchProgressNarrative = useCallback(async (taskId: string): Promise<ProgressNarrative | undefined> => {
     const res = await fetch(`/api/tasks/${taskId}/progress`);
     if (!res.ok) return undefined;
@@ -298,7 +315,7 @@ export function useApi() {
     fetchSteps, fetchTasks, createTask, deleteTask,
     runUntilGate, runStep, resumeStep, rerunStep, hardStop,
     answerQuestion, uploadMedia, fetchArtifacts, fetchArtifactContent,
-    fetchDecisions, fetchSubJobs, startSubJob, fetchProgressNarrative,
+    fetchDecisions, fetchSubJobs, startSubJob, downloadSuggestedSource, fetchProgressNarrative,
     fetchHealth, runPreflight, generateRunReport, fetchGateSignal, fetchGpuNodes,
     createGpuNode, updateGpuNode, deleteGpuNode, verifyGpuNode, syncGpuNodeDockerImage
   };

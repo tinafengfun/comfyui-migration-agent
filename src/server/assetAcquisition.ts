@@ -799,7 +799,7 @@ async function ensureCustomNodeSource(input: {
     targetPath?: string;
   }) => Promise<SearchResult>;
 }): Promise<CustomNodeJobItem> {
-  const existing = await firstExistingCustomNodePath(input.customNode.evidence, input.workspacePath, input.comfyuiRoot);
+  const existing = await firstExistingCustomNodePath(input.customNode, input.workspacePath, input.comfyuiRoot);
   if (existing) {
     return {
       packageHint: input.customNode.packageHint,
@@ -884,12 +884,31 @@ async function ensureCustomNodeSource(input: {
   };
 }
 
+/**
+ * Real bug this closes: `evidence` (the "Installed/source evidence" column
+ * in 01-custom-nodes.md) is often prose written by the SDK agent, e.g.
+ * "package hint from workflow only" -- not a real filesystem path. That
+ * string doesn't start with "custom_nodes/"/"cache/"/"/", so
+ * customNodeEvidencePaths() returns [] and this check always missed an
+ * already-installed package, falling through to a doomed `git clone` into a
+ * directory that already exists (confirmed live: rgthree-comfy, genuinely
+ * symlinked into custom_nodes/ from the shared NFS tree, still got a
+ * spurious "clone failed" human gate). Always also try the conventional
+ * <comfyuiRoot>/custom_nodes/<packageHint-derived-name> path (same one
+ * customNodeTargetPath already computes for the clone destination) so an
+ * already-present package is recognized regardless of what the evidence
+ * string happens to say.
+ */
 async function firstExistingCustomNodePath(
-  evidence: string,
+  customNode: CustomNodeRow,
   workspacePath: string,
   comfyuiRoot: string
 ): Promise<string | undefined> {
-  for (const candidate of customNodeEvidencePaths(evidence, workspacePath, comfyuiRoot)) {
+  const candidates = [
+    ...customNodeEvidencePaths(customNode.evidence, workspacePath, comfyuiRoot),
+    customNodeTargetPath(customNode, workspacePath, comfyuiRoot)
+  ];
+  for (const candidate of candidates) {
     const stat = await fs.stat(candidate).catch((error) => {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
       throw error;

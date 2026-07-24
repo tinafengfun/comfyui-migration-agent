@@ -1067,6 +1067,33 @@ function AgentActivity({ activities, isRunning }: { activities: ActivityLine[]; 
 type GateSignalItem = { name: string; kind: string; action: string };
 type ItemStatus = "pending" | "uploading" | "resolved" | "failed";
 
+// Mirrors (a subset of) src/server/assetFuzzyMatch.ts's FuzzyJudgment shape,
+// as written into <task>/artifacts/01-acquisition-job.json's
+// unresolvedItems[].fuzzyJudgment. Duck-typed here since client code can't
+// import the server-only module directly.
+type FuzzyJudgmentInfo = {
+  confidence: "high" | "medium" | "low" | "none";
+  reason: string;
+  suggestedUrl?: string;
+  urlVerified?: boolean;
+  urlVerifiedDetail?: string;
+};
+
+function parseFuzzyJudgments(raw: string): Record<string, FuzzyJudgmentInfo> {
+  const result: Record<string, FuzzyJudgmentInfo> = {};
+  try {
+    const parsed = JSON.parse(raw) as { unresolvedItems?: Array<{ assetName?: string; fuzzyJudgment?: FuzzyJudgmentInfo }> };
+    for (const item of parsed.unresolvedItems ?? []) {
+      if (item.assetName && item.fuzzyJudgment) {
+        result[item.assetName] = item.fuzzyJudgment;
+      }
+    }
+  } catch {
+    // Older/malformed acquisition job files just mean no recommendations to show.
+  }
+  return result;
+}
+
 function basename(p: string): string {
   const norm = p.replace(/\\/g, "/");
   const parts = norm.split("/");
@@ -1096,6 +1123,8 @@ function AssetUploadPanel({ event, taskId, api, onAnswer, onResolved }: {
   const [progressMap, setProgressMap] = useState<Record<string, number>>({});
   const [unmatched, setUnmatched] = useState<Array<{ file: File; targetItem?: GateSignalItem }>>([]);
   const [bulkMsg, setBulkMsg] = useState<string>("");
+  const [freeformText, setFreeformText] = useState<string>("");
+  const [fuzzyJudgments, setFuzzyJudgments] = useState<Record<string, FuzzyJudgmentInfo>>({});
   const multiInputRef = useRef<HTMLInputElement>(null);
   const perItemInputRef = useRef<HTMLInputElement>(null);
   const [perItemTarget, setPerItemTarget] = useState<string>("");
@@ -1116,19 +1145,80 @@ function AssetUploadPanel({ event, taskId, api, onAnswer, onResolved }: {
     return signal;
   }, [api, taskId, stepId]);
 
+  // Step 01's own recommended-source research (fuzzyJudgment per asset),
+  // already written to disk but otherwise invisible in the web UI — see
+  // src/server/assetFuzzyMatch.ts. Best-effort: absent/malformed on older
+  // tasks just means no recommendation to show, never an error.
+  const refreshFuzzyJudgments = useCallback(async () => {
+    try {
+      const raw = await api.fetchArtifactContent(taskId, `artifacts/${stepId}-acquisition-job.json`);
+      setFuzzyJudgments(parseFuzzyJudgments(raw));
+    } catch {
+      setFuzzyJudgments({});
+    }
+  }, [api, taskId, stepId]);
+
   useEffect(() => {
     void refreshItems();
-  }, [refreshItems]);
+    void refreshFuzzyJudgments();
+  }, [refreshItems, refreshFuzzyJudgments]);
+
+  // Poll a just-started suggested-source download until it reaches a
+  // terminal state. This panel doesn't otherwise receive sub-job progress
+  // (unlike the separate Sub-jobs tab), so it polls locally rather than
+  // waiting on the app's broader SSE-driven refresh.
+  async function useSuggestedSource(itemName: string, url: string) {
+    setStatusMap((m) => ({ ...m, [itemName]: "uploading" }));
+    setErrorMap((m) => ({ ...m, [itemName]: "" }));
+    try {
+      let subJob = await api.downloadSuggestedSource(taskId, stepId, itemName, url);
+      const isTerminal = (status: string) => ["completed", "waiting_for_human", "blocked", "failed"].includes(status);
+      while (!isTerminal(subJob.status)) {
+        if (subJob.progress?.percent !== undefined) {
+          setProgressMap((m) => ({ ...m, [itemName]: Math.round(subJob.progress!.percent!) }));
+        }
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+        const jobs = await api.fetchSubJobs(taskId);
+        const match = jobs.find((j) => j.assetName === itemName && j.type === "download");
+        if (!match) break;
+        subJob = match;
+      }
+      if (subJob.status === "completed") {
+        setStatusMap((m) => ({ ...m, [itemName]: "resolved" }));
+        await refreshItems();
+      } else {
+        setStatusMap((m) => ({ ...m, [itemName]: "failed" }));
+        setErrorMap((m) => ({ ...m, [itemName]: subJob.error ?? `Download did not complete (status: ${subJob.status})` }));
+      }
+    } catch (err) {
+      setStatusMap((m) => ({ ...m, [itemName]: "failed" }));
+      setErrorMap((m) => ({ ...m, [itemName]: err instanceof Error ? err.message : String(err) }));
+    } finally {
+      setProgressMap((m) => {
+        const next = { ...m };
+        delete next[itemName];
+        return next;
+      });
+    }
+  }
 
   const resolvedCount = Object.values(statusMap).filter((s) => s === "resolved").length;
   const totalCount = items.length || Object.keys(statusMap).length;
   const allResolved = totalCount > 0 && resolvedCount === totalCount;
 
-  // Auto-advance when all resolved
+  // Auto-advance when all resolved. Different gate wordings use different
+  // phrasing for the "proceed" choice ("...and continue" vs "Provide exact
+  // local staged files for unresolved assets" with no literal word
+  // "continue" at all) — match progressively looser patterns rather than
+  // relying on one exact word, so a wording change doesn't silently leave
+  // the panel stuck showing everything resolved with no way to advance.
   useEffect(() => {
     if (!allResolved) return;
     const choices = (event.data as any)?.choices as string[] | undefined;
-    const continueChoice = choices?.find((c) => /continue/i.test(c));
+    const continueChoice =
+      choices?.find((c) => /continue/i.test(c) && !/stop/i.test(c)) ??
+      choices?.find((c) => /provide/i.test(c) && !/stop/i.test(c)) ??
+      choices?.find((c) => !/stop/i.test(c));
     if (continueChoice) {
       onAnswer(event, continueChoice, false);
     }
@@ -1229,26 +1319,52 @@ function AssetUploadPanel({ event, taskId, api, onAnswer, onResolved }: {
       <div className="asset-item-list">
         {items.map((item) => {
           const status = statusMap[item.name] ?? "pending";
+          const suggestion = fuzzyJudgments[item.name];
           return (
-            <div key={item.name} className={`asset-item-row ${status}`}>
-              <span className="asset-item-status-icon">
-                {status === "resolved" ? "✅" : status === "uploading" ? "⏳" : status === "failed" ? "❌" : "⬜"}
-              </span>
-              <div className="asset-item-info">
-                <span className="asset-item-name">{basename(item.name)}</span>
-                <span className="asset-item-kind">
-                  {status === "uploading" && progressMap[item.name] !== undefined
-                    ? `uploading… ${progressMap[item.name]}%`
-                    : item.kind}
+            <div key={item.name} className="asset-item">
+              <div className={`asset-item-row ${status}`}>
+                <span className="asset-item-status-icon">
+                  {status === "resolved" ? "✅" : status === "uploading" ? "⏳" : status === "failed" ? "❌" : "⬜"}
                 </span>
+                <div className="asset-item-info">
+                  <span className="asset-item-name">{basename(item.name)}</span>
+                  <span className="asset-item-kind">
+                    {status === "uploading" && progressMap[item.name] !== undefined
+                      ? `uploading… ${progressMap[item.name]}%`
+                      : item.kind}
+                  </span>
+                </div>
+                {status !== "resolved" && status !== "uploading" && (
+                  <button className="btn btn-sm" onClick={() => handlePerItemClick(item.name)}>
+                    Upload
+                  </button>
+                )}
+                {errorMap[item.name] && (
+                  <span className="asset-item-error">{errorMap[item.name]}</span>
+                )}
               </div>
-              {status !== "resolved" && status !== "uploading" && (
-                <button className="btn btn-sm" onClick={() => handlePerItemClick(item.name)}>
-                  Upload
-                </button>
-              )}
-              {errorMap[item.name] && (
-                <span className="asset-item-error">{errorMap[item.name]}</span>
+              {suggestion?.suggestedUrl && status !== "resolved" && status !== "uploading" && (
+                <div className={`asset-item-suggestion confidence-${suggestion.confidence}`}>
+                  <span className={`asset-confidence-badge confidence-${suggestion.confidence}`}>
+                    {suggestion.confidence} confidence
+                  </span>
+                  <span className="asset-suggestion-reason">{suggestion.reason}</span>
+                  <a href={suggestion.suggestedUrl} target="_blank" rel="noreferrer" className="asset-suggestion-link">
+                    {suggestion.suggestedUrl}
+                  </a>
+                  {suggestion.urlVerified === true && (
+                    <span className="asset-url-verified ok">✓ verified reachable ({suggestion.urlVerifiedDetail})</span>
+                  )}
+                  {suggestion.urlVerified === false && (
+                    <span className="asset-url-verified fail">✗ could not verify ({suggestion.urlVerifiedDetail}) — treat with caution</span>
+                  )}
+                  {suggestion.urlVerified === undefined && (
+                    <span className="asset-url-verified unknown">not checked for reachability</span>
+                  )}
+                  <button className="btn btn-sm btn-primary" onClick={() => void useSuggestedSource(item.name, suggestion.suggestedUrl!)}>
+                    Use this source
+                  </button>
+                </div>
               )}
             </div>
           );
@@ -1320,6 +1436,30 @@ function AssetUploadPanel({ event, taskId, api, onAnswer, onResolved }: {
           </button>
         ))}
       </div>
+
+      {/* Freeform answer — e.g. naming a specific download source/URL for the
+          agent to fetch, instead of only uploading a file you already have
+          locally or picking one of the generic preset choices above. */}
+      {(event.data as HumanQuestion | undefined)?.allowFreeform !== false && (
+        <div className="freeform-row">
+          <textarea
+            rows={3}
+            placeholder="Or type a custom answer (e.g. name a specific download source/URL for the agent to fetch)..."
+            value={freeformText}
+            onChange={(e) => setFreeformText(e.currentTarget.value)}
+          />
+          <button
+            className="btn"
+            disabled={!freeformText.trim()}
+            onClick={() => {
+              onAnswer(event, freeformText, true);
+              setFreeformText("");
+            }}
+          >
+            Send
+          </button>
+        </div>
+      )}
     </div>
   );
 }

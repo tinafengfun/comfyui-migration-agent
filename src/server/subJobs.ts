@@ -6,6 +6,7 @@ import path from "node:path";
 import type { SubJob, SubJobProgress, SubJobStatus } from "../shared/types";
 import type { MigrationTask } from "../shared/types";
 import { isAssetDownloadEnabled, sourceProviderEnv } from "./assetSourceProviders";
+import { markAssetResolvedAndReevaluateGate } from "./assetReplacement";
 
 interface AcquisitionCandidate {
   provider: string;
@@ -44,6 +45,7 @@ interface ActiveDownload {
   subJobId: string;
   taskId: string;
   stepId: string;
+  artifactPath: string;
   title: string;
   assetName: string;
   provider: string;
@@ -114,11 +116,7 @@ export class SubJobManager {
   }
 
   async startSubJob(task: MigrationTask, subJobId: string): Promise<SubJob> {
-    if (!isAssetDownloadEnabled()) {
-      throw new Error(
-        "Download execution is disabled. Set ASSET_ACQUISITION_ENABLE_DOWNLOAD=1 or use MIGRATION_AGENT_DOWNLOAD_PROFILE=demo to start download sub-jobs."
-      );
-    }
+    this.assertDownloadEnabled();
     const acquisition = await readAcquisitionJob(task);
     if (!acquisition) throw new Error("No acquisition job exists for this task.");
     const item = (acquisition.items ?? []).find((entry) => subJobIdForAsset(entry.assetName) === subJobId);
@@ -127,6 +125,51 @@ export class SubJobManager {
     if (!candidates.length) {
       throw new Error(`Sub-job has no executable download command: ${subJobId}`);
     }
+    return this.startDownload(task, subJobId, item, candidates);
+  }
+
+  /**
+   * Downloads a human-approved URL that didn't come from the structured
+   * provider search — specifically, Step 01's own LLM fuzzy-match judgment
+   * (fuzzyJudgment.suggestedUrl in 01-acquisition-job.json), surfaced in the
+   * web UI's missing-asset panel and confirmed by a person clicking "Use
+   * this source". Builds one synthetic candidate with the same curl
+   * download-command shape the provider-search path already produces (see
+   * withDownloadCommand in assetSourceProviders.ts) so it runs through the
+   * exact same execution/progress/validation logic as any other sub-job —
+   * no duplicated download machinery, only the URL->candidate wrapping is new.
+   */
+  async startSubJobForSuggestedUrl(task: MigrationTask, assetName: string, url: string): Promise<SubJob> {
+    this.assertDownloadEnabled();
+    if (!/^https?:\/\//i.test(url)) throw new Error(`Not an http(s) URL: ${url}`);
+    const acquisition = await readAcquisitionJob(task);
+    if (!acquisition) throw new Error("No acquisition job exists for this task.");
+    const item = (acquisition.items ?? []).find((entry) => entry.assetName === assetName);
+    if (!item) throw new Error(`No acquisition item found for asset: ${assetName}`);
+    if (!item.targetPath) throw new Error(`No target path recorded for asset: ${assetName}`);
+    const candidate: AcquisitionCandidate = {
+      provider: "suggested-url",
+      title: `Human-approved suggested source for ${assetName}`,
+      url,
+      downloadCommand: buildSuggestedUrlDownloadCommand(url, item.targetPath)
+    };
+    return this.startDownload(task, subJobIdForAsset(assetName), item, [candidate]);
+  }
+
+  private assertDownloadEnabled(): void {
+    if (!isAssetDownloadEnabled()) {
+      throw new Error(
+        "Download execution is disabled. Set ASSET_ACQUISITION_ENABLE_DOWNLOAD=1 or use MIGRATION_AGENT_DOWNLOAD_PROFILE=demo to start download sub-jobs."
+      );
+    }
+  }
+
+  private async startDownload(
+    task: MigrationTask,
+    subJobId: string,
+    item: AcquisitionItem,
+    candidates: AcquisitionCandidate[]
+  ): Promise<SubJob> {
     if (!item.targetPath) throw new Error(`Sub-job has no target path: ${subJobId}`);
     if (this.active.get(subJobId)?.status === "running") {
       return this.subJobFromActive(this.active.get(subJobId)!);
@@ -139,6 +182,7 @@ export class SubJobManager {
       subJobId,
       taskId: task.id,
       stepId: "01",
+      artifactPath: task.artifactPath,
       title: `Download ${item.assetName}`,
       assetName: item.assetName,
       provider: candidates[0].provider,
@@ -204,6 +248,19 @@ export class SubJobManager {
           active.updatedAt = active.completedAt;
           active.error = undefined;
           active.process = undefined;
+          // Real bug fixed here: a completed download used to just sit on
+          // disk without ever updating 01-assets.csv/the gate-signal file,
+          // so Step 01's own gate kept treating it as an open gap even
+          // though the file was already there. Best-effort: a failure here
+          // must not un-complete a download that genuinely succeeded.
+          await markAssetResolvedAndReevaluateGate({
+            artifactPath: active.artifactPath,
+            assetName: active.assetName,
+            stagedPath: active.targetPath,
+            stepId: active.stepId
+          }).catch((error) => {
+            console.warn(`[subJobs] failed to update ledger/gate-signal after download completion: ${error instanceof Error ? error.message : error}`);
+          });
           return;
         }
         active.attemptErrors.push(`${candidate.provider}:${candidate.title} failed validation: ${validationError}`);
@@ -344,13 +401,83 @@ async function contentLengthFromCurl(args: string[], env: NodeJS.ProcessEnv): Pr
   });
 }
 
+/**
+ * Same curl flag shape as withDownloadCommand in assetSourceProviders.ts
+ * (retry/timeout/resume behavior), minus the provider-specific auth headers
+ * (a human-approved suggested URL isn't tied to a specific provider search
+ * result) and the --proxy/--insecure flags (curl already honors HTTPS_PROXY/
+ * HTTP_PROXY from the inherited env without an explicit flag; this deployment
+ * doesn't rely on the distinct ASSET_DOWNLOAD_PROXY name that flag exists for).
+ */
+function buildSuggestedUrlDownloadCommand(url: string, targetPath: string): string[] {
+  return [
+    "curl",
+    "-L",
+    "--fail",
+    "--retry",
+    "10",
+    "--retry-delay",
+    "10",
+    "--connect-timeout",
+    "30",
+    "--speed-time",
+    "180",
+    "--speed-limit",
+    "1024",
+    "--continue-at",
+    "-",
+    "--output",
+    targetPath,
+    url
+  ];
+}
+
 function substituteEnvPlaceholders(value: string, env: NodeJS.ProcessEnv): string {
   return value.replace(/\$\{([A-Z0-9_]+)\}/g, (_match, name: string) => env[name] ?? "");
+}
+
+// Extensions a real model/media download should never actually be plain
+// text/HTML -- used to catch a "soft 404" (proxy/CDN/mirror returns HTTP 200
+// with an HTML error/landing page body instead of a real 404 status).
+// Real incident this closes: a suggested-source URL from Step 01's own LLM
+// fuzzy-match judgment pointed at a dead HuggingFace repo; curl -L --fail
+// followed the redirect to HuggingFace's own generic HTML page, which still
+// returns 200, so the download "succeeded" and got marked resolved with an
+// HTML document sitting where a 10GB safetensors file was expected -- caught
+// only later, by chance, when Step 02's feasibility analysis opened the file.
+const BINARY_ASSET_EXTENSIONS = new Set([
+  "safetensors", "ckpt", "pt", "pth", "onnx", "gguf", "bin",
+  "png", "jpg", "jpeg", "webp", "gif", "bmp", "tiff", "tif",
+  "mp4", "mov", "webm", "avi", "mkv",
+  "mp3", "wav", "ogg", "flac"
+]);
+const TEXT_MASQUERADE_MARKERS = [/^\s*<!doctype html/i, /^\s*<html/i, /^\s*<\?xml/i];
+
+async function sniffTextMasqueradingAsBinary(filePath: string): Promise<string | undefined> {
+  const ext = path.extname(filePath).toLowerCase().replace(/^\./, "");
+  if (!BINARY_ASSET_EXTENSIONS.has(ext)) return undefined;
+  const handle = await fs.open(filePath, "r");
+  try {
+    const buf = Buffer.alloc(512);
+    const { bytesRead } = await handle.read(buf, 0, 512, 0);
+    const head = buf.subarray(0, bytesRead).toString("utf8");
+    if (TEXT_MASQUERADE_MARKERS.some((re) => re.test(head))) {
+      return `downloaded content looks like an HTML page, not a .${ext} file (starts with: ${head.slice(0, 80).replace(/\s+/g, " ").trim()}...)`;
+    }
+  } catch {
+    // Binary content that isn't valid UTF-8 will throw or produce replacement
+    // characters, not match the HTML markers above -- either way, not text.
+  } finally {
+    await handle.close();
+  }
+  return undefined;
 }
 
 async function validateDownloadedFile(filePath: string, candidate: AcquisitionCandidate): Promise<string | undefined> {
   const size = await fileSize(filePath);
   if (!size) return "target file is missing or empty";
+  const textMasqueradeIssue = await sniffTextMasqueradingAsBinary(filePath);
+  if (textMasqueradeIssue) return textMasqueradeIssue;
   if (candidate.sizeBytes !== undefined && candidate.sizeBytes !== size) {
     return `size mismatch: expected ${candidate.sizeBytes}, got ${size}`;
   }

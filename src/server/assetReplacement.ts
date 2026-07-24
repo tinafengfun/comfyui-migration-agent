@@ -251,6 +251,30 @@ async function reevaluateGate(
   return { resolved: false, remainingGaps: remaining.length };
 }
 
+/**
+ * Marks a resolved asset in 01-assets.csv and re-evaluates the gate-signal
+ * file, exactly as processUploadedReplacement does for a manual browser
+ * upload (steps 3-4 there) — but standalone, for callers that already have
+ * the file staged on disk some other way (e.g. subJobs.ts's download
+ * completion) and only need the ledger/gate side effects, not the
+ * upload-specific file-placement/multer-temp-file handling.
+ *
+ * Real bug this closes: a successful sub-job download previously left the
+ * file on disk but never touched 01-assets.csv/the gate-signal file, so
+ * Step 01's own gate kept re-asking for a file that was already there —
+ * the web UI showed the item as resolved (optimistic client state) while
+ * the server still considered it an open gap.
+ */
+export async function markAssetResolvedAndReevaluateGate(input: {
+  artifactPath: string;
+  assetName: string;
+  stagedPath: string;
+  stepId?: string;
+}): Promise<{ resolved: boolean; remainingGaps: number }> {
+  await updateAssetCsv(input.artifactPath, input.assetName, input.stagedPath);
+  return reevaluateGate(input.artifactPath, input.stepId ?? "01");
+}
+
 // ── Main Export ──
 
 export interface UploadReplacementResult {

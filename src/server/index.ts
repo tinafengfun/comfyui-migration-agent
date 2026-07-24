@@ -680,6 +680,35 @@ app.post("/api/tasks/:taskId/subjobs/:subJobId/start", async (req, res, next) =>
   }
 });
 
+// Downloads a human-approved URL from Step 01's own fuzzyJudgment.suggestedUrl
+// (surfaced in the web UI's missing-asset panel) — distinct from the
+// structured-provider-search sub-job start above, since this URL never went
+// through withDownloadCommand's candidate pipeline. Still gated by the same
+// ASSET_ACQUISITION_ENABLE_DOWNLOAD/MIGRATION_AGENT_DOWNLOAD_PROFILE check.
+app.post("/api/tasks/:taskId/steps/:stepId/assets/:assetName/download-suggested-source", async (req, res, next) => {
+  try {
+    const task = await store.getTask(req.params.taskId);
+    if (!task) {
+      res.status(404).json({ error: "Task not found" });
+      return;
+    }
+    const body = req.body as { url?: string };
+    if (!body.url) {
+      res.status(400).json({ error: "url is required" });
+      return;
+    }
+    const subJob = await subJobs.startSubJobForSuggestedUrl(task, req.params.assetName, body.url);
+    res.status(202).json({ subJob });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (message.includes("disabled")) {
+      res.status(409).json({ error: message });
+      return;
+    }
+    next(error);
+  }
+});
+
 app.get("/api/tasks/:taskId/artifacts/content", async (req, res, next) => {
   try {
     const task = await store.getTask(req.params.taskId);

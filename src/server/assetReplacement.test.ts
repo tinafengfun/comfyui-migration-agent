@@ -1,13 +1,21 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtemp, rm, readFile, writeFile, stat } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, readFile, writeFile, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { MigrationTask } from "../shared/types";
 import {
   processUploadedReplacement,
+  markAssetResolvedAndReevaluateGate,
   FileValidationError,
   MAX_FILE_SIZE_BYTES
 } from "./assetReplacement";
+
+const CSV_HEADER =
+  "asset_name,requested_name,resolved_path,source,state,staged_path,custom_node_repo,custom_node_cache_path,wrapper_source_evidence,commit,install_status,acquisition_status,mirror_used,credential_recorded,gap";
+
+function csvRow(assetName: string, gap = "not staged"): string {
+  return `"${assetName}","${assetName}","","","source unknown","","","","","","missing","unresolved","none","false","${gap}"`;
+}
 
 let root: string;
 let uploadSourceDir: string;
@@ -133,5 +141,72 @@ describe("processUploadedReplacement", () => {
     });
 
     expect(result.uploaded).toBe(true);
+  });
+});
+
+describe("markAssetResolvedAndReevaluateGate", () => {
+  // Regression coverage for a real bug: a sub-job download that lands a file
+  // on disk (via curl, not the browser-upload path) never touched
+  // 01-assets.csv/the gate-signal file, so Step 01's own gate kept treating
+  // an already-downloaded asset as an open gap. This function is what
+  // subJobs.ts now calls on download completion to close that gap the same
+  // way a manual upload always has.
+  it("updates the CSV row and deletes the gate-signal file when it was the only remaining item", async () => {
+    const artifactPath = path.join(root, "artifacts");
+    await mkdir(artifactPath, { recursive: true });
+    await writeFile(
+      path.join(artifactPath, "01-assets.csv"),
+      `${CSV_HEADER}\n${csvRow("model.safetensors")}\n`,
+      "utf8"
+    );
+    await writeFile(
+      path.join(artifactPath, "01-gate-signal.json"),
+      JSON.stringify({ items: [{ name: "model.safetensors", kind: "model asset", action: "provide" }] }, null, 2),
+      "utf8"
+    );
+
+    const result = await markAssetResolvedAndReevaluateGate({
+      artifactPath,
+      assetName: "model.safetensors",
+      stagedPath: "/nfs_share/diffusion_models/model.safetensors"
+    });
+
+    expect(result).toEqual({ resolved: true, remainingGaps: 0 });
+    const csv = await readFile(path.join(artifactPath, "01-assets.csv"), "utf8");
+    expect(csv).toContain("human_provided");
+    expect(csv).toContain("/nfs_share/diffusion_models/model.safetensors");
+    expect(csv).toContain(",present,complete,");
+    await expect(readFile(path.join(artifactPath, "01-gate-signal.json"), "utf8")).rejects.toThrow();
+  });
+
+  it("keeps the gate-signal file listing only the still-unresolved items when others remain", async () => {
+    const artifactPath = path.join(root, "artifacts");
+    await mkdir(artifactPath, { recursive: true });
+    await writeFile(
+      path.join(artifactPath, "01-assets.csv"),
+      `${CSV_HEADER}\n${csvRow("model-a.safetensors")}\n${csvRow("model-b.safetensors")}\n`,
+      "utf8"
+    );
+    await writeFile(
+      path.join(artifactPath, "01-gate-signal.json"),
+      JSON.stringify({
+        items: [
+          { name: "model-a.safetensors", kind: "model asset", action: "provide" },
+          { name: "model-b.safetensors", kind: "model asset", action: "provide" }
+        ]
+      }, null, 2),
+      "utf8"
+    );
+
+    const result = await markAssetResolvedAndReevaluateGate({
+      artifactPath,
+      assetName: "model-a.safetensors",
+      stagedPath: "/nfs_share/diffusion_models/model-a.safetensors"
+    });
+
+    expect(result).toEqual({ resolved: false, remainingGaps: 1 });
+    const gateSignal = JSON.parse(await readFile(path.join(artifactPath, "01-gate-signal.json"), "utf8"));
+    expect(gateSignal.items).toHaveLength(1);
+    expect(gateSignal.items[0].name).toBe("model-b.safetensors");
   });
 });

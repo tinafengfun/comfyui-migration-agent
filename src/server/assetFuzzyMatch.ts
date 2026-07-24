@@ -24,6 +24,7 @@
  * matching the "the human always explicitly picks" rule already in place
  * for every other gate in this project.
  */
+import { spawn } from "node:child_process";
 import type { AssetSourceCandidate } from "./assetSourceProviders";
 
 export type FuzzyMatchConfidence = "high" | "medium" | "low" | "none";
@@ -33,6 +34,16 @@ export interface FuzzyJudgment {
   confidence: FuzzyMatchConfidence;
   reason: string;
   suggestedUrl?: string;
+  /**
+   * Best-effort live reachability check on suggestedUrl, added after a real
+   * incident: the LLM judgment session has real web_search/web_fetch tools
+   * (see module docstring) but its final answer can still be wrong -- one
+   * suggestedUrl pointed at a HuggingFace repo that doesn't appear to exist
+   * at all. Undefined (not false) means the check itself didn't run or
+   * couldn't complete -- never treat "unverified" as "confirmed bad."
+   */
+  urlVerified?: boolean;
+  urlVerifiedDetail?: string;
 }
 
 export interface FreeformSessionRunner {
@@ -119,6 +130,49 @@ export function parseFuzzyJudgmentResponse(
 }
 
 /**
+ * Live HEAD-style reachability check for a suggestedUrl, modeled on
+ * subJobs.ts's contentLengthFromCurl (same curl invocation shape, honors the
+ * same proxy env vars). Best-effort: any failure (timeout, DNS, network)
+ * resolves reachable:false with a short detail string -- never throws, so a
+ * flaky check can't fail the whole fuzzy-match step.
+ */
+export async function verifyUrlReachable(
+  url: string,
+  env: NodeJS.ProcessEnv = process.env
+): Promise<{ reachable: boolean; detail: string }> {
+  if (!url.startsWith("http")) {
+    return { reachable: false, detail: `not an http(s) URL: ${url}` };
+  }
+  return new Promise((resolve) => {
+    const head = spawn("curl", ["-I", "-L", "--silent", "--max-time", "15", url], {
+      env,
+      stdio: ["ignore", "pipe", "ignore"]
+    });
+    let output = "";
+    head.stdout.on("data", (chunk: Buffer) => {
+      output += chunk.toString("utf8");
+    });
+    head.on("error", (error) => {
+      resolve({ reachable: false, detail: `curl failed to start: ${error.message}` });
+    });
+    head.on("close", (code) => {
+      // -L follows redirects; the LAST status line reflects the final hop.
+      const statusLines = [...output.matchAll(/^HTTP\/\d(?:\.\d)?\s+(\d{3})/gim)];
+      const lastStatus = statusLines.at(-1)?.[1];
+      if (!lastStatus) {
+        resolve({ reachable: false, detail: code === 0 ? "no HTTP status line in response" : `curl exited ${code}` });
+        return;
+      }
+      const statusNum = Number(lastStatus);
+      resolve({
+        reachable: statusNum >= 200 && statusNum < 400,
+        detail: `HTTP ${lastStatus}`
+      });
+    });
+  });
+}
+
+/**
  * Only worth calling for the genuinely ambiguous case: structured search
  * found something but not an exact filename match. Callers should skip this
  * entirely once an exact match already exists (see isExactDownloadCandidate
@@ -131,6 +185,7 @@ export async function judgeFuzzyMatch(input: {
   cwd: string;
   sessionId: string;
   timeoutMs?: number;
+  env?: NodeJS.ProcessEnv;
 }): Promise<FuzzyJudgment | undefined> {
   const prompt = buildFuzzyJudgmentPrompt({ requestedName: input.requestedName, candidates: input.candidates });
   const result = await input.runner.runFreeformSession({
@@ -140,5 +195,13 @@ export async function judgeFuzzyMatch(input: {
     timeoutMs: input.timeoutMs ?? 10 * 60 * 1000
   });
   if (!result.summary) return undefined;
-  return parseFuzzyJudgmentResponse(result.summary, input.candidates.length);
+  const judgment = parseFuzzyJudgmentResponse(result.summary, input.candidates.length);
+  if (!judgment?.suggestedUrl) return judgment;
+  try {
+    const { reachable, detail } = await verifyUrlReachable(judgment.suggestedUrl, input.env ?? process.env);
+    return { ...judgment, urlVerified: reachable, urlVerifiedDetail: detail };
+  } catch (error) {
+    // Never let a flaky verification check fail the whole judgment.
+    return { ...judgment, urlVerifiedDetail: `verification error: ${error instanceof Error ? error.message : String(error)}` };
+  }
 }
