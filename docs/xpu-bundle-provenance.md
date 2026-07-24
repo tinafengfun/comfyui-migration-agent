@@ -40,7 +40,7 @@ These already existed as independent real directories on `local-xpu` at the exac
 | `ComfyUI-nunchaku-XPU` | `55b6497e` | none | Depends on `nunchaku-torch` + `kernels==0.14.0` (pinned exactly, newer `kernels` versions get pulled in transitively by other packages — reinstalled to the pin after the bulk pass). |
 | `ComfyUI-VideoHelperSuite`, `ComfyUI-Easy-Use` | already present pre-pass | — | Already installed independently before this work; left untouched, Intel's Dockerfile just clones these plain too (no version drift check performed). |
 
-**Explicitly skipped this pass:** `ComfyUI_SGLDiffusion` + its `sglang`/`sgl-kernel-xpu`/`xDiT`/`long-context-attention` dependency stack. Confirmed `intel/llm-scaler-vllm:1.4` does not already ship `sgl-kernel-xpu`/`sglang`/`xfuser` (checked directly). Revisit only if a real migration workflow needs SGLang-based diffusion nodes — it requires a genuine from-source kernel build matching Intel's own Dockerfile recipe.
+**Explicitly skipped this pass:** `ComfyUI_SGLDiffusion` + its `sglang` dependency. Originally also true of `sgl-kernel-xpu`/`xfuser`/`long-context-attention` when the Docker base was `intel/llm-scaler-vllm:1.4` (confirmed absent there) — but the base image is now `intel/llm-scaler-omni:0.1.0-b7`, which genuinely ships working `sgl-kernel-xpu` and a real `/llm/sglang` (see `docs/gpu-node-setup.md`'s Docker-runtime section). `ComfyUI_SGLDiffusion` itself still isn't installed as one of our copied-in packages — revisit adding it as a 24th package now that the underlying compiled stack is confirmed present, rather than treating it as blocked on a from-source kernel build.
 
 ## New this pass — disabled-by-default set
 

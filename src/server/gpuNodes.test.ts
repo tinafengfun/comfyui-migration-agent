@@ -12,6 +12,10 @@ import {
   removeNode,
   saveGpuNodes,
   verifyNode,
+  resolveNfsShareRoot,
+  syncDockerImageFromNfs,
+  syncCustomNodesFromNfs,
+  formatNfsHealthSuffix,
   type GpuNode
 } from "./gpuNodes";
 
@@ -25,6 +29,7 @@ function makeConfig(root: string, gpuNodesPath?: string): AppConfig {
     comfyuiRoot: "/tmp/comfy",
     modelRoots: ["/home/intel/hf_models"],
     gpuNodesPath: gpuNodesPath ?? path.join(root, "gpu-nodes.json"),
+    workflowArchiveRoot: path.join(root, "nfs-workflows"),
     autoApproveAgentPermissions: false
   };
 }
@@ -268,5 +273,161 @@ describe("gpuNodes", () => {
     const block = renderGpuNodeBlock(reg.nodes[0], "task-bare");
     expect(block).toContain("runtime: bare");
     expect(block).not.toContain("docker_image:");
+  });
+
+  describe("resolveNfsShareRoot", () => {
+    it("defaults to /nfs_share for runtime=docker with no explicit setting", () => {
+      const node: GpuNode = {
+        name: "d", kind: "local", comfyui_root: "/x", venv_python: "/x/.venv/bin/python3",
+        model_roots: ["/m"], api_host: "127.0.0.1", api_port: 8188,
+        runtime: "docker", docker_image: "img:tag"
+      };
+      expect(resolveNfsShareRoot(node)).toBe("/nfs_share");
+    });
+
+    it("prefers an explicit nfs_share_root over the docker default", () => {
+      const node: GpuNode = {
+        name: "d", kind: "local", comfyui_root: "/x", venv_python: "/x/.venv/bin/python3",
+        model_roots: ["/m"], api_host: "127.0.0.1", api_port: 8188,
+        runtime: "docker", docker_image: "img:tag", nfs_share_root: "/custom-share"
+      };
+      expect(resolveNfsShareRoot(node)).toBe("/custom-share");
+    });
+
+    it("is undefined for a bare node with no explicit setting", () => {
+      const node: GpuNode = {
+        name: "b", kind: "local", comfyui_root: "/x", venv_python: "/x/.venv/bin/python3",
+        model_roots: ["/m"], api_host: "127.0.0.1", api_port: 8188
+      };
+      expect(resolveNfsShareRoot(node)).toBeUndefined();
+    });
+  });
+
+  describe("formatNfsHealthSuffix (parses the PREFIX:value protocol nfsHealthShellCmd produces)", () => {
+    // Real `mountpoint -q` correctly refuses to call a plain mkdir'd test directory
+    // "mounted" (it isn't a genuine kernel-level mount) — that strictness is the
+    // whole point (catches a silently-unmounted/empty directory masquerading as
+    // the real share), but it also means "simulate a healthy mount" can't be done
+    // with a bare directory in a unit test. Test the pure parsing logic directly
+    // instead of depending on real mount state; the "doesn't exist at all" case
+    // below is still exercised end-to-end since that's genuinely verifiable.
+    it("reports healthy when mounted and all subdirs are present", () => {
+      const detail = formatNfsHealthSuffix("/nfs_share", [
+        "NFS_MOUNT:mounted",
+        "NFS_SUBDIR:custom_nodes:ok",
+        "NFS_SUBDIR:docker-images:ok",
+        "NFS_SUBDIR:venv-container-xpu:ok"
+      ]);
+      expect(detail).toBe("; NFS share /nfs_share healthy");
+    });
+
+    it("reports missing subdirs when mounted but incomplete", () => {
+      const detail = formatNfsHealthSuffix("/nfs_share", [
+        "NFS_MOUNT:mounted",
+        "NFS_SUBDIR:custom_nodes:ok",
+        "NFS_SUBDIR:docker-images:missing",
+        "NFS_SUBDIR:venv-container-xpu:missing"
+      ]);
+      expect(detail).toContain("mounted but missing:");
+      expect(detail).toContain("docker-images");
+      expect(detail).toContain("venv-container-xpu");
+      expect(detail).not.toContain("custom_nodes");
+    });
+
+    it("also accepts the mountpoint-less fallback signal (nonempty)", () => {
+      const detail = formatNfsHealthSuffix("/nfs_share", [
+        "NFS_MOUNT:nonempty",
+        "NFS_SUBDIR:custom_nodes:ok",
+        "NFS_SUBDIR:docker-images:ok",
+        "NFS_SUBDIR:venv-container-xpu:ok"
+      ]);
+      expect(detail).toBe("; NFS share /nfs_share healthy");
+    });
+
+    it("reports not mounted/populated when the mount signal is negative", () => {
+      const detail = formatNfsHealthSuffix("/nfs_share", ["NFS_MOUNT:not_mounted"]);
+      expect(detail).toContain("NOT mounted/populated");
+    });
+  });
+
+  describe("verifyNode NFS share health check", () => {
+    it("reports not mounted/populated when the share root doesn't exist at all", async () => {
+      const node: GpuNode = {
+        name: "d", kind: "local", comfyui_root: "/x", venv_python: "/x/.venv/bin/python3",
+        model_roots: ["/m"], api_host: "127.0.0.1", api_port: 1,
+        runtime: "docker", docker_image: "img:tag", nfs_share_root: "/this/path/does/not/exist-ever"
+      };
+      const result = await verifyNode(node, 2_000);
+      expect(result.detail).toContain("NOT mounted/populated");
+    });
+  });
+
+  describe("syncDockerImageFromNfs", () => {
+    it("runs the local canonical script and returns its trailing output", async () => {
+      const root = path.join(process.cwd(), ".demo-state", "tests", `gn-sync-ok-${Date.now()}`);
+      await fs.mkdir(path.join(root, "scripts"), { recursive: true });
+      await fs.writeFile(
+        path.join(root, "scripts", "load-docker-image-from-nfs.sh"),
+        "#!/usr/bin/env bash\necho \"NFS_DOCKER_IMAGES_ROOT=$NFS_DOCKER_IMAGES_ROOT\"\necho done\n",
+        { mode: 0o755 }
+      );
+      const node: GpuNode = {
+        name: "d", kind: "local", comfyui_root: "/x", venv_python: "/x/.venv/bin/python3",
+        model_roots: ["/m"], api_host: "127.0.0.1", api_port: 8188,
+        runtime: "docker", docker_image: "img:tag", nfs_share_root: "/custom-share"
+      };
+      const result = await syncDockerImageFromNfs(node, { projectRoot: root });
+      expect(result.ok).toBe(true);
+      expect(result.detail).toContain("NFS_DOCKER_IMAGES_ROOT=/custom-share/docker-images");
+      expect(result.detail).toContain("done");
+    });
+
+    it("returns ok:false when the canonical script isn't present", async () => {
+      const root = path.join(process.cwd(), ".demo-state", "tests", `gn-sync-missing-${Date.now()}`);
+      const node: GpuNode = {
+        name: "d", kind: "local", comfyui_root: "/x", venv_python: "/x/.venv/bin/python3",
+        model_roots: ["/m"], api_host: "127.0.0.1", api_port: 8188,
+        runtime: "docker", docker_image: "img:tag"
+      };
+      const result = await syncDockerImageFromNfs(node, { projectRoot: root });
+      expect(result.ok).toBe(false);
+      expect(result.detail).toContain("sync script not found");
+    });
+
+    it("returns ok:false for an ssh-kind node missing its ssh block", async () => {
+      const root = path.join(process.cwd(), ".demo-state", "tests", `gn-sync-nossh-${Date.now()}`);
+      await fs.mkdir(path.join(root, "scripts"), { recursive: true });
+      await fs.writeFile(path.join(root, "scripts", "load-docker-image-from-nfs.sh"), "#!/usr/bin/env bash\necho ok\n", {
+        mode: 0o755
+      });
+      const node: GpuNode = {
+        name: "d", kind: "ssh", comfyui_root: "/x", venv_python: "/x/.venv/bin/python3",
+        model_roots: ["/m"], api_host: "10.0.0.1", api_port: 8188,
+        runtime: "docker", docker_image: "img:tag"
+      };
+      const result = await syncDockerImageFromNfs(node, { projectRoot: root });
+      expect(result.ok).toBe(false);
+      expect(result.detail).toContain("ssh block is missing");
+    });
+  });
+
+  describe("syncCustomNodesFromNfs", () => {
+    it("runs the local canonical script with comfyui_root + custom_nodes path args", async () => {
+      const root = path.join(process.cwd(), ".demo-state", "tests", `gn-sync-cn-${Date.now()}`);
+      await fs.mkdir(path.join(root, "scripts"), { recursive: true });
+      await fs.writeFile(
+        path.join(root, "scripts", "sync-custom-nodes-from-nfs.sh"),
+        "#!/usr/bin/env bash\necho \"args: $1 $2\"\n",
+        { mode: 0o755 }
+      );
+      const node: GpuNode = {
+        name: "d", kind: "local", comfyui_root: "/comfy-root", venv_python: "/x/.venv/bin/python3",
+        model_roots: ["/m"], api_host: "127.0.0.1", api_port: 8188,
+        runtime: "docker", docker_image: "img:tag", nfs_share_root: "/custom-share"
+      };
+      const result = await syncCustomNodesFromNfs(node, { projectRoot: root });
+      expect(result.ok).toBe(true);
+      expect(result.detail).toContain("/comfy-root /custom-share/custom_nodes");
+    });
   });
 });

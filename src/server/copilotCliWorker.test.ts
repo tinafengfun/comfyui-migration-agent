@@ -26,6 +26,7 @@ describe("Copilot CLI worker", () => {
       comfyuiRoot: "/tmp/comfy",
       modelRoots: ["/home/intel/hf_models"],
       gpuNodesPath: path.join(root, "gpu-nodes.json"),
+      workflowArchiveRoot: path.join(root, "nfs-workflows"),
       copilotCliPath: fakeCli,
       autoApproveAgentPermissions: false
     };

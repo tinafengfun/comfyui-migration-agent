@@ -25,6 +25,7 @@ import {
   pickNode,
   removeNode,
   saveGpuNodes,
+  syncDockerImageFromNfs,
   upsertNode,
   verifyNode
 } from "./gpuNodes";
@@ -143,8 +144,14 @@ app.put("/api/gpu-nodes/:name", async (req, res, next) => {
     }
     const node = buildNodeFromRequest(req.body as GpuNodeWriteRequest, config.gpuNodesPath);
     // Two-step: remove old, then upsert new (handles name change cleanly).
+    const wasDefault = registry.default_node === oldName;
     const afterRemove = removeNode(registry, oldName);
-    const updated = upsertNode(afterRemove, node);
+    const upserted = upsertNode(afterRemove, node);
+    // removeNode reassigns default_node away whenever the node being edited
+    // WAS the default (confirmed live: saving an edit to the default node
+    // through the UI silently flipped which node is default). Restore it,
+    // following a rename to the node's new name if the edit renamed it.
+    const updated = wasDefault ? { ...upserted, default_node: node.name } : upserted;
     await saveGpuNodes(config, updated);
     res.json({
       default: updated.default_node,
@@ -198,6 +205,25 @@ app.post("/api/gpu-nodes/verify", async (req, res, next) => {
       return;
     }
     const result: GpuNodeVerifyResult = await verifyNode(nodeToVerify);
+    res.json(result);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/gpu-nodes/:name/sync-docker-image", async (req, res, next) => {
+  try {
+    const registry = loadGpuNodes(config);
+    const node = registry.nodes.find((n) => n.name === req.params.name);
+    if (!node) {
+      res.status(404).json({ error: `Node "${req.params.name}" not found` });
+      return;
+    }
+    if (node.runtime !== "docker") {
+      res.status(400).json({ error: `Node "${node.name}" has runtime !== "docker" — nothing to sync` });
+      return;
+    }
+    const result = await syncDockerImageFromNfs(node, config);
     res.json(result);
   } catch (error) {
     next(error);

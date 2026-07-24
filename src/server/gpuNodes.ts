@@ -55,6 +55,13 @@ export interface GpuNode {
   model_share?: ModelShare;
   runtime?: GpuNodeRuntime;
   docker_image?: string;
+  /**
+   * Root of the shared multi-person NFS tree (custom_nodes/, docker-images/,
+   * venv-container-xpu/, workflows/ — a superset of model_roots). Defaults to
+   * "/nfs_share" when runtime="docker" and this is unset. See
+   * docs/gpu-node-setup.md "Multi-person shared environment".
+   */
+  nfs_share_root?: string;
 }
 
 export interface GpuNodeRegistry {
@@ -131,6 +138,7 @@ export function renderGpuNodeBlock(node: GpuNode, taskId: string): string {
   if (node.model_share) lines.push(`- model_share: ${node.model_share}`);
   lines.push(`- runtime: ${node.runtime ?? "bare"}`);
   if (node.docker_image) lines.push(`- docker_image: ${node.docker_image}`);
+  if (node.nfs_share_root) lines.push(`- nfs_share_root: ${node.nfs_share_root}`);
   if (node.launch_flags?.length) lines.push(`- launch_flags: ${node.launch_flags.join(" ")}`);
   if (node.kind === "ssh" && node.ssh) {
     const port = node.ssh.port ?? 22;
@@ -218,6 +226,8 @@ export async function verifyNode(node: GpuNode, timeoutMs = 10_000): Promise<Gpu
 async function verifyLocal(node: GpuNode, timeoutMs: number): Promise<GpuNodeVerifyResult> {
   const url = `${nodeApiUrl(node)}/system_stats`;
   const dockerSuffix = node.runtime === "docker" ? await checkLocalDockerImage(node) : "";
+  const nfsRoot = resolveNfsShareRoot(node);
+  const nfsSuffix = nfsRoot ? await checkLocalNfsShare(nfsRoot) : "";
   try {
     const { stdout } = await execFileAsync(
       "curl",
@@ -228,26 +238,83 @@ async function verifyLocal(node: GpuNode, timeoutMs: number): Promise<GpuNodeVer
     const hasXpu = Boolean(parsed.system?.xpu ?? parsed.system?.devices?.length);
     return {
       ok: true,
-      detail: `ComfyUI responded at ${url}${hasXpu ? " (XPU device info present)" : ""}${dockerSuffix}`
+      detail: `ComfyUI responded at ${url}${hasXpu ? " (XPU device info present)" : ""}${dockerSuffix}${nfsSuffix}`
     };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     return {
       ok: false,
-      detail: `Could not reach ${url} — ${msg}${dockerSuffix}`
+      detail: `Could not reach ${url} — ${msg}${dockerSuffix}${nfsSuffix}`
     };
   }
 }
 
-/** For runtime=docker nodes, confirm the pinned image is already pulled (avoids a surprise pull mid-task). */
+/**
+ * Root of the shared multi-person NFS tree for this node. Explicit
+ * nfs_share_root wins; runtime="docker" nodes default to "/nfs_share" since
+ * they fundamentally depend on it (custom_nodes/, docker-images/,
+ * venv-container-xpu/). Bare nodes with no explicit setting have none.
+ */
+export function resolveNfsShareRoot(node: GpuNode): string | undefined {
+  return node.nfs_share_root ?? (node.runtime === "docker" ? "/nfs_share" : undefined);
+}
+
+/** For runtime=docker nodes, confirm the pinned image is already loaded locally (avoids a surprise pull mid-task). */
 async function checkLocalDockerImage(node: GpuNode): Promise<string> {
   if (!node.docker_image) return "; runtime=docker but docker_image is unset";
   try {
     await execFileAsync("docker", ["image", "inspect", node.docker_image], { timeout: 10_000 });
     return `; docker image ${node.docker_image} present`;
   } catch {
-    return `; docker image ${node.docker_image} NOT found locally — run 'docker pull ${node.docker_image}'`;
+    return `; docker image ${node.docker_image} NOT found locally — POST /api/gpu-nodes/${encodeURIComponent(node.name)}/sync-docker-image or run scripts/load-docker-image-from-nfs.sh`;
   }
+}
+
+async function checkLocalNfsShare(root: string): Promise<string> {
+  try {
+    const { stdout } = await execFileAsync("bash", ["-c", nfsHealthShellCmd(root)], { timeout: 10_000 });
+    return formatNfsHealthSuffix(root, stdout.split("\n"));
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return `; NFS share ${root} check failed — ${msg}`;
+  }
+}
+
+/**
+ * Shell snippet (used both locally and over ssh) that reports mount health +
+ * the three subdirs a docker-runtime node depends on, each as a distinct
+ * PREFIX:value line so the caller can parse by scanning rather than by fixed
+ * line position (robust to whichever other checks get concatenated before it).
+ */
+function nfsHealthShellCmd(root: string): string {
+  const q = shellQuote(root);
+  const mountCheck =
+    `if command -v mountpoint >/dev/null 2>&1; then ` +
+    `mountpoint -q ${q} && echo NFS_MOUNT:mounted || echo NFS_MOUNT:not_mounted; ` +
+    `else ` +
+    `[ -d ${q} ] && [ -n "$(ls -A ${q} 2>/dev/null)" ] && echo NFS_MOUNT:nonempty || echo NFS_MOUNT:empty_or_missing; ` +
+    `fi`;
+  const subdirChecks = ["custom_nodes", "docker-images", "venv-container-xpu"]
+    .map((d) => `test -d ${shellQuote(`${root}/${d}`)} && echo NFS_SUBDIR:${d}:ok || echo NFS_SUBDIR:${d}:missing`)
+    .join("; ");
+  return `${mountCheck}; ${subdirChecks}`;
+}
+
+/** Exported for direct unit testing — parses the PREFIX:value lines produced by nfsHealthShellCmd(). */
+export function formatNfsHealthSuffix(root: string, lines: string[]): string {
+  const trimmed = lines.map((l) => l.trim()).filter(Boolean);
+  const mountLine = trimmed.find((l) => l.startsWith("NFS_MOUNT:"));
+  const mounted = mountLine === "NFS_MOUNT:mounted" || mountLine === "NFS_MOUNT:nonempty";
+  if (!mounted) {
+    return `; NFS share ${root} NOT mounted/populated`;
+  }
+  const missingSubdirs = trimmed
+    .filter((l) => l.startsWith("NFS_SUBDIR:") && l.endsWith(":missing"))
+    .map((l) => l.split(":")[1]);
+  if (missingSubdirs.length > 0) {
+    return `; NFS share ${root} mounted but missing: ${missingSubdirs.join(", ")}`;
+  }
+  return `; NFS share ${root} healthy`;
 }
 
 async function verifySsh(node: GpuNode, timeoutMs: number): Promise<GpuNodeVerifyResult> {
@@ -255,33 +322,46 @@ async function verifySsh(node: GpuNode, timeoutMs: number): Promise<GpuNodeVerif
     return { ok: false, detail: "kind=ssh but ssh block is missing" };
   }
   const port = node.ssh.port ?? 22;
-  const dockerCheck =
-    node.runtime === "docker" && node.docker_image
-      ? `; docker image inspect ${shellQuote(node.docker_image)} >/dev/null 2>&1 && echo docker_image_found || echo docker_image_missing`
-      : "";
+  const nfsRoot = resolveNfsShareRoot(node);
+  const checks = [
+    "echo OK",
+    "uname -n",
+    `test -f ${shellQuote(node.comfyui_root + "/main.py")} && echo MAIN_PY:found || echo MAIN_PY:missing`
+  ];
+  if (node.runtime === "docker" && node.docker_image) {
+    checks.push(
+      `docker image inspect ${shellQuote(node.docker_image)} >/dev/null 2>&1 && echo DOCKER_IMAGE:found || echo DOCKER_IMAGE:missing`
+    );
+  }
+  if (nfsRoot) {
+    checks.push(nfsHealthShellCmd(nfsRoot));
+  }
   const args = [
     "-p", String(port),
     "-o", "BatchMode=yes",
     "-o", "ConnectTimeout=10",
     ...(node.ssh.key_path ? ["-i", node.ssh.key_path] : []),
     `${node.ssh.user}@${node.ssh.host}`,
-    `echo OK; uname -n; test -f ${shellQuote(node.comfyui_root + "/main.py")} && echo main_py_found || echo main_py_missing${dockerCheck}`
+    checks.join("; ")
   ];
   try {
     const { stdout } = await execFileAsync("ssh", args, { timeout: timeoutMs + 5_000 });
-    const lines = stdout.trim().split("\n");
+    const lines = stdout.trim().split("\n").map((l) => l.trim());
     const host = lines[1] ?? "(unknown host)";
-    const mainPy = lines[2] === "main_py_found" ? "main.py present" : "main.py MISSING";
-    const dockerLine = lines[3];
-    const dockerSuffix =
-      node.runtime === "docker"
-        ? dockerLine === "docker_image_found"
+    const mainPyLine = lines.find((l) => l.startsWith("MAIN_PY:"));
+    const mainPy = mainPyLine === "MAIN_PY:found" ? "main.py present" : "main.py MISSING";
+    let dockerSuffix = "";
+    if (node.runtime === "docker") {
+      const dockerLine = lines.find((l) => l.startsWith("DOCKER_IMAGE:"));
+      dockerSuffix =
+        dockerLine === "DOCKER_IMAGE:found"
           ? `; docker image ${node.docker_image} present`
-          : `; docker image ${node.docker_image} NOT found — run 'docker pull ${node.docker_image}' on ${node.ssh.host}`
-        : "";
+          : `; docker image ${node.docker_image} NOT found — POST /api/gpu-nodes/${encodeURIComponent(node.name)}/sync-docker-image or run scripts/load-docker-image-from-nfs.sh on ${node.ssh.host}`;
+    }
+    const nfsSuffix = nfsRoot ? formatNfsHealthSuffix(nfsRoot, lines) : "";
     return {
       ok: true,
-      detail: `SSH OK to ${node.ssh.user}@${node.ssh.host} (${host}); ${mainPy}${dockerSuffix}`
+      detail: `SSH OK to ${node.ssh.user}@${node.ssh.host} (${host}); ${mainPy}${dockerSuffix}${nfsSuffix}`
     };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -296,6 +376,134 @@ function shellQuote(s: string): string {
   // Single-quote + escape embedded single quotes. Good enough for the limited
   // character set we expect in comfyui_root paths.
   return `'${s.replace(/'/g, `'\\''`)}'`;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Sync Docker image from the shared NFS store (see scripts/save-docker-image-to-nfs.sh)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Load (or refresh) this node's Docker image from the shared NFS store,
+ * transporting and running the SAME canonical script used for standalone ops
+ * (scripts/load-docker-image-from-nfs.sh) rather than reimplementing its
+ * digest-verification logic in TypeScript. Local nodes run it directly;
+ * ssh nodes get it scp'd to a per-user cache path first.
+ */
+export async function syncDockerImageFromNfs(
+  node: GpuNode,
+  config: Pick<AppConfig, "projectRoot">
+): Promise<{ ok: boolean; detail: string }> {
+  const localScriptPath = path.join(config.projectRoot, "scripts", "load-docker-image-from-nfs.sh");
+  if (!fs.existsSync(localScriptPath)) {
+    return { ok: false, detail: `sync script not found at ${localScriptPath}` };
+  }
+  const nfsRoot = resolveNfsShareRoot(node) ?? "/nfs_share";
+  return runScriptOnNode(node, localScriptPath, {
+    remoteScriptName: "load-docker-image-from-nfs.sh",
+    scriptArgs: [],
+    env: { NFS_DOCKER_IMAGES_ROOT: `${nfsRoot}/docker-images` },
+    timeoutMs: 30 * 60_000,
+    actionLabel: "image sync"
+  });
+}
+
+/**
+ * Bulk-symlink /nfs_share/custom_nodes/* into a node's comfyui_root/custom_nodes,
+ * transporting and running scripts/sync-custom-nodes-from-nfs.sh — same
+ * canonical-script-not-reimplemented approach as syncDockerImageFromNfs.
+ */
+export async function syncCustomNodesFromNfs(
+  node: GpuNode,
+  config: Pick<AppConfig, "projectRoot">
+): Promise<{ ok: boolean; detail: string }> {
+  const localScriptPath = path.join(config.projectRoot, "scripts", "sync-custom-nodes-from-nfs.sh");
+  if (!fs.existsSync(localScriptPath)) {
+    return { ok: false, detail: `sync script not found at ${localScriptPath}` };
+  }
+  const nfsRoot = resolveNfsShareRoot(node) ?? "/nfs_share";
+  return runScriptOnNode(node, localScriptPath, {
+    remoteScriptName: "sync-custom-nodes-from-nfs.sh",
+    scriptArgs: [node.comfyui_root, `${nfsRoot}/custom_nodes`],
+    env: {},
+    timeoutMs: 60_000,
+    actionLabel: "custom_nodes sync"
+  });
+}
+
+/**
+ * Shared transport for "run this canonical ops script against a node":
+ * local nodes run it directly; ssh nodes get it scp'd to a per-user cache
+ * path first, then executed there. One transport, reused by every
+ * NFS-sync helper so the scp/ssh dance isn't duplicated per script.
+ */
+async function runScriptOnNode(
+  node: GpuNode,
+  localScriptPath: string,
+  opts: { remoteScriptName: string; scriptArgs: string[]; env: Record<string, string>; timeoutMs: number; actionLabel: string }
+): Promise<{ ok: boolean; detail: string }> {
+  const argsSuffix = opts.scriptArgs.length ? ` ${opts.scriptArgs.map(shellQuote).join(" ")}` : "";
+
+  if (node.kind === "local") {
+    try {
+      const { stdout } = await execFileAsync("bash", [localScriptPath, ...opts.scriptArgs], {
+        timeout: opts.timeoutMs,
+        env: { ...process.env, ...opts.env }
+      });
+      return { ok: true, detail: summarizeSyncOutput(stdout) };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return { ok: false, detail: `local ${opts.actionLabel} failed: ${msg}` };
+    }
+  }
+
+  if (!node.ssh) {
+    return { ok: false, detail: "kind=ssh but ssh block is missing" };
+  }
+  const port = node.ssh.port ?? 22;
+  const sshKeyArgs = node.ssh.key_path ? ["-i", node.ssh.key_path] : [];
+  const remoteScriptPath = `~/.cache/migration-agent/${opts.remoteScriptName}`;
+  const envPrefix = Object.entries(opts.env)
+    .map(([k, v]) => `${k}=${shellQuote(v)} `)
+    .join("");
+  try {
+    await execFileAsync(
+      "ssh",
+      [
+        "-p", String(port), "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", ...sshKeyArgs,
+        `${node.ssh.user}@${node.ssh.host}`,
+        "mkdir -p ~/.cache/migration-agent"
+      ],
+      { timeout: 15_000 }
+    );
+    await execFileAsync(
+      "scp",
+      ["-P", String(port), ...sshKeyArgs, localScriptPath, `${node.ssh.user}@${node.ssh.host}:${remoteScriptPath}`],
+      { timeout: 30_000 }
+    );
+    const { stdout } = await execFileAsync(
+      "ssh",
+      [
+        "-p", String(port), "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", ...sshKeyArgs,
+        `${node.ssh.user}@${node.ssh.host}`,
+        `${envPrefix}bash ${remoteScriptPath}${argsSuffix}`
+      ],
+      { timeout: opts.timeoutMs }
+    );
+    return { ok: true, detail: summarizeSyncOutput(stdout) };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { ok: false, detail: `remote ${opts.actionLabel} via ${node.ssh.user}@${node.ssh.host} failed: ${msg}` };
+  }
+}
+
+function summarizeSyncOutput(stdout: string): string {
+  return stdout
+    .trim()
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .slice(-3)
+    .join(" | ");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -381,6 +589,7 @@ function normalizeNode(raw: unknown, index: number, sourcePath: string): GpuNode
       `gpu-nodes.json node "${name}" has runtime="docker" but is missing "docker_image"`
     );
   }
+  const nfs_share_root = typeof o.nfs_share_root === "string" ? o.nfs_share_root : undefined;
 
   let ssh: GpuNodeSsh | undefined;
   if (kind === "ssh") {
@@ -415,6 +624,7 @@ function normalizeNode(raw: unknown, index: number, sourcePath: string): GpuNode
     model_share,
     runtime,
     docker_image,
+    nfs_share_root,
     ssh
   };
 }

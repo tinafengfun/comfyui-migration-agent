@@ -23,6 +23,8 @@ export interface AppConfig {
   sourceObjectInfoPath?: string;
   copilotCliPath?: string;
   autoApproveAgentPermissions: boolean;
+  /** Shared NFS dir accepted (Step 12) migrated workflow delivery bundles are archived to. */
+  workflowArchiveRoot: string;
 }
 
 const projectRoot = process.cwd();
@@ -55,7 +57,8 @@ export function loadConfig(): AppConfig {
       ? resolveFromProject(process.env.SOURCE_OBJECT_INFO_PATH)
       : undefined,
     copilotCliPath: process.env.COPILOT_CLI_PATH,
-    autoApproveAgentPermissions: process.env.MIGRATION_AGENT_AUTO_APPROVE !== "0"
+    autoApproveAgentPermissions: process.env.MIGRATION_AGENT_AUTO_APPROVE !== "0",
+    workflowArchiveRoot: resolveFromProject(process.env.WORKFLOW_ARCHIVE_ROOT ?? "/nfs_share/workflows")
   };
 }
 

@@ -21,6 +21,16 @@
  *     --comfyui-root /home/intel/ComfyUI \
  *     --no-setup-ssh-key --no-install-comfyui --no-setup-nfs
  *
+ * Docker-runtime remote (mounts the whole shared NFS tree, loads the pinned
+ * image from NFS instead of Docker Hub, symlinks custom_nodes from NFS):
+ *   npx tsx scripts/bootstrap-gpu-node.mts \
+ *     --name remote-2 --host 172.16.124.20 --user intel \
+ *     --comfyui-root /home/intel/ComfyUI \
+ *     --runtime docker --docker-image intel/llm-scaler-omni:0.1.0-b7 \
+ *     --venv-python /nfs_share/venv-container-xpu/bin/python3 \
+ *     --model-roots /nfs_share \
+ *     --allow-sudo
+ *
  * Flags:
  *   --name <unique-id>            Required. Node name in gpu-nodes.json.
  *   --host <hostname-or-ip>       Required. SSH target.
@@ -34,8 +44,14 @@
  *   --vram-gb <n>                 Display only.
  *   --local-ip <ip>               For NFS export. Auto-detected via `hostname -I` if omitted.
  *   --key-path <path>             Existing SSH key to use (default ~/.ssh/id_ed25519).
+ *   --runtime <bare|docker>       Default bare. docker skips the venv/torch install step, mounts
+ *                                 --nfs-share-root as a whole (not just model_roots[0]), loads
+ *                                 --docker-image from NFS, and symlinks custom_nodes from NFS.
+ *   --docker-image <image:tag>    Required if --runtime docker.
+ *   --nfs-share-root <path>       Default /nfs_share. Only used when --runtime docker.
  *   --[no-]setup-ssh-key          Default: yes.
- *   --[no-]install-comfyui        Default: yes.
+ *   --[no-]install-comfyui        Default: yes. For --runtime docker this only does the ComfyUI
+ *                                 checkout (no venv/torch — the shared NFS venv already has them).
  *   --[no-]setup-nfs              Default: yes.
  *   --[no-]register               Default: yes.
  *   --allow-sudo                  Required to actually run sudo commands (default: print only).
@@ -72,6 +88,9 @@ interface Args {
   vramGb?: number;
   localIp?: string;
   keyPath: string;
+  runtime: "bare" | "docker";
+  dockerImage?: string;
+  nfsShareRoot: string;
   setupSshKey: boolean;
   installComfyui: boolean;
   setupNfs: boolean;
@@ -86,6 +105,8 @@ function parseArgs(argv: string[]): Args {
     port: "22",
     apiPort: "8188",
     modelRoots: "/home/intel/hf_models",
+    runtime: "bare",
+    nfsShareRoot: "/nfs_share",
     setupSshKey: true,
     installComfyui: true,
     setupNfs: true,
@@ -116,6 +137,14 @@ function parseArgs(argv: string[]): Args {
       case "--vram-gb": out.vramGb = Number(next()); break;
       case "--local-ip": out.localIp = next(); break;
       case "--key-path": out.keyPath = next(); break;
+      case "--runtime": {
+        const v = next();
+        if (v !== "bare" && v !== "docker") throw new Error(`--runtime must be "bare" or "docker", got "${v}"`);
+        out.runtime = v;
+        break;
+      }
+      case "--docker-image": out.dockerImage = next(); break;
+      case "--nfs-share-root": out.nfsShareRoot = next(); break;
       case "--setup-ssh-key": out.setupSshKey = true; break;
       case "--no-setup-ssh-key": out.setupSshKey = false; break;
       case "--install-comfyui": out.installComfyui = true; break;
@@ -142,6 +171,9 @@ function parseArgs(argv: string[]): Args {
       throw new Error(`--${key.replace(/([A-Z])/g, "-$1").toLowerCase()} is required`);
     }
   }
+  if (out.runtime === "docker" && !out.dockerImage) {
+    throw new Error(`--docker-image is required when --runtime docker`);
+  }
 
   return {
     name: String(out.name),
@@ -156,6 +188,9 @@ function parseArgs(argv: string[]): Args {
     vramGb: out.vramGb !== undefined ? Number(out.vramGb) : undefined,
     localIp: out.localIp ? String(out.localIp) : undefined,
     keyPath: String(out.keyPath ?? path.join(os.homedir(), ".ssh", "id_ed25519")),
+    runtime: out.runtime === "docker" ? "docker" : "bare",
+    dockerImage: out.dockerImage ? String(out.dockerImage) : undefined,
+    nfsShareRoot: String(out.nfsShareRoot),
     setupSshKey: Boolean(out.setupSshKey),
     installComfyui: Boolean(out.installComfyui),
     setupNfs: Boolean(out.setupNfs),
@@ -326,6 +361,11 @@ async function installComfyui(args: Args): Promise<void> {
     await ssh(args, `mkdir -p ${shellQuote(parent)} && cd ${shellQuote(parent)} && git clone https://github.com/comfyanonymous/ComfyUI.git ${shellQuote(leaf)}`, { dryRun: args.dryRun });
   }
 
+  if (args.runtime === "docker") {
+    info("runtime=docker — skipping venv/torch install (the shared NFS venv already has them).");
+    return;
+  }
+
   // Venv exists?
   const venvCheck = await ssh(args, `test -x ${shellQuote(args.venvPython)} && echo yes || echo no`, {
     dryRun: args.dryRun,
@@ -371,7 +411,7 @@ async function installComfyui(args: Args): Promise<void> {
   }
 }
 
-async function setupNfs(args: Args): Promise<{ installed: boolean; localIp: string }> {
+async function setupNfs(args: Args, mountPath: string): Promise<{ installed: boolean; localIp: string }> {
   step(4, 5, "NFS export + mount");
   const localIp = args.localIp ?? (await detectLocalIp());
   info(`Local IP (for NFS export): ${localIp}`);
@@ -380,15 +420,14 @@ async function setupNfs(args: Args): Promise<{ installed: boolean; localIp: stri
     return { installed: false, localIp };
   }
 
-  const primaryModelRoot = args.modelRoots[0];
-  if (!primaryModelRoot) {
-    warn("No model_roots configured. Skipping NFS.");
+  if (!mountPath) {
+    warn("No mount path configured. Skipping NFS.");
     return { installed: false, localIp };
   }
 
-  const exportLine = `${primaryModelRoot}  ${args.host}/24(ro,sync,no_subtree_check,no_root_squash)`;
-  const remoteMountCmd = `sudo mkdir -p ${shellQuote(primaryModelRoot)} && sudo mount -t nfs ${shellQuote(`${localIp}:${primaryModelRoot}`)} ${shellQuote(primaryModelRoot)}`;
-  const remoteFstabLine = `${localIp}:${primaryModelRoot}  ${primaryModelRoot}  nfs  ro,hard,nosuid  0 0`;
+  const exportLine = `${mountPath}  ${args.host}/24(ro,sync,no_subtree_check,no_root_squash)`;
+  const remoteMountCmd = `sudo mkdir -p ${shellQuote(mountPath)} && sudo mount -t nfs ${shellQuote(`${localIp}:${mountPath}`)} ${shellQuote(mountPath)}`;
+  const remoteFstabLine = `${localIp}:${mountPath}  ${mountPath}  nfs  ro,hard,nosuid  0 0`;
 
   if (!args.allowSudo) {
     info("--allow-sudo NOT set. Run these commands manually, then press ENTER to continue:");
@@ -421,7 +460,7 @@ async function setupNfs(args: Args): Promise<{ installed: boolean; localIp: stri
     // Remote mount + fstab
     await ssh(
       args,
-      `echo ${shellQuote(sudoPassword)} | sudo -S sh -c "mkdir -p ${shellQuote(primaryModelRoot)} && mountpoint -q ${shellQuote(primaryModelRoot)} || mount -t nfs ${shellQuote(`${localIp}:${primaryModelRoot}`)} ${shellQuote(primaryModelRoot)}; grep -qxF ${shellQuote(remoteFstabLine)} /etc/fstab || echo ${shellQuote(remoteFstabLine)} >> /etc/fstab"`,
+      `echo ${shellQuote(sudoPassword)} | sudo -S sh -c "mkdir -p ${shellQuote(mountPath)} && mountpoint -q ${shellQuote(mountPath)} || mount -t nfs ${shellQuote(`${localIp}:${mountPath}`)} ${shellQuote(mountPath)}; grep -qxF ${shellQuote(remoteFstabLine)} /etc/fstab || echo ${shellQuote(remoteFstabLine)} >> /etc/fstab"`,
       { dryRun: false, label: "remote mount + fstab update" }
     );
     ok("Remote NFS mount + fstab updated.");
@@ -429,14 +468,14 @@ async function setupNfs(args: Args): Promise<{ installed: boolean; localIp: stri
 
   // Verify: ls model_roots on remote should return non-empty.
   info("Verifying NFS-same-path...");
-  const ls = await ssh(args, `ls -1 ${shellQuote(primaryModelRoot)} 2>/dev/null | head -3`, { dryRun: args.dryRun, allowFail: true });
+  const ls = await ssh(args, `ls -1 ${shellQuote(mountPath)} 2>/dev/null | head -3`, { dryRun: args.dryRun, allowFail: true });
   if (args.dryRun) return { installed: false, localIp };
   const entries = ls.stdout.split("\n").map((s) => s.trim()).filter(Boolean);
   if (entries.length === 0) {
-    warn(`Remote ${primaryModelRoot} is empty or unreadable. NFS may not be mounted yet.`);
+    warn(`Remote ${mountPath} is empty or unreadable. NFS may not be mounted yet.`);
     return { installed: false, localIp };
   }
-  ok(`Remote sees ${entries.length}+ entries under ${primaryModelRoot}: ${entries.slice(0, 3).join(", ")}`);
+  ok(`Remote sees ${entries.length}+ entries under ${mountPath}: ${entries.slice(0, 3).join(", ")}`);
   return { installed: true, localIp };
 }
 
@@ -458,6 +497,61 @@ async function promptSudoPasswordOnce(): Promise<string> {
   rl.close();
   console.log("");
   return answer;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Docker-runtime-only steps: load the pinned image + symlink custom_nodes,
+// both from the shared NFS tree. Reuses gpuNodes.ts's transport (scp the
+// canonical script to the remote, then ssh-execute it) instead of
+// reimplementing it here.
+// ─────────────────────────────────────────────────────────────────────────────
+
+function draftNodeForSync(args: Args) {
+  return {
+    name: args.name,
+    kind: "ssh" as const,
+    comfyui_root: args.comfyuiRoot,
+    venv_python: args.venvPython,
+    model_roots: args.modelRoots,
+    api_host: args.apiHost,
+    api_port: args.apiPort,
+    runtime: "docker" as const,
+    docker_image: args.dockerImage,
+    nfs_share_root: args.nfsShareRoot,
+    ssh: { host: args.host, user: args.user, port: args.port, key_path: args.keyPath }
+  };
+}
+
+async function syncDockerImageStep(args: Args): Promise<void> {
+  step(6, 7, "Load + verify Docker image from NFS");
+  if (args.dryRun) {
+    console.log(`  [dry-run] would scp+ssh-run scripts/load-docker-image-from-nfs.sh on ${args.host}`);
+    return;
+  }
+  const { syncDockerImageFromNfs } = await import("../src/server/gpuNodes.ts");
+  const { loadConfig } = await import("../src/server/config.ts");
+  const result = await syncDockerImageFromNfs(draftNodeForSync(args), loadConfig());
+  if (result.ok) {
+    ok(`Docker image synced: ${result.detail}`);
+  } else {
+    throw new StepError("Load Docker image from NFS", result.detail);
+  }
+}
+
+async function syncCustomNodesStep(args: Args): Promise<void> {
+  step(7, 7, "Symlink custom_nodes from NFS");
+  if (args.dryRun) {
+    console.log(`  [dry-run] would scp+ssh-run scripts/sync-custom-nodes-from-nfs.sh on ${args.host}`);
+    return;
+  }
+  const { syncCustomNodesFromNfs } = await import("../src/server/gpuNodes.ts");
+  const { loadConfig } = await import("../src/server/config.ts");
+  const result = await syncCustomNodesFromNfs(draftNodeForSync(args), loadConfig());
+  if (result.ok) {
+    ok(`custom_nodes synced: ${result.detail}`);
+  } else {
+    warn(`custom_nodes sync had issues (non-fatal, check manually): ${result.detail}`);
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -489,7 +583,10 @@ async function registerNode(args: Args, nfsResult: { installed: boolean; localIp
       port: args.port,
       key_path: args.keyPath
     },
-    model_share: (nfsResult.installed ? "nfs_same_path" : "none") as "nfs_same_path" | "none"
+    model_share: (nfsResult.installed ? "nfs_same_path" : "none") as "nfs_same_path" | "none",
+    ...(args.runtime === "docker"
+      ? { runtime: "docker" as const, docker_image: args.dockerImage, nfs_share_root: args.nfsShareRoot }
+      : {})
   };
 
   let registry;
@@ -559,12 +656,14 @@ async function main(): Promise<void> {
   console.log(`  comfyui_root: ${args.comfyuiRoot}`);
   console.log(`  venv_python:  ${args.venvPython}`);
   console.log(`  model_roots:  ${args.modelRoots.join(":")}`);
+  console.log(`  runtime:      ${args.runtime}${args.runtime === "docker" ? ` (docker_image=${args.dockerImage}, nfs_share_root=${args.nfsShareRoot})` : ""}`);
   console.log(`  options:      ssh-key=${args.setupSshKey} install-comfyui=${args.installComfyui} setup-nfs=${args.setupNfs} register=${args.register} allow-sudo=${args.allowSudo} dry-run=${args.dryRun}`);
 
   const total = 1
     + (args.setupSshKey ? 1 : 0)
     + (args.installComfyui ? 1 : 0)
     + (args.setupNfs ? 1 : 0)
+    + (args.runtime === "docker" ? 2 : 0)
     + (args.register ? 1 : 0);
   let n = 1;
 
@@ -573,7 +672,17 @@ async function main(): Promise<void> {
     if (args.setupSshKey) { await setupSshKey(args); n++; }
     if (args.installComfyui) { await installComfyui(args); n++; }
     let nfsResult = { installed: false, localIp: "" };
-    if (args.setupNfs) { nfsResult = await setupNfs(args); n++; }
+    if (args.setupNfs) {
+      const mountPath = args.runtime === "docker" ? args.nfsShareRoot : args.modelRoots[0];
+      nfsResult = await setupNfs(args, mountPath);
+      n++;
+    }
+    if (args.runtime === "docker") {
+      await syncDockerImageStep(args);
+      n++;
+      await syncCustomNodesStep(args);
+      n++;
+    }
     if (args.register) { await registerNode(args, nfsResult); n++; }
     void total; void n;
     console.log("\n✓ Done.");

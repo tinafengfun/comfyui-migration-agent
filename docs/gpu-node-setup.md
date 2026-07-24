@@ -4,8 +4,9 @@ How to register a new GPU node (local or remote) so the migration agent can run 
 
 There are **two ways** to register a node:
 
-1. **Recommended — CLI bootstrap script**: `scripts/bootstrap-gpu-node.mts` does everything end-to-end (SSH key, remote ComfyUI install, NFS export+mount) and writes the entry to `gpu-nodes.json`.
-2. **Manual — web UI or file edit**: open the GPU Nodes Manager in the web UI (or hand-edit `gpu-nodes.json`) and fill in the fields yourself. Use this when the remote is already provisioned and you just need to point the agent at it.
+1. **Recommended — CLI bootstrap script**: `scripts/bootstrap-gpu-node.mts` does everything end-to-end (SSH key, remote ComfyUI install, NFS export+mount) and writes the entry to `gpu-nodes.json`. For `--runtime docker` nodes this also loads the pinned Docker image from the shared NFS store and symlinks `custom_nodes/` from it — see [Docker-runtime onboarding](#docker-runtime-onboarding-fully-integrated) below.
+2. **Web UI**: open the GPU Nodes Manager to add/edit/delete/test a node, including `runtime`/`docker_image`/`nfs_share_root` for docker-runtime nodes, and a one-click "Sync Docker Image from NFS" refresh. Use this when the remote is already provisioned and you just need to point the agent at it (or tweak an existing node).
+3. **Manual — hand-edit `gpu-nodes.json`**: for anything the UI/CLI don't cover.
 
 ---
 
@@ -40,6 +41,33 @@ Useful flags:
 - `--key-path /path/to/key` — use an existing SSH key instead of the default `~/.ssh/id_ed25519`.
 
 The script is idempotent — re-running it skips steps that are already done.
+
+### Docker-runtime onboarding (fully integrated)
+
+```bash
+npx tsx scripts/bootstrap-gpu-node.mts \
+  --name remote-2 --host 172.16.124.20 --user intel \
+  --comfyui-root /home/intel/ComfyUI \
+  --runtime docker --docker-image intel/llm-scaler-omni:0.1.0-b7 \
+  --venv-python /nfs_share/venv-container-xpu/bin/python3 \
+  --model-roots /nfs_share \
+  --allow-sudo
+```
+
+With `--runtime docker`, the same command additionally:
+
+1. Skips the venv/torch install (the shared NFS venv at `venv_python` already has them).
+2. Mounts `--nfs-share-root` (default `/nfs_share`) as a whole — not just `model_roots[0]` — since docker-runtime nodes depend on the entire shared tree (`custom_nodes/`, `docker-images/`, `venv-container-xpu/`).
+3. Loads and digest-verifies `--docker-image` from the shared NFS store (`scripts/load-docker-image-from-nfs.sh`, transported+run over SSH) — no Docker Hub pull needed.
+4. Bulk-symlinks every package under `/nfs_share/custom_nodes/` into `custom_nodes/` (`scripts/sync-custom-nodes-from-nfs.sh`) — warns and skips (never overwrites) if a real, non-symlink directory already exists there.
+5. Registers the node with `runtime`, `docker_image`, and `nfs_share_root` set.
+
+Additional flags for this path:
+- `--runtime bare|docker` — default `bare` (today's behavior, unaffected).
+- `--docker-image <image:tag>` — required when `--runtime docker`.
+- `--nfs-share-root <path>` — default `/nfs_share`.
+
+Re-running the command later (e.g. after a new image version is published to NFS) re-syncs both the image and any newly-added shared `custom_nodes/` packages — same idempotent, skip-what's-done design as the rest of the script. The Web UI's "Sync Docker Image from NFS" button (`POST /api/gpu-nodes/:name/sync-docker-image`) does the same image refresh without re-running the whole bootstrap.
 
 ---
 
@@ -117,7 +145,8 @@ At the project root. Loaded once per process; the app falls back to a synthesize
 | `ssh.remote_workspace_root` | optional | Scratch dir on remote for logs. v1 does not sync the local workspace there. |
 | `model_share` | optional | `nfs_same_path` means model_roots are valid on both local and remote (NFS mount at the same path). `none` or absent means no verification. |
 | `runtime` | optional | `"bare"` (default) or `"docker"`. See [Docker runtime](#docker-runtime-intel-xpu-bundle) below. |
-| `docker_image` | required if `runtime="docker"` | Image ComfyUI runs inside (e.g. `intel/llm-scaler-vllm:1.4`). Used only for its oneAPI/PyTorch-XPU stack — never that image's own ComfyUI/vLLM components. |
+| `docker_image` | required if `runtime="docker"` | Image ComfyUI runs inside (currently `intel/llm-scaler-omni:0.1.0-b7`). Used only for its compiled oneAPI/PyTorch-XPU/`omni_xpu_kernel`/`sgl-kernel-xpu` packages — never that image's own ComfyUI/custom_nodes/entrypoint. |
+| `nfs_share_root` | optional | Root of the shared multi-person NFS tree (`custom_nodes/`, `docker-images/`, `venv-container-xpu/`, `workflows/`). Defaults to `/nfs_share` when `runtime="docker"` and unset. Used by "Test"'s NFS-health check and by the Docker-image/custom_nodes sync helpers. |
 
 ---
 
@@ -153,26 +182,123 @@ The per-node Python venv still needs the package's own `pip install -r requireme
 
 ## Docker runtime (Intel XPU bundle)
 
-For nodes with `runtime: "docker"`, ComfyUI does **not** run as a bare `venv_python main.py` subprocess. Instead, Step 05 launches an ephemeral, per-task container derived from `docker_image` (currently `intel/llm-scaler-vllm:1.4` on both `local-xpu` and `remote-124-12`), copies that task's `comfyui_root` in fresh via `docker cp` (not bind-mounted — see the Step 05 skill for the exact `tar --exclude=./...` + staging-directory recipe and the sharp edges it documents), and bind-mounts `model_roots` (large, shared, read-mostly) at identical paths.
+For nodes with `runtime: "docker"`, onboarding is fully integrated end-to-end (mount the shared NFS tree → load+verify the image → symlink `custom_nodes/` → register) via `scripts/bootstrap-gpu-node.mts --runtime docker` or the Web UI form — see [Docker-runtime onboarding](#docker-runtime-onboarding-fully-integrated). The rest of this section covers what happens at *task run time* once a node is registered.
 
-**Why this image, and what it actually provides:** `intel/llm-scaler-vllm:1.4` is Intel's own validated build carrying the exact oneAPI 2025.3/PyTorch 2.10.0+xpu stack the `llm-scaler-omni` bundle expects — the goal is to avoid re-deriving that stack (and especially avoid compiling `omni_xpu_kernel`/`sgl-kernel-xpu` from source ourselves) on bare metal. Only the underlying dependency stack is used; the image's own ComfyUI/vLLM components are never invoked.
+For nodes with `runtime: "docker"`, ComfyUI does **not** run as a bare `venv_python main.py` subprocess. Instead, Step 05 launches an ephemeral, per-task container derived from `docker_image` (currently `intel/llm-scaler-omni:0.1.0-b7` on both `local-xpu` and `remote-124-12`), copies that task's `comfyui_root` in fresh via `docker cp` (not bind-mounted — see the Step 05 skill for the exact `tar --exclude=./...` + staging-directory recipe and the sharp edges it documents), and bind-mounts `model_roots` (large, shared, read-mostly) at identical paths.
 
-**The shared, persisted venv:** `venv_python` for `runtime=docker` nodes points at `/nfs_share/venv-container-xpu/bin/python3` — a `--system-site-packages` venv living on the same NFS share as the custom-node tree above, built once and usable from both nodes (confirmed live: same venv works correctly on both `local-xpu`'s Arc Pro B60 and `remote-124-12`'s `0xe223`, both Battlemage family). It inherits the image's own torch-xpu/oneAPI packages for free and has ComfyUI core's `requirements.txt` plus every custom node's `requirements.txt` layered on top. To add/update packages in it:
+**Why this image, and what it actually provides.** Originally used `intel/llm-scaler-vllm:1.4` (a vLLM-serving image) purely for its oneAPI/PyTorch-XPU system stack, since it had no ComfyUI-specific compiled kernels — `omni_xpu_kernel` ran on its slow PyTorch fallback, and `raylight`/`ComfyUI_SGLDiffusion` needed hand-derived Python-only patches because building `sgl-kernel-xpu` from source was explicitly out of scope. Switched to `intel/llm-scaler-omni:0.1.0-b7` (Intel's actual omni runtime image, 55.5GB) because it already contains the real, genuinely-compiled `omni_xpu_kernel` and `sgl-kernel-xpu` (confirmed live: both import cleanly from an arbitrary working directory, proving they're ordinary `dist-packages` entries, not tied to the image's own `/llm/ComfyUI` tree in any way) plus a working `xDiT`/`long-context-attention`. **We still never use this image's own ComfyUI, custom_nodes, or entrypoint** — `/llm/ComfyUI` (a real checkout, `v0.20.1`/`64b8457`, with 14 baked-in nodes) is left completely untouched; only the compiled Python packages are borrowed. The image's default `ENTRYPOINT` is `/lib/systemd/systemd` (it's built to run as a full-OS-like container) — a plain `--entrypoint <venv_python>` override bypasses that entirely (confirmed live, GPU access + `torch.xpu`/`omni_xpu_kernel`/`sgl_kernel` all work identically to the override pattern used for the previous image).
+
+**The shared, persisted venv:** `venv_python` for `runtime=docker` nodes points at `/nfs_share/venv-container-xpu/bin/python3` — a `--system-site-packages` venv living on the same NFS share as the custom-node tree above, rebuilt against this image (confirmed live: correctly inherits `torch`, `omni_xpu_kernel`, and `sgl_kernel` from the new image's system `dist-packages`) and usable from both nodes (same venv works correctly on both `local-xpu`'s Arc Pro B60 and `remote-124-12`'s `0xe223`, both Battlemage family). **Rebuild it from scratch whenever `docker_image` changes** — a `--system-site-packages` venv resolves its "system" packages from whichever image's Python installation is present when it was created; switching base images silently stops it from seeing the new image's compiled packages unless recreated. It has ComfyUI core's `requirements.txt` plus every custom node's `requirements.txt` layered on top. To add/update packages in it:
 
 ```bash
 docker run --rm --entrypoint bash \
   -e https_proxy=http://proxy.ims.intel.com:911 -e http_proxy=http://proxy.ims.intel.com:911 -e no_proxy=localhost,127.0.0.1 \
   -v /nfs_share:/nfs_share \
-  intel/llm-scaler-vllm:1.4 -c '
+  intel/llm-scaler-omni:0.1.0-b7 -c '
     pip --python /nfs_share/venv-container-xpu/bin/python3 install --no-cache-dir -r <package>/requirements.txt
   '
 ```
 
 **Never run two `pip install`s against this venv concurrently** — pip has no cross-invocation lock, and concurrent installs into the same site-packages directory can corrupt it (confirmed as a real risk during setup; the fix is simply to serialize).
 
-**Known gap — the `xDiT`/`xfuser` stack is not built.** Intel's own Dockerfile compiles `sgl-kernel-xpu` and a patched `xDiT`/`long-context-attention` (`xfuser`) from source for multi-GPU distributed diffusion, used by `ComfyUI_SGLDiffusion` and `raylight`. This was deliberately skipped here — it's a much heavier from-source kernel build than any other package in the bundle, in the same risk class as `omni_xpu_kernel` (which is also not compiled here; `ComfyUI-OmniXPU` runs on its safe PyTorch fallback). The plain PyPI `xfuser` got installed instead as an ordinary dependency of `raylight`'s `requirements.txt`, but it hard-fails at import time (`No Accelerators(AMD/NV/MTT GPU...) available` — its own accelerator probe doesn't recognize Intel XPU at all, confirmed live). `intel/llm-scaler-vllm:1.4` does **not** already contain a working `sgl-kernel-xpu`/`xfuser` either (checked directly — absent). If a real migration workflow ever needs `raylight`'s multi-Arc distributed nodes or `ComfyUI_SGLDiffusion`, that from-source build (Intel's own `omni/docker/Dockerfile`, the `xdit_for_multi_arc.patch`/`yunchang_for_multi_arc.patch`/`sglang_diffusion_for_multi_arc.patch` sections) needs to be revisited as its own task — don't assume `raylight` works just because it's installed.
+**`xDiT`/`yunchang`/`nunchaku-torch` are still our own separate editable installs, not the image's baked-in copies.** `raylight` needed two pure-Python XPU patches (`xdit_for_multi_arc.patch`/`yunchang_for_multi_arc.patch` — confirmed no native compile involved) applied to our own `git clone` of `long-context-attention`/`xDiT` under `lib/`, installed editable into the shared venv, independent of the image's own `/llm/xDiT`/`/llm/sgl-kernel-xpu`. This was necessary before switching images (the old `llm-scaler-vllm:1.4` had no working `sgl-kernel-xpu`/`xfuser` at all) and is kept as-is after the switch to avoid conflating two changes — a future optimization could drop our own editable installs and point `PYTHONPATH` at the image's own (Intel-patched, real-`sgl-kernel-xpu`-backed) `/llm/xDiT` instead, but that's unverified and out of scope here.
+
+**`raylight` also had a second, unrelated bug** in its own `_resolve_repo_root()` (broke under our symlinked shared-node convention, fixed via `patches/raylight-comfyui-root-via-folder-paths.patch`) — this fix is about raylight's own code, not about which image supplies the compiled libraries, so it still applies after the image switch.
 
 **Native C++/CUDA extension builds are not attempted.** `ComfyUI-Hunyuan3d-2-1.disabled`'s Python (`pip`) requirements are installed, but its `custom_rasterizer`/`DifferentiableRenderer` `setup.py install` native extension builds (per Intel's Dockerfile) were not — same rationale as above, deferred as a gap rather than risked mid-batch.
+
+---
+
+## Multi-person shared environment
+
+This project moved from "one person operating two GPU nodes" to a multi-person, distributed setup where several people test against the same shared NFS environment (`/nfs_share`). Two things needed a real protocol instead of tribal discipline: distributing the (large) Docker base image, and letting more than one person edit shared `custom_nodes/` packages without colliding.
+
+### Onboarding a new GPU node: load the image from NFS, don't `docker pull`
+
+`docker_image` (e.g. `intel/llm-scaler-omni:0.1.0-b7`, 40GB+ unpacked) is saved once to NFS instead of every node independently pulling it from Docker Hub. This is faster, doesn't need registry/proxy access from every node, and — importantly — pins to an exact content digest, since Docker Hub tags themselves aren't immutable.
+
+```
+/nfs_share/docker-images/
+  intel-llm-scaler-omni-0.1.0-b7.tar             # docker save output
+  intel-llm-scaler-omni-0.1.0-b7.manifest.json   # source digest, image_id, size, saved-by/-at
+  current -> intel-llm-scaler-omni-0.1.0-b7.tar  # scripts/docs reference "current", not a hardcoded filename
+  CHANGELOG.md
+```
+
+**New node onboarding** — after this, `gpu-nodes.json`'s `docker_image` field and Step 05's Docker-runtime flow work completely unchanged; this only populates the local Docker daemon's image cache:
+
+```bash
+scripts/load-docker-image-from-nfs.sh          # loads whatever `current` points at
+scripts/load-docker-image-from-nfs.sh <version-basename>   # pin an explicit version instead
+```
+
+The script verifies the loaded image's content-addressed `image_id` (`docker image inspect --format '{{.Id}}'`) against the value recorded in the manifest at save time. **Note:** `RepoDigests` is a registry-pull-only concept and is always empty after `docker load` — it is *not* a valid post-load check (a manifest saved before this was understood may lack `image_id`; the script just skips the check in that case rather than false-warning).
+
+This script is now wired into the app rather than being purely a manual step: `scripts/bootstrap-gpu-node.mts --runtime docker` runs it automatically as part of onboarding (see [Docker-runtime onboarding](#docker-runtime-onboarding-fully-integrated) above), the Web UI's GPU Nodes Manager has a "Sync Docker Image from NFS" button per docker-runtime node (`POST /api/gpu-nodes/:name/sync-docker-image`), and `verifyNode`'s "Test" now also checks `/nfs_share` mount health (not just the image) and points at this mechanism instead of `docker pull` when the image is missing. The script itself is unchanged and still works standalone for anyone SSHed directly into a node.
+
+**Publishing a new/updated image version** (e.g. after Intel republishes under the same tag, or a new bundle version is adopted):
+
+```bash
+scripts/save-docker-image-to-nfs.sh <image:tag>              # first save of a new tag
+scripts/save-docker-image-to-nfs.sh <image:tag> --refresh     # re-save the same tag after upstream content changed
+```
+
+`--refresh` writes a distinctly `-refreshedYYYYMMDD`-suffixed version rather than overwriting the existing one, and does **not** repoint `current` automatically — review the new manifest against the old one first, then `ln -sf` it deliberately if it should become the new default.
+
+### Editing a shared `custom_nodes/` package: isolate, then publish
+
+Default state for any package nobody is actively touching: unchanged, symlinked straight to `/nfs_share/custom_nodes/<name>` (see [Shared custom_nodes/ convention](#shared-custom_nodes-convention-nfs) above). That default doesn't scale once more than one person might be editing the same shared tree concurrently — the isolate-then-publish workflow below avoids collisions without needing any locking:
+
+```bash
+# 1. Start isolated local dev on this node only — clones the shared package to
+#    ~/dev/shared-nodes/<name> and repoints THIS node's custom_nodes/<name>
+#    symlink at the local clone. Other nodes/people are unaffected.
+scripts/dev-checkout-shared-node.sh <name>
+
+# 2. Edit + test freely against the local clone (manual container launch,
+#    Playwright, whatever). Commit as you go, same as any git repo.
+
+# 3. Publish: requires a clean `git status` in the local clone (refuses to
+#    publish uncommitted work), does a real `git pull <local-clone> <branch>`
+#    into the shared NFS canonical repo (a merge, not a file overwrite — a
+#    genuine conflict with someone else's concurrent change surfaces as a
+#    normal git merge conflict, resolved directly in the NFS repo), then
+#    restores this node's symlink back to the shared copy.
+scripts/publish-shared-node.sh <name>
+```
+
+After publishing, update `docs/xpu-bundle-provenance.md`'s commit hash for that package if it's tracked there (the script prints a reminder).
+
+**Before starting a session** (and after finishing one), check for real uncommitted changes anyone left in the shared tree:
+
+```bash
+scripts/check-shared-nodes-clean.sh
+```
+
+Ignores build-artifact noise (`__pycache__`/`*.pyc`/`.pytest_cache`, gitignored across all shared packages) so a real uncommitted change doesn't get lost in false positives — this exact false-positive was confirmed live in two packages (`ComfyUI-QwenVL`, `ComfyUI-RMBG`) before the `.gitignore` housekeeping fix. **If a package shows dirty and it isn't yours: don't delete it blindly** — check with whoever owns it first (see the KJNodes/GGUF near-miss above for why this matters).
+
+### Completed migrations: auto-archived to `/nfs_share/workflows/`
+
+The third shared NFS convention (alongside `custom_nodes/` and `docker-images/`): once a task's Step 12 (GUI human acceptance) records `manual_result: "accepted"`, the orchestrator automatically copies that task's entire Step 11 delivery bundle (`<task.artifactPath>/11-delivery/` — the runnable workflow, `GUI-IMPORT-README.md`, asset ledgers, acceptance report, everything) to:
+
+```
+/nfs_share/workflows/<original_workflow_name>_intel_<timestamp>/
+```
+
+- `<original_workflow_name>` is the task's name (defaults to the originally-uploaded workflow's filename), sanitized to `[a-zA-Z0-9._-]`.
+- `<timestamp>` is the UTC time of acceptance, `YYYYMMDDTHHMMSSZ` (sortable, filesystem-safe).
+- If the same name+timestamp already exists (e.g. Step 12 rerun within the same second), a `-2`, `-3`, ... suffix is added rather than overwriting.
+- This is **fully automatic and best-effort** — no script to run, nothing to configure per-task. A `rejected`/`blocked` acceptance result, or a task that never reaches Step 12, never writes anything. A failure to write to NFS (e.g. path unavailable) is logged as a non-fatal event and never affects Step 12's own completion or the task's status.
+- Override the destination root via `WORKFLOW_ARCHIVE_ROOT` (default `/nfs_share/workflows`) — same env-var-with-default convention as `MODEL_ROOTS`.
+
+This gives every person a durable, shared, browsable record of what's already been successfully migrated — independent of any single task's private workspace being cleaned up later.
+
+### Explicit non-goals
+
+- The shared venv (`/nfs_share/venv-container-xpu`) is not baked into the saved image — still lives on NFS exactly as before; this only changes how the *base image* is distributed.
+- No locking/mutex mechanism for two people editing the *same* package at the *same* time — a real conflict is meant to surface as a normal git merge conflict in `publish-shared-node.sh`, not be prevented upfront.
+- `gpu-nodes.json`'s schema and Step 05's Docker-runtime code are unchanged — image loading is a one-time host-level setup step, invisible to the orchestrator.
+- No dedup/GC policy for `/nfs_share/workflows/` yet — it only grows; revisit if NFS space becomes a concern.
 
 ---
 

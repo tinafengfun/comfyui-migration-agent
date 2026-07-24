@@ -504,6 +504,9 @@ type GpuNodeManagerNode = {
   launch_flags?: string[];
   ssh?: { host: string; user: string; port?: number; key_configured: boolean; remote_workspace_root?: string };
   model_share?: "nfs_same_path" | "none";
+  runtime?: "bare" | "docker";
+  docker_image?: string;
+  nfs_share_root?: string;
 };
 
 type GpuNodeFormState = {
@@ -522,6 +525,9 @@ type GpuNodeFormState = {
   ssh_key_path: string;
   ssh_remote_workspace_root: string;
   model_share: "nfs_same_path" | "none";
+  runtime: "bare" | "docker";
+  docker_image: string;
+  nfs_share_root: string;
 };
 
 const EMPTY_FORM: GpuNodeFormState = {
@@ -539,7 +545,10 @@ const EMPTY_FORM: GpuNodeFormState = {
   ssh_port: "22",
   ssh_key_path: "",
   ssh_remote_workspace_root: "",
-  model_share: "nfs_same_path"
+  model_share: "nfs_same_path",
+  runtime: "bare",
+  docker_image: "",
+  nfs_share_root: "/nfs_share"
 };
 
 function formFromNode(n: GpuNodeManagerNode): GpuNodeFormState {
@@ -558,7 +567,10 @@ function formFromNode(n: GpuNodeManagerNode): GpuNodeFormState {
     ssh_port: n.ssh?.port !== undefined ? String(n.ssh.port) : "22",
     ssh_key_path: "", // never echoed back from server
     ssh_remote_workspace_root: n.ssh?.remote_workspace_root ?? "",
-    model_share: n.model_share ?? "nfs_same_path"
+    model_share: n.model_share ?? "nfs_same_path",
+    runtime: n.runtime ?? "bare",
+    docker_image: n.docker_image ?? "",
+    nfs_share_root: n.nfs_share_root ?? "/nfs_share"
   };
 }
 
@@ -607,7 +619,12 @@ function GpuNodeManager({ api, onClose, onChanged }: {
           ...(form.ssh_remote_workspace_root.trim() ? { remote_workspace_root: form.ssh_remote_workspace_root.trim() } : {})
         }
       } : {}),
-      model_share: form.model_share
+      model_share: form.model_share,
+      runtime: form.runtime,
+      ...(form.runtime === "docker" ? {
+        docker_image: form.docker_image.trim(),
+        nfs_share_root: form.nfs_share_root.trim() || "/nfs_share"
+      } : {})
     };
     try {
       if (originalName && originalName !== form.name.trim()) {
@@ -651,6 +668,20 @@ function GpuNodeManager({ api, onClose, onChanged }: {
     }
   }
 
+  async function handleSyncDockerImage(name: string): Promise<void> {
+    const key = `${name}-sync`;
+    setVerifyResults((cur) => ({ ...cur, [key]: "pending" }));
+    try {
+      const result = await api.syncGpuNodeDockerImage(name);
+      setVerifyResults((cur) => ({ ...cur, [key]: result }));
+    } catch (err) {
+      setVerifyResults((cur) => ({
+        ...cur,
+        [key]: { ok: false, detail: err instanceof Error ? err.message : String(err) }
+      }));
+    }
+  }
+
   async function handleVerifyForm(form: GpuNodeFormState): Promise<void> {
     // Verify-before-save: serialize the form the same way handleSave does.
     const model_roots = form.model_roots.split(",").map((s) => s.trim()).filter(Boolean);
@@ -670,6 +701,11 @@ function GpuNodeManager({ api, onClose, onChanged }: {
           port: Number(form.ssh_port) || 22,
           ...(form.ssh_key_path.trim() ? { key_path: form.ssh_key_path.trim() } : {})
         }
+      } : {}),
+      runtime: form.runtime,
+      ...(form.runtime === "docker" ? {
+        docker_image: form.docker_image.trim(),
+        nfs_share_root: form.nfs_share_root.trim() || "/nfs_share"
       } : {})
     };
     setVerifyResults((cur) => ({ ...cur, [`${form.name}-form`]: "pending" }));
@@ -724,14 +760,33 @@ function GpuNodeManager({ api, onClose, onChanged }: {
                       <div className="gpu-node-card-path muted">ssh: {n.ssh.user}@{n.ssh.host}:{n.ssh.port ?? 22} (key {n.ssh.key_configured ? "set" : "unset"})</div>
                     )}
                     {n.model_share && <div className="muted">model_share: {n.model_share}</div>}
+                    <div className="muted">runtime: {n.runtime ?? "bare"}{n.runtime === "docker" && n.docker_image ? ` · ${n.docker_image}` : ""}</div>
+                    {n.runtime === "docker" && n.nfs_share_root && <div className="muted">nfs_share_root: {n.nfs_share_root}</div>}
                     {vr && vr !== "pending" && (
                       <div className={`gpu-node-verify ${vr.ok ? "ok" : "fail"}`}>
                         {vr.ok ? "✓ " : "✗ "}{vr.detail}
                       </div>
                     )}
                     {vr === "pending" && <div className="muted">Verifying…</div>}
+                    {(() => {
+                      const sr = verifyResults[`${n.name}-sync`];
+                      return sr && sr !== "pending" ? (
+                        <div className={`gpu-node-verify ${sr.ok ? "ok" : "fail"}`}>
+                          {sr.ok ? "✓ " : "✗ "}{sr.detail}
+                        </div>
+                      ) : sr === "pending" ? <div className="muted">Syncing image from NFS…</div> : null;
+                    })()}
                     <div className="gpu-node-card-actions">
                       <button className="btn btn-sm" onClick={() => void handleVerify(n.name)} disabled={vr === "pending"}>Test</button>
+                      {n.runtime === "docker" && (
+                        <button
+                          className="btn btn-sm"
+                          onClick={() => void handleSyncDockerImage(n.name)}
+                          disabled={verifyResults[`${n.name}-sync`] === "pending"}
+                        >
+                          Sync Docker Image from NFS
+                        </button>
+                      )}
                       <button className="btn btn-sm" onClick={() => { setEditing(formFromNode(n)); setEditingOriginalName(n.name); }}>Edit</button>
                       <button className="btn btn-sm btn-danger" onClick={() => void handleDelete(n.name)}>Delete</button>
                     </div>
@@ -786,6 +841,18 @@ function GpuNodeForm({ initial, onCancel, onSave, onVerify, verifyResult }: {
             <option value="none">none</option>
           </select>
         </label>
+        <label>runtime
+          <select value={form.runtime} onChange={(e) => set("runtime", e.currentTarget.value as "bare" | "docker")}>
+            <option value="bare">bare</option>
+            <option value="docker">docker</option>
+          </select>
+        </label>
+        {form.runtime === "docker" && (
+          <>
+            <label>docker_image<input type="text" placeholder="intel/llm-scaler-omni:0.1.0-b7" value={form.docker_image} onChange={(e) => set("docker_image", e.currentTarget.value)} /></label>
+            <label>nfs_share_root<input type="text" value={form.nfs_share_root} onChange={(e) => set("nfs_share_root", e.currentTarget.value)} /></label>
+          </>
+        )}
         {form.kind === "ssh" && (
           <>
             <label>ssh.host<input type="text" value={form.ssh_host} onChange={(e) => set("ssh_host", e.currentTarget.value)} /></label>
@@ -804,7 +871,16 @@ function GpuNodeForm({ initial, onCancel, onSave, onVerify, verifyResult }: {
       <div className="gpu-node-form-actions">
         <button className="btn btn-sm" onClick={() => onVerify(form)} disabled={verifyResult === "pending"}>Test (without saving)</button>
         <button className="btn btn-sm" onClick={onCancel}>Cancel</button>
-        <button className="btn btn-sm btn-primary" onClick={() => onSave(form)} disabled={!form.name.trim() || !form.comfyui_root.trim() || !form.venv_python.trim()}>Save</button>
+        <button
+          className="btn btn-sm btn-primary"
+          onClick={() => onSave(form)}
+          disabled={
+            !form.name.trim() || !form.comfyui_root.trim() || !form.venv_python.trim() ||
+            (form.runtime === "docker" && !form.docker_image.trim())
+          }
+        >
+          Save
+        </button>
       </div>
     </div>
   );

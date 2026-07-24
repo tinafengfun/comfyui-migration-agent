@@ -30,6 +30,7 @@ async function setupTask(): Promise<{
     comfyuiRoot: path.join(root, "ComfyUI"),
     modelRoots: [path.join(root, "models")],
     gpuNodesPath: path.join(root, "gpu-nodes.json"),
+    workflowArchiveRoot: path.join(root, "nfs-workflows"),
     autoApproveAgentPermissions: false
   };
   await ensureDir(config.workspaceRoot);
@@ -135,6 +136,7 @@ describe("Step 13 improvement approval gate", () => {
       comfyuiRoot: path.join(root, "ComfyUI"),
       modelRoots: [path.join(root, "models")],
       gpuNodesPath: path.join(root, "gpu-nodes.json"),
+      workflowArchiveRoot: path.join(root, "nfs-workflows"),
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);

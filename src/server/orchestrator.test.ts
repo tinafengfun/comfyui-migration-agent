@@ -51,6 +51,7 @@ describe("migration orchestrator", () => {
       comfyuiRoot: "/tmp/comfy",
       modelRoots: ["/home/intel/hf_models"],
       gpuNodesPath: path.join(root, "gpu-nodes.json"),
+      workflowArchiveRoot: path.join(root, "nfs-workflows"),
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -123,6 +124,7 @@ describe("migration orchestrator", () => {
       comfyuiRoot: "/tmp/comfy",
       modelRoots: ["/home/intel/hf_models"],
       gpuNodesPath: path.join(root, "gpu-nodes.json"),
+      workflowArchiveRoot: path.join(root, "nfs-workflows"),
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -167,6 +169,7 @@ describe("migration orchestrator", () => {
       comfyuiRoot: "/tmp/comfy",
       modelRoots: ["/home/intel/hf_models"],
       gpuNodesPath: path.join(root, "gpu-nodes.json"),
+      workflowArchiveRoot: path.join(root, "nfs-workflows"),
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -200,6 +203,7 @@ describe("migration orchestrator", () => {
       comfyuiRoot: "/tmp/comfy",
       modelRoots: ["/home/intel/hf_models"],
       gpuNodesPath: path.join(root, "gpu-nodes.json"),
+      workflowArchiveRoot: path.join(root, "nfs-workflows"),
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -244,6 +248,7 @@ describe("migration orchestrator", () => {
       comfyuiRoot,
       modelRoots: [modelRoot],
       gpuNodesPath: path.join(root, "gpu-nodes.json"),
+      workflowArchiveRoot: path.join(root, "nfs-workflows"),
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -320,6 +325,7 @@ describe("migration orchestrator", () => {
       comfyuiRoot: path.join(root, "ComfyUI"),
       modelRoots: [path.join(root, "models")],
       gpuNodesPath: path.join(root, "gpu-nodes.json"),
+      workflowArchiveRoot: path.join(root, "nfs-workflows"),
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -383,6 +389,7 @@ describe("migration orchestrator", () => {
       comfyuiRoot: path.join(root, "ComfyUI"),
       modelRoots: [path.join(root, "models")],
       gpuNodesPath: path.join(root, "gpu-nodes.json"),
+      workflowArchiveRoot: path.join(root, "nfs-workflows"),
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -450,6 +457,7 @@ describe("migration orchestrator", () => {
       comfyuiRoot: path.join(root, "ComfyUI"),
       modelRoots: [modelRoot],
       gpuNodesPath: path.join(root, "gpu-nodes.json"),
+      workflowArchiveRoot: path.join(root, "nfs-workflows"),
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -523,6 +531,7 @@ describe("migration orchestrator", () => {
       comfyuiRoot: path.join(root, "ComfyUI"),
       modelRoots: [path.join(root, "models")],
       gpuNodesPath: path.join(root, "gpu-nodes.json"),
+      workflowArchiveRoot: path.join(root, "nfs-workflows"),
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -583,6 +592,7 @@ describe("migration orchestrator", () => {
       comfyuiRoot: path.join(root, "ComfyUI"),
       modelRoots: [path.join(root, "models")],
       gpuNodesPath: path.join(root, "gpu-nodes.json"),
+      workflowArchiveRoot: path.join(root, "nfs-workflows"),
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -661,6 +671,7 @@ describe("migration orchestrator", () => {
       comfyuiRoot: path.join(root, "ComfyUI"),
       modelRoots: [initialModelRoot],
       gpuNodesPath: path.join(root, "gpu-nodes.json"),
+      workflowArchiveRoot: path.join(root, "nfs-workflows"),
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -726,6 +737,7 @@ describe("migration orchestrator", () => {
       comfyuiRoot: path.join(root, "ComfyUI"),
       modelRoots: [path.join(root, "models")],
       gpuNodesPath: path.join(root, "gpu-nodes.json"),
+      workflowArchiveRoot: path.join(root, "nfs-workflows"),
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -778,6 +790,7 @@ describe("migration orchestrator", () => {
       comfyuiRoot: "/tmp/comfy",
       modelRoots: ["/home/intel/hf_models"],
       gpuNodesPath: path.join(root, "gpu-nodes.json"),
+      workflowArchiveRoot: path.join(root, "nfs-workflows"),
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -822,6 +835,7 @@ describe("migration orchestrator", () => {
       comfyuiRoot: "/tmp/comfy",
       modelRoots: ["/home/intel/hf_models"],
       gpuNodesPath: path.join(root, "gpu-nodes.json"),
+      workflowArchiveRoot: path.join(root, "nfs-workflows"),
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -863,6 +877,7 @@ describe("migration orchestrator", () => {
       comfyuiRoot: "/tmp/comfy",
       modelRoots: ["/home/intel/hf_models"],
       gpuNodesPath: path.join(root, "gpu-nodes.json"),
+      workflowArchiveRoot: path.join(root, "nfs-workflows"),
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -924,6 +939,7 @@ describe("migration orchestrator", () => {
       comfyuiRoot: "/tmp/comfy",
       modelRoots: ["/home/intel/hf_models"],
       gpuNodesPath: path.join(root, "gpu-nodes.json"),
+      workflowArchiveRoot: path.join(root, "nfs-workflows"),
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -987,6 +1003,7 @@ describe("migration orchestrator", () => {
       comfyuiRoot: "/tmp/comfy",
       modelRoots: ["/home/intel/hf_models"],
       gpuNodesPath: path.join(root, "gpu-nodes.json"),
+      workflowArchiveRoot: path.join(root, "nfs-workflows"),
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -1049,6 +1066,7 @@ describe("migration orchestrator", () => {
       comfyuiRoot: "/tmp/comfy",
       modelRoots: ["/home/intel/hf_models"],
       gpuNodesPath: path.join(root, "gpu-nodes.json"),
+      workflowArchiveRoot: path.join(root, "nfs-workflows"),
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -1099,6 +1117,7 @@ describe("migration orchestrator", () => {
       comfyuiRoot: "/tmp/comfy",
       modelRoots: ["/home/intel/hf_models"],
       gpuNodesPath: path.join(root, "gpu-nodes.json"),
+      workflowArchiveRoot: path.join(root, "nfs-workflows"),
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -1175,6 +1194,7 @@ describe("migration orchestrator", () => {
       comfyuiRoot: "/tmp/comfy",
       modelRoots: ["/home/intel/hf_models"],
       gpuNodesPath: path.join(root, "gpu-nodes.json"),
+      workflowArchiveRoot: path.join(root, "nfs-workflows"),
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -1227,6 +1247,7 @@ describe("migration orchestrator", () => {
       comfyuiRoot: path.join(root, "ComfyUI"),
       modelRoots: [path.join(root, "models")],
       gpuNodesPath: path.join(root, "gpu-nodes.json"),
+      workflowArchiveRoot: path.join(root, "nfs-workflows"),
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -1276,6 +1297,7 @@ describe("migration orchestrator", () => {
       comfyuiRoot: path.join(root, "ComfyUI"),
       modelRoots: [path.join(root, "models")],
       gpuNodesPath: path.join(root, "gpu-nodes.json"),
+      workflowArchiveRoot: path.join(root, "nfs-workflows"),
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -1324,6 +1346,7 @@ describe("migration orchestrator", () => {
       comfyuiRoot: "/tmp/comfy",
       modelRoots: ["/home/intel/hf_models"],
       gpuNodesPath: path.join(root, "gpu-nodes.json"),
+      workflowArchiveRoot: path.join(root, "nfs-workflows"),
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -1369,6 +1392,7 @@ describe("migration orchestrator", () => {
       comfyuiRoot: "/tmp/comfy",
       modelRoots: ["/home/intel/hf_models"],
       gpuNodesPath: path.join(root, "gpu-nodes.json"),
+      workflowArchiveRoot: path.join(root, "nfs-workflows"),
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);

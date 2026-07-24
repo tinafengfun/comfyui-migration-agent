@@ -288,12 +288,18 @@ export function useApi() {
     return res.json();
   }, []);
 
+  const syncGpuNodeDockerImage = useCallback(async (name: string): Promise<GpuNodeVerifyResult> => {
+    const res = await fetch(`/api/gpu-nodes/${encodeURIComponent(name)}/sync-docker-image`, { method: "POST" });
+    if (!res.ok) throw new Error(await res.text());
+    return res.json();
+  }, []);
+
   return {
     fetchSteps, fetchTasks, createTask, deleteTask,
     runUntilGate, runStep, resumeStep, rerunStep, hardStop,
     answerQuestion, uploadMedia, fetchArtifacts, fetchArtifactContent,
     fetchDecisions, fetchSubJobs, startSubJob, fetchProgressNarrative,
     fetchHealth, runPreflight, generateRunReport, fetchGateSignal, fetchGpuNodes,
-    createGpuNode, updateGpuNode, deleteGpuNode, verifyGpuNode
+    createGpuNode, updateGpuNode, deleteGpuNode, verifyGpuNode, syncGpuNodeDockerImage
   };
 }

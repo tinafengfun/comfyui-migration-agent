@@ -71,6 +71,7 @@ import { recordRecipeOutcome } from "./analyticsDb";
 import { ensureWorkflowInventory } from "./workflowInventory";
 import { normalizeWorkflowForApi } from "./workflowNormalize";
 import { loadGpuNodes, pickNode, type GpuNode } from "./gpuNodes";
+import { archiveAcceptedWorkflowIfNeeded } from "./workflowArchive";
 
 type EventListener = (event: AgentEvent) => void;
 type QuestionEventData = Record<string, unknown> & {
@@ -215,7 +216,40 @@ export class MigrationOrchestrator {
     const task = await this.store.updateStep(taskId, stepId, status, patch);
     const decisions = await this.store.listDecisions(taskId);
     await writeTaskStateLedger(task, decisions);
+    if (stepId === "12" && status === "completed") {
+      await this.archiveWorkflowIfAccepted(task);
+    }
     return task;
+  }
+
+  /**
+   * Best-effort: publish Step 12's delivery bundle to the shared NFS archive
+   * once GUI acceptance records manual_result=accepted. Never affects Step
+   * 12's own completion or task status — archiveAcceptedWorkflowIfNeeded()
+   * itself never throws.
+   */
+  private async archiveWorkflowIfAccepted(task: MigrationTask): Promise<void> {
+    const result = await archiveAcceptedWorkflowIfNeeded({
+      task,
+      nfsArchiveRoot: this.config.workflowArchiveRoot
+    });
+    if (result.archived) {
+      await this.emit({
+        taskId: task.id,
+        stepId: "12",
+        type: "artifact_created",
+        message: `Archived accepted delivery bundle to shared NFS: ${result.destination}`,
+        data: { destination: result.destination }
+      });
+    } else if (result.reason?.startsWith("archive failed:")) {
+      await this.emit({
+        taskId: task.id,
+        stepId: "12",
+        type: "progress",
+        message: `Could not archive delivery bundle to shared NFS (non-fatal): ${result.reason}`,
+        data: { reason: result.reason }
+      });
+    }
   }
 
   async runStep(

@@ -28,6 +28,7 @@ beforeEach(async () => {
     comfyuiRoot: "/tmp/comfy",
     modelRoots: ["/home/intel/hf_models"],
     gpuNodesPath: path.join(root, "gpu-nodes.json"),
+    workflowArchiveRoot: path.join(root, "nfs-workflows"),
     autoApproveAgentPermissions: false
   };
   await ensureDir(config.workspaceRoot);

@@ -19,6 +19,7 @@ function testConfig(root: string): AppConfig {
     comfyuiRoot: path.join(root, "ComfyUI"),
     modelRoots: [path.join(root, "models")],
     gpuNodesPath: path.join(root, "gpu-nodes.json"),
+    workflowArchiveRoot: path.join(root, "nfs-workflows"),
     autoApproveAgentPermissions: false
   };
 }

@@ -40,6 +40,7 @@ describe("prompt skill compiler", () => {
       comfyuiRoot: "/tmp/comfy",
       modelRoots: ["/home/intel/hf_models"],
       gpuNodesPath: path.join(root, "gpu-nodes.json"),
+      workflowArchiveRoot: path.join(root, "nfs-workflows"),
       autoApproveAgentPermissions: false
     };
 
@@ -91,6 +92,7 @@ describe("prompt skill compiler", () => {
       comfyuiRoot: "/tmp/comfy",
       modelRoots: ["/home/intel/hf_models"],
       gpuNodesPath: path.join(root, "gpu-nodes.json"),
+      workflowArchiveRoot: path.join(root, "nfs-workflows"),
       autoApproveAgentPermissions: false
     };
 
@@ -149,6 +151,7 @@ describe("prompt skill compiler", () => {
       comfyuiRoot: "/tmp/comfy",
       modelRoots: ["/home/intel/hf_models"],
       gpuNodesPath: path.join(root, "gpu-nodes.json"),
+      workflowArchiveRoot: path.join(root, "nfs-workflows"),
       autoApproveAgentPermissions: false
     };
 
