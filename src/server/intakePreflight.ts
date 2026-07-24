@@ -7,6 +7,7 @@ import {
   type EnumDependency,
   type ObjectInfo
 } from "./enumDependencies";
+import { loadBuiltinNodeTypes } from "./builtinNodes";
 
 export interface IntakePreflightResult {
   artifactPath: string;
@@ -74,7 +75,7 @@ export async function ensureIntakePreflight(input: {
   const mediaRequests = extractInputMediaRequests(nodes);
   const modelIndex = await indexExactFilenames(modelRoots, modelRequests.map((request) => request.name));
   const aliasIndex = await indexPossibleAliases(modelRoots, modelRequests.map((request) => request.name));
-  const customNodeRows = await buildCustomNodeRows(nodes, customNodeRoot);
+  const customNodeRows = await buildCustomNodeRows(nodes, customNodeRoot, input.comfyuiRoot);
   // Implicit package dependencies: enum widget values (sampler_name, scheduler, …)
   // injected by a source-side custom package but absent from target core. These are
   // invisible to node-type scanning (the host node is often comfy-core).
@@ -279,18 +280,23 @@ function buildAssetRow(
   };
 }
 
-async function buildCustomNodeRows(nodes: WorkflowNode[], customNodeRoot: string): Promise<CustomNodeRow[]> {
+async function buildCustomNodeRows(
+  nodes: WorkflowNode[],
+  customNodeRoot: string,
+  comfyuiRoot: string
+): Promise<CustomNodeRow[]> {
   const dirs = await fs.readdir(customNodeRoot, { withFileTypes: true }).catch((error) => {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
     throw error;
   });
   const dirNames = dirs.filter((entry) => entry.isDirectory()).map((entry) => entry.name);
+  const builtinTypes = loadBuiltinNodeTypes(comfyuiRoot);
   const custom = new Map<string, { type: string; packageHint: string; critical: boolean }>();
   for (const node of nodes) {
     const type = String(node.type ?? "(unknown)");
     const properties = isRecord(node.properties) ? node.properties : {};
     const packageHint = String(properties.cnr_id ?? properties.aux_id ?? inferPackageHint(type));
-    if (!isCustomNode(type, packageHint)) continue;
+    if (!isCustomNode(type, packageHint, builtinTypes)) continue;
     const critical = isCriticalPathNode(node);
     const key = `${type}\0${packageHint}`;
     const prior = custom.get(key);
@@ -300,6 +306,23 @@ async function buildCustomNodeRows(nodes: WorkflowNode[], customNodeRoot: string
     .sort((a, b) => a.type.localeCompare(b.type))
     .map((item) => {
       const evidence = findCustomNodeEvidence(item, dirNames);
+      // A node the workflow itself tags as native ComfyUI core (`cnr_id:
+      // comfy-core`) but that isn't registered in *this* local ComfyUI build
+      // isn't a custom-node package gap -- there's no repo to clone. It means
+      // the local build is missing a (possibly very recent) upstream core
+      // node. Label and route it distinctly so a human isn't told to "find
+      // the source package" for something that was never a package.
+      if (item.packageHint === "comfy-core" && evidence.length === 0) {
+        return {
+          nodeType: item.type,
+          criticalPath: item.critical ? "yes" : "no",
+          evidence: "not registered in local ComfyUI core (upstream version gap)",
+          sourcePackage: "comfy-core (missing locally)",
+          state: "source unknown",
+          humanAction:
+            "Workflow tags this node as native ComfyUI core, but the local ComfyUI build does not have it. Update ComfyUI to a version that includes this node, or confirm an equivalent custom-node package before continuing."
+        };
+      }
       return {
         nodeType: item.type,
         criticalPath: item.critical ? "yes" : "no",
@@ -311,8 +334,16 @@ async function buildCustomNodeRows(nodes: WorkflowNode[], customNodeRoot: string
     });
 }
 
-function isCustomNode(type: string, packageHint: string): boolean {
-  if (packageHint === "comfy-core") return false;
+function isCustomNode(type: string, packageHint: string, builtinTypes: Set<string>): boolean {
+  // Real bug this closes: `cnr_id: "comfy-core"` was trusted unconditionally,
+  // so a node the workflow's own metadata truthfully labels as native core
+  // (e.g. TextEncodeBooguEdit, added upstream after this build's ComfyUI
+  // checkout) was skipped entirely -- never listed, never gated -- until a
+  // much later step discovered by inspection that it isn't actually
+  // registered locally. Cross-check against the real local node registry
+  // (parsed from this build's own nodes.py + comfy_extras/*.py) instead of
+  // trusting the label at face value.
+  if (packageHint === "comfy-core") return !builtinTypes.has(type);
   const coreTypes = new Set([
     "CLIPLoader",
     "CLIPTextEncode",
