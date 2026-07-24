@@ -15,10 +15,11 @@ import { promisify } from "node:util";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { loadGpuNodes, pickNode, nodeApiUrl, type GpuNode } from "../src/server/gpuNodes";
+import { loadGpuNodes, pickNode, nodeApiUrl, resolveNfsShareRoot, type GpuNode } from "../src/server/gpuNodes";
 import { loadConfig } from "../src/server/config";
 import { loadAllRecipes } from "../src/server/recipeLibrary";
 import { runNodePrecheck, reposToPrepare, type BaselineNode, type SamplerPackageCheck } from "../src/server/nodePrecheck";
+import { ensureSharedVenvLockScriptDeployed } from "../src/server/sharedVenvLock";
 import type { ObjectInfo } from "../src/server/enumPackageInstall";
 
 const execFile = promisify(execFileCb);
@@ -116,6 +117,11 @@ async function main() {
 
   if (prepare && report.fixable.length) {
     console.log(`\n=== --prepare: installing ${reposToPrepare(report).length} package(s) ===`);
+    // pip install goes through the shared-venv lock wrapper, not pip directly —
+    // /nfs_share/venv-container-xpu has no cross-invocation lock of its own and
+    // two concurrent installs into it can corrupt site-packages (confirmed live
+    // this is a routine risk — see scripts/with-shared-venv-lock.sh).
+    const lockScriptPath = ensureSharedVenvLockScriptDeployed(config, resolveNfsShareRoot(node) ?? "/nfs_share");
     for (const repo of reposToPrepare(report)) {
       const dir = repo.replace(/\.git$/, "").split("/").pop();
       const cn = `${node.comfyui_root}/custom_nodes`;
@@ -123,9 +129,9 @@ async function main() {
         node.kind === "ssh" ? "[ -f ~/.proxyrc ] && . ~/.proxyrc 2>/dev/null || true" : "true",
         `cd '${cn}'`,
         `if [ -d '${dir}' ]; then echo already; else git clone --depth 1 '${repo}' '${dir}'; fi`,
-        `if [ -f '${dir}/requirements.txt' ]; then '${node.venv_python}' -m pip install -r '${dir}/requirements.txt'; fi`
+        `if [ -f '${dir}/requirements.txt' ]; then bash '${lockScriptPath}' '${node.venv_python}' install -r '${dir}/requirements.txt'; fi`
       ].join(" && ");
-      const r = await runOnNode(node, cmd, 300_000);
+      const r = await runOnNode(node, cmd, 1_500_000);
       console.log(`  ${dir}: ${r.ok ? "installed" : "FAILED — " + r.out}`);
     }
     console.log("Note: restart ComfyUI (remote-comfyui.mts --action restart) then re-run precheck to verify sampler values appear.");

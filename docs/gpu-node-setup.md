@@ -195,11 +195,13 @@ docker run --rm --entrypoint bash \
   -e https_proxy=http://proxy.ims.intel.com:911 -e http_proxy=http://proxy.ims.intel.com:911 -e no_proxy=localhost,127.0.0.1 \
   -v /nfs_share:/nfs_share \
   intel/llm-scaler-omni:0.1.0-b7 -c '
-    pip --python /nfs_share/venv-container-xpu/bin/python3 install --no-cache-dir -r <package>/requirements.txt
+    bash /nfs_share/bin/with-shared-venv-lock.sh /nfs_share/venv-container-xpu/bin/python3 install --no-cache-dir -r <package>/requirements.txt
   '
 ```
 
-**Never run two `pip install`s against this venv concurrently** — pip has no cross-invocation lock, and concurrent installs into the same site-packages directory can corrupt it (confirmed as a real risk during setup; the fix is simply to serialize).
+**Never run `pip install` against this venv directly — always go through `scripts/with-shared-venv-lock.sh`.** This venv has no cross-invocation lock of its own, and two concurrent installs into it can corrupt site-packages. This isn't a rare manual-double-edit risk: Step 05's dependency installs, `node-precheck.mts --prepare`, and this manual example all install into the same venv whenever a package isn't cached yet — two people testing different new workflows around the same time is a routine collision, not an edge case. `scripts/with-shared-venv-lock.sh` serializes these via an atomic `mkdir`-based lock at `/nfs_share/venv-container-xpu.lock`, deployed once to `/nfs_share/bin/with-shared-venv-lock.sh` (reachable from any node without per-node transport, since `/nfs_share` is already mounted everywhere). **Not `flock`/`fcntl`** — confirmed live that advisory locks do not provide real cross-host exclusion here: `remote-124-12` is both the NFS server and accesses `/nfs_share` as a local path (not via its own NFS client mount), so its local `flock()` calls never route through the same lock coordination as `local-xpu`'s NFS-client `flock()` calls — verified symmetrically broken in both directions, then verified `mkdir` (a core filesystem namespace operation, not the optional locking sideband) works correctly in both directions instead. A stale lock (crashed holder) is auto-broken after 15 minutes; a genuinely-contended lock gives up after 20 minutes with a clear "held by X since Y" error rather than hanging forever.
+
+One known gap: ComfyUI's own auto-`pip install` for missing custom-node deps at import time (see the proxy-env note above) isn't covered by this lock — it fires inside the container's own Python process, not through any of our scripts, and would need a `sitecustomize.py`/pip-internals hook to intercept (rejected as too fragile for a residual risk that's already low-probability and self-healing — a given package only triggers this once, until it's cached).
 
 **`xDiT`/`yunchang`/`nunchaku-torch` are still our own separate editable installs, not the image's baked-in copies.** `raylight` needed two pure-Python XPU patches (`xdit_for_multi_arc.patch`/`yunchang_for_multi_arc.patch` — confirmed no native compile involved) applied to our own `git clone` of `long-context-attention`/`xDiT` under `lib/`, installed editable into the shared venv, independent of the image's own `/llm/xDiT`/`/llm/sgl-kernel-xpu`. This was necessary before switching images (the old `llm-scaler-vllm:1.4` had no working `sgl-kernel-xpu`/`xfuser` at all) and is kept as-is after the switch to avoid conflating two changes — a future optimization could drop our own editable installs and point `PYTHONPATH` at the image's own (Intel-patched, real-`sgl-kernel-xpu`-backed) `/llm/xDiT` instead, but that's unverified and out of scope here.
 
@@ -292,6 +294,10 @@ The third shared NFS convention (alongside `custom_nodes/` and `docker-images/`)
 - Override the destination root via `WORKFLOW_ARCHIVE_ROOT` (default `/nfs_share/workflows`) — same env-var-with-default convention as `MODEL_ROOTS`.
 
 This gives every person a durable, shared, browsable record of what's already been successfully migrated — independent of any single task's private workspace being cleaned up later.
+
+### Shared venv: pip installs are serialized, not just documented
+
+The fourth shared write path: `/nfs_share/venv-container-xpu` (the shared `runtime=docker` venv) gets `pip install`ed into whenever a workflow needs a package it doesn't have cached yet — routinely, via Step 05's dependency installs and `node-precheck.mts --prepare`, not just rare manual maintenance. Two people testing different new workflows around the same time is a normal collision on this venv, not an edge case, so this is enforced with a real lock (`scripts/with-shared-venv-lock.sh`, atomic `mkdir`-based — `flock` was tried and confirmed **not** to provide real cross-host exclusion on this NFS mount) rather than left as a "please coordinate manually" note. See [Docker runtime](#docker-runtime-intel-xpu-bundle)'s shared venv section for the full mechanism and the ComfyUI-auto-install gap it doesn't cover.
 
 ### Explicit non-goals
 

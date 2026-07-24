@@ -27,8 +27,9 @@ import { promisify } from "node:util";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { loadGpuNodes, pickNode, nodeApiUrl, type GpuNode } from "../src/server/gpuNodes";
-import { loadConfig } from "../src/server/config";
+import { loadGpuNodes, pickNode, nodeApiUrl, resolveNfsShareRoot, type GpuNode } from "../src/server/gpuNodes";
+import { loadConfig, type AppConfig } from "../src/server/config";
+import { ensureSharedVenvLockScriptDeployed } from "../src/server/sharedVenvLock";
 import {
   installAndVerifyEnumPackage,
   type EnumRequirement,
@@ -88,30 +89,40 @@ async function fetchObjectInfo(apiUrl: string): Promise<ObjectInfo | undefined> 
 }
 
 /** Build the shell snippet that clones + pip-installs a package on the target. */
-function installScript(node: GpuNode, repo: string): string {
+function installScript(node: GpuNode, repo: string, lockScriptPath: string): string {
   const dir = repoDirName(repo);
   const cn = `${node.comfyui_root}/custom_nodes`;
   const py = node.venv_python;
   // Idempotent: skip clone if dir exists; install reqs if present. Proxy-aware.
+  // pip install goes through the shared-venv lock wrapper, not pip directly —
+  // /nfs_share/venv-container-xpu has no cross-invocation lock of its own and
+  // two concurrent installs into it can corrupt site-packages (confirmed live
+  // this is a routine risk, not an edge case — see scripts/with-shared-venv-lock.sh).
   return [
     node.kind === "ssh" ? "[ -f ~/.proxyrc ] && . ~/.proxyrc 2>/dev/null || true" : "true",
     `cd '${cn}'`,
     `if [ -d '${dir}' ]; then echo 'ALREADY_CLONED'; else git clone --depth 1 '${repo}' '${dir}'; fi`,
-    `if [ -f '${dir}/requirements.txt' ]; then '${py}' -m pip install -r '${dir}/requirements.txt'; fi`,
+    `if [ -f '${dir}/requirements.txt' ]; then bash '${lockScriptPath}' '${py}' install -r '${dir}/requirements.txt'; fi`,
     `cd '${cn}/${dir}' && git rev-parse --short HEAD 2>/dev/null || echo nocommit`
   ].join(" && ");
 }
 
-async function runInstall(node: GpuNode, repo: string, dryRun: boolean): Promise<{ ok: boolean; detail: string; commit?: string }> {
-  const script = installScript(node, repo);
+async function runInstall(
+  node: GpuNode,
+  repo: string,
+  dryRun: boolean,
+  config: AppConfig
+): Promise<{ ok: boolean; detail: string; commit?: string }> {
+  const lockScriptPath = ensureSharedVenvLockScriptDeployed(config, resolveNfsShareRoot(node) ?? "/nfs_share");
+  const script = installScript(node, repo, lockScriptPath);
   if (dryRun) return { ok: true, detail: `[dry-run] ${node.kind}: ${script}` };
   try {
     if (node.kind === "ssh") {
-      const { stdout } = await execFile("ssh", [...sshBase(node), script], { timeout: 300_000 });
+      const { stdout } = await execFile("ssh", [...sshBase(node), script], { timeout: 1_500_000 });
       const commit = stdout.trim().split("\n").pop();
       return { ok: true, detail: stdout.trim().slice(-200), commit };
     } else {
-      const { stdout } = await execFile("bash", ["-c", script], { timeout: 300_000 });
+      const { stdout } = await execFile("bash", ["-c", script], { timeout: 1_500_000 });
       const commit = stdout.trim().split("\n").pop();
       return { ok: true, detail: stdout.trim().slice(-200), commit };
     }
@@ -184,7 +195,7 @@ async function main() {
     repo: args.repo,
     requirements: args.verify,
     fetchObjectInfo: () => fetchObjectInfo(apiUrl),
-    runInstall: (repo) => runInstall(node, repo, args.dryRun),
+    runInstall: (repo) => runInstall(node, repo, args.dryRun, config),
     reloadComfyui: () => reloadComfyui(node, apiUrl, args.dryRun)
   });
 
