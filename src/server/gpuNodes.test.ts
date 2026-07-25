@@ -14,6 +14,7 @@ import {
   verifyNode,
   resolveNfsShareRoot,
   syncDockerImageFromNfs,
+  ensureDockerImageSynced,
   syncCustomNodesFromNfs,
   formatNfsHealthSuffix,
   mergeModelRoots,
@@ -409,6 +410,88 @@ describe("gpuNodes", () => {
       const result = await syncDockerImageFromNfs(node, { projectRoot: root });
       expect(result.ok).toBe(false);
       expect(result.detail).toContain("ssh block is missing");
+    });
+  });
+
+  describe("ensureDockerImageSynced", () => {
+    it("no-ops for a non-docker-runtime node", async () => {
+      const node: GpuNode = {
+        name: "d", kind: "local", comfyui_root: "/x", venv_python: "/x/.venv/bin/python3",
+        model_roots: ["/m"], api_host: "127.0.0.1", api_port: 8188
+      };
+      const result = await ensureDockerImageSynced(node, { projectRoot: "/does-not-matter" });
+      expect(result.synced).toBe(false);
+      expect(result.detail).toContain("not a docker-runtime node");
+    });
+
+    it("no-ops when docker_image is unset", async () => {
+      const node: GpuNode = {
+        name: "d", kind: "local", comfyui_root: "/x", venv_python: "/x/.venv/bin/python3",
+        model_roots: ["/m"], api_host: "127.0.0.1", api_port: 8188, runtime: "docker"
+      };
+      const result = await ensureDockerImageSynced(node, { projectRoot: "/does-not-matter" });
+      expect(result.synced).toBe(false);
+      expect(result.detail).toContain("not a docker-runtime node");
+    });
+
+    it("skips the drift check (never blocks Step 05) when the NFS manifest can't be read", async () => {
+      const root = path.join(process.cwd(), ".demo-state", "tests", `gn-ensure-nomanifest-${Date.now()}`);
+      const node: GpuNode = {
+        name: "d", kind: "local", comfyui_root: "/x", venv_python: "/x/.venv/bin/python3",
+        model_roots: ["/m"], api_host: "127.0.0.1", api_port: 8188,
+        runtime: "docker", docker_image: "does-not-exist:tag", nfs_share_root: path.join(root, "no-such-nfs-root")
+      };
+      const result = await ensureDockerImageSynced(node, { projectRoot: root });
+      expect(result.synced).toBe(false);
+      expect(result.detail).toContain("could not read NFS manifest");
+    });
+
+    it("skips the drift check when the manifest has no image_id", async () => {
+      const root = path.join(process.cwd(), ".demo-state", "tests", `gn-ensure-noid-${Date.now()}`);
+      const nfsRoot = path.join(root, "nfs-share");
+      await fs.mkdir(path.join(nfsRoot, "docker-images"), { recursive: true });
+      await fs.writeFile(
+        path.join(nfsRoot, "docker-images", "test-image-tag.manifest.json"),
+        JSON.stringify({ image: "test/image:tag" }),
+        "utf8"
+      );
+      const node: GpuNode = {
+        name: "d", kind: "local", comfyui_root: "/x", venv_python: "/x/.venv/bin/python3",
+        model_roots: ["/m"], api_host: "127.0.0.1", api_port: 8188,
+        runtime: "docker", docker_image: "test/image:tag", nfs_share_root: nfsRoot
+      };
+      const result = await ensureDockerImageSynced(node, { projectRoot: root });
+      expect(result.synced).toBe(false);
+      expect(result.detail).toContain("no image_id");
+    });
+
+    it("triggers a sync from NFS when the image isn't present locally (real case: never loaded, or a different image_id)", async () => {
+      const root = path.join(process.cwd(), ".demo-state", "tests", `gn-ensure-mismatch-${Date.now()}`);
+      const nfsRoot = path.join(root, "nfs-share");
+      await fs.mkdir(path.join(nfsRoot, "docker-images"), { recursive: true });
+      await fs.writeFile(
+        path.join(nfsRoot, "docker-images", "test-image-tag.manifest.json"),
+        JSON.stringify({ image: "test/image:tag", image_id: "sha256:deadbeef" }),
+        "utf8"
+      );
+      await fs.mkdir(path.join(root, "scripts"), { recursive: true });
+      await fs.writeFile(
+        path.join(root, "scripts", "load-docker-image-from-nfs.sh"),
+        "#!/usr/bin/env bash\necho synced-ok\n",
+        { mode: 0o755 }
+      );
+      const node: GpuNode = {
+        // "test/image:tag" is never actually loaded in this test sandbox --
+        // docker image inspect naturally returns nothing for it, exercising
+        // the real "not present locally" path without mocking docker itself.
+        name: "d", kind: "local", comfyui_root: "/x", venv_python: "/x/.venv/bin/python3",
+        model_roots: ["/m"], api_host: "127.0.0.1", api_port: 8188,
+        runtime: "docker", docker_image: "test/image:tag", nfs_share_root: nfsRoot
+      };
+      const result = await ensureDockerImageSynced(node, { projectRoot: root });
+      expect(result.synced).toBe(true);
+      expect(result.detail).toContain("not present locally");
+      expect(result.detail).toContain("synced-ok");
     });
   });
 

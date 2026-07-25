@@ -72,7 +72,7 @@ import { appendFeedbackEvent, type FeedbackEventInput } from "./feedbackLog";
 import { recordRecipeOutcome } from "./analyticsDb";
 import { ensureWorkflowInventory } from "./workflowInventory";
 import { normalizeWorkflowForApi } from "./workflowNormalize";
-import { loadGpuNodes, mergeModelRoots, pickNode, type GpuNode } from "./gpuNodes";
+import { ensureDockerImageSynced, loadGpuNodes, mergeModelRoots, pickNode, type GpuNode } from "./gpuNodes";
 import { archiveAcceptedWorkflowIfNeeded } from "./workflowArchive";
 
 type EventListener = (event: AgentEvent) => void;
@@ -636,6 +636,30 @@ export class MigrationOrchestrator {
 
     if (stepId === "05" && await this.pauseEnvironmentDeploymentOnAssetGaps(task, step)) {
       return;
+    }
+
+    if (stepId === "05") {
+      // Cheap drift check before every Step 05 run (not just the manual
+      // "Sync Docker Image" button): compares the node's local image_id
+      // against the NFS manifest and only pays for a full ~14GB reload when
+      // they actually differ. Best-effort -- a check failure (unreachable
+      // node, manifest missing) must never block Step 05 itself.
+      const node = this.lookupTaskNode(task);
+      if (node) {
+        const syncResult = await ensureDockerImageSynced(node, this.config).catch((err) => ({
+          synced: false,
+          detail: `docker image sync check failed: ${err instanceof Error ? err.message : String(err)}`
+        }));
+        await this.emit({
+          taskId,
+          stepId,
+          type: "progress",
+          message: syncResult.synced
+            ? `Docker image resynced from NFS before Step 05: ${syncResult.detail}`
+            : `Docker image check before Step 05: ${syncResult.detail}`,
+          data: syncResult
+        });
+      }
     }
 
     if (stepId !== "00" && stepId !== "01" && stepId !== "02" && stepId !== "03" && stepId !== "04") {

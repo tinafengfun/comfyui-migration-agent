@@ -421,6 +421,88 @@ export async function syncDockerImageFromNfs(
 }
 
 /**
+ * Cheap pre-flight check for a docker-runtime node's image, meant to run
+ * automatically before every Step 05 (not just the manual "Sync Docker
+ * Image" button): compares the node's locally-loaded image_id against the
+ * NFS manifest's recorded image_id -- a fast `docker image inspect`, no
+ * data transfer -- and only invokes the full syncDockerImageFromNfs (a real
+ * ~14GB `docker load`) when they differ or the image isn't present locally
+ * at all. The manifest itself is read directly off the orchestrator's own
+ * `/nfs_share` mount (no SSH needed for that part); only the "what's
+ * actually loaded on the target node" half needs to run on the node.
+ * No-ops for non-docker-runtime nodes or when the manifest can't be read
+ * (best-effort -- a missing/unreadable manifest should never block Step 05).
+ */
+export async function ensureDockerImageSynced(
+  node: GpuNode,
+  config: Pick<AppConfig, "projectRoot">
+): Promise<{ synced: boolean; detail: string }> {
+  if (node.runtime !== "docker" || !node.docker_image) {
+    return { synced: false, detail: "not a docker-runtime node; nothing to sync" };
+  }
+
+  const nfsRoot = resolveNfsShareRoot(node) ?? "/nfs_share";
+  const safeName = node.docker_image.replace(/[/:]/g, "-");
+  const manifestPath = path.join(nfsRoot, "docker-images", `${safeName}.manifest.json`);
+  let expectedId: string | undefined;
+  try {
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8")) as { image_id?: string };
+    expectedId = manifest.image_id;
+  } catch (err) {
+    return {
+      synced: false,
+      detail: `could not read NFS manifest at ${manifestPath}: ${(err as Error).message} -- skipping drift check`
+    };
+  }
+  if (!expectedId) {
+    return { synced: false, detail: `manifest at ${manifestPath} has no image_id -- skipping drift check` };
+  }
+
+  const actualId = await inspectRemoteImageId(node);
+  if (actualId === expectedId) {
+    return {
+      synced: false,
+      detail: `docker image ${node.docker_image} already matches NFS manifest (${expectedId.slice(0, 19)}...)`
+    };
+  }
+
+  const reason = actualId
+    ? `local image_id ${actualId.slice(0, 19)}... does not match NFS manifest image_id ${expectedId.slice(0, 19)}...`
+    : `docker image ${node.docker_image} not present locally`;
+  const result = await syncDockerImageFromNfs(node, config);
+  return {
+    synced: result.ok,
+    detail: `${reason} -- ${result.ok ? "synced from NFS" : "sync attempt failed"}: ${result.detail}`
+  };
+}
+
+/** `docker image inspect --format '{{.Id}}'` on the node, local or over ssh. Returns undefined on any failure (image missing, node unreachable, etc.) -- never throws. */
+async function inspectRemoteImageId(node: GpuNode): Promise<string | undefined> {
+  const cmd = `docker image inspect ${shellQuote(node.docker_image!)} --format '{{.Id}}' 2>/dev/null || true`;
+  try {
+    if (node.kind === "local") {
+      const { stdout } = await execFileAsync("bash", ["-c", cmd], { timeout: 10_000 });
+      return stdout.trim() || undefined;
+    }
+    if (!node.ssh) return undefined;
+    const port = node.ssh.port ?? 22;
+    const sshKeyArgs = node.ssh.key_path ? ["-i", node.ssh.key_path] : [];
+    const { stdout } = await execFileAsync(
+      "ssh",
+      [
+        "-p", String(port), "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", ...sshKeyArgs,
+        `${node.ssh.user}@${node.ssh.host}`,
+        cmd
+      ],
+      { timeout: 15_000 }
+    );
+    return stdout.trim() || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * Bulk-symlink /nfs_share/custom_nodes/* into a node's comfyui_root/custom_nodes,
  * transporting and running scripts/sync-custom-nodes-from-nfs.sh — same
  * canonical-script-not-reimplemented approach as syncDockerImageFromNfs.
