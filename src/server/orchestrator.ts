@@ -117,6 +117,16 @@ export class MigrationOrchestrator {
   private readonly approvalBroker = new HumanApprovalBroker();
   private readonly autorunningTasks = new Set<string>();
   private readonly activeStepRuns = new Set<string>();
+  // rerunStep intentionally clears activeStepRuns for its own step before
+  // re-invoking runStep (so a legitimately-stuck run-lock doesn't block a
+  // real rerun) -- but that means activeStepRuns can't protect against
+  // rerunStep itself being called again while a previous rerun is still
+  // tearing down/restarting. Confirmed live: a rerun button with no
+  // click-feedback let a human click it 3 times in ~8 seconds, each call
+  // killing the ComfyUI process the previous call had just started and
+  // wiping its artifacts, wasting ~7 minutes of redundant environment
+  // rebuild. This tracks in-flight rerunStep calls specifically.
+  private readonly activeRerunRequests = new Set<string>();
   // Task IDs that have been hard-stopped/terminated. Their lingering run-locks
   // (held while an in-flight SDK call winds down) must not block new work.
   private readonly hardStoppedTaskIds = new Set<string>();
@@ -1627,13 +1637,30 @@ export class MigrationOrchestrator {
   }
 
   async rerunStep(taskId: string, stepId: string): Promise<void> {
-    const task = await this.store.getTask(taskId);
-    if (!task) throw new Error(`Task not found: ${taskId}`);
-    const step = this.steps.find((s) => s.id === stepId);
-    if (!step) throw new Error(`Step not found: ${stepId}`);
-
-    // 0. Cancel any active SDK session / waiting broker for this step
+    // Check-and-set must happen with no `await` in between -- otherwise two
+    // near-simultaneous calls can both race past the check before either
+    // sets the flag (confirmed necessary: an earlier version checked this
+    // after `await this.store.getTask(...)`, which reopened exactly the
+    // race this guard exists to close).
     const runKey = this.stepRunKey(taskId, stepId);
+    if (this.activeRerunRequests.has(runKey)) {
+      throw new Error(`Step ${stepId} is already being re-run; ignoring duplicate request.`);
+    }
+    this.activeRerunRequests.add(runKey);
+    try {
+      const task = await this.store.getTask(taskId);
+      if (!task) throw new Error(`Task not found: ${taskId}`);
+      const step = this.steps.find((s) => s.id === stepId);
+      if (!step) throw new Error(`Step not found: ${stepId}`);
+      await this.rerunStepInternal(task, stepId, runKey);
+    } finally {
+      this.activeRerunRequests.delete(runKey);
+    }
+  }
+
+  private async rerunStepInternal(task: MigrationTask, stepId: string, runKey: string): Promise<void> {
+    const taskId = task.id;
+    // 0. Cancel any active SDK session / waiting broker for this step
     this.activeStepRuns.delete(runKey);
     this.approvalBroker.cancelAllForStep(stepId, `Re-run requested for step ${stepId}`);
 

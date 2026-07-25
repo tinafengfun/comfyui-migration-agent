@@ -437,7 +437,7 @@ function App() {
                 taskId={selectedTaskId}
                 onRunStep={(stepId) => selectedTaskId && void api.runStep(selectedTaskId, stepId)}
                 onResumeStep={(stepId) => selectedTaskId && void api.resumeStep(selectedTaskId, stepId)}
-                onRerunStep={(stepId) => selectedTaskId && void api.rerunStep(selectedTaskId, stepId)}
+                onRerunStep={(stepId) => (selectedTaskId ? api.rerunStep(selectedTaskId, stepId) : Promise.resolve())}
               />
             ) : rightTab === "artifacts" ? (
               <ArtifactBrowser
@@ -977,9 +977,27 @@ function StepDetail({ step, state, activities, narrative, taskId, onRunStep, onR
   taskId?: string;
   onRunStep: (id: string) => void;
   onResumeStep: (id: string) => void;
-  onRerunStep: (id: string) => void;
+  onRerunStep: (id: string) => Promise<void>;
 }) {
+  // Real bug this closes: clicking "Re-run" gave zero visual feedback, so a
+  // click that looked like it did nothing invited another click -- confirmed
+  // live, 3 rapid clicks each killed the ComfyUI process the previous click
+  // had just started and wiped its artifacts, wasting ~7 minutes of
+  // redundant environment rebuild. Tracked by stepId (not a plain boolean)
+  // so navigating to a different step's detail view doesn't show a stale
+  // "Re-running…" state.
+  const [rerunningStepId, setRerunningStepId] = useState<string | undefined>(undefined);
+  async function handleRerun(stepId: string) {
+    setRerunningStepId(stepId);
+    try {
+      await onRerunStep(stepId);
+    } finally {
+      setRerunningStepId((current) => (current === stepId ? undefined : current));
+    }
+  }
+
   if (!step) return <div className="step-detail"><p className="muted">Select a step.</p></div>;
+  const isRerunning = rerunningStepId === step.id;
 
   return (
     <div className="step-detail">
@@ -999,11 +1017,15 @@ function StepDetail({ step, state, activities, narrative, taskId, onRunStep, onR
           {state?.status === "paused" && (
             <>
               <button className="btn btn-primary" onClick={() => onResumeStep(step.id)}>Resume</button>
-              <button className="btn" onClick={() => onRerunStep(step.id)}>Re-run</button>
+              <button className="btn" onClick={() => void handleRerun(step.id)} disabled={isRerunning}>
+                {isRerunning ? "Re-running…" : "Re-run"}
+              </button>
             </>
           )}
           {["completed", "failed", "hard_stopped"].includes(state?.status ?? "") && (
-            <button className="btn" onClick={() => onRerunStep(step.id)}>Re-run</button>
+            <button className="btn" onClick={() => void handleRerun(step.id)} disabled={isRerunning}>
+              {isRerunning ? "Re-running…" : "Re-run"}
+            </button>
           )}
         </div>
       </div>

@@ -1601,4 +1601,61 @@ describe("migration orchestrator", () => {
     const stat = await fs.stat(outputsDir);
     expect(stat.isDirectory()).toBe(true);
   });
+
+  it("rejects a concurrent rerunStep call for the same step instead of tearing down the one already in flight (real bug: a rerun button with no click-feedback let a human triple-click it, each click killing the ComfyUI process the previous click had just started)", async () => {
+    const root = path.join(process.cwd(), ".demo-state", "tests", `orchestrator-rerun-concurrent-${Date.now()}`);
+    const config: AppConfig = {
+      port: 0,
+      projectRoot: root,
+      workspaceRoot: path.join(root, "workspaces"),
+      stateRoot: path.join(root, "state"),
+      draftDocRoot: root,
+      comfyuiRoot: "/tmp/comfy",
+      modelRoots: ["/home/intel/hf_models"],
+      gpuNodesPath: path.join(root, "gpu-nodes.json"),
+      workflowArchiveRoot: path.join(root, "nfs-workflows"),
+      autoApproveAgentPermissions: false
+    };
+    await ensureDir(config.workspaceRoot);
+    const store = new StateStore(config);
+    await store.initialize();
+
+    let runStepCalls = 0;
+    const orchestrator = new MigrationOrchestrator(
+      config,
+      store,
+      [{ id: "05", name: "Environment deployment", requiredOutput: "05-environment.md", humanIntervention: "Approve" }],
+      {
+        async runStep() {
+          runStepCalls += 1;
+          await new Promise((resolve) => setTimeout(resolve, 50));
+          throw new Error("stub: no SDK runner in unit test");
+        }
+      }
+    );
+    const task = await orchestrator.createTask({
+      name: "Concurrent rerun",
+      workflowFileName: "workflow.json",
+      workflowJson: { nodes: [], links: [] }
+    });
+    await store.updateStep(task.id, "05", "completed");
+
+    // Fire two rerun requests back-to-back without awaiting the first --
+    // mirrors two rapid clicks on a Re-run button with no disabled state.
+    const first = orchestrator.rerunStep(task.id, "05").catch((e: Error) => e);
+    const second = orchestrator.rerunStep(task.id, "05").catch((e: Error) => e);
+    const [firstResult, secondResult] = await Promise.all([first, second]);
+
+    // Exactly one of the two must have been rejected as a duplicate; the
+    // other proceeds (and fails downstream only because of the stub SDK
+    // runner, not because of the reentrancy guard).
+    const results = [firstResult, secondResult];
+    const duplicateRejections = results.filter(
+      (r) => r instanceof Error && /already being re-run/.test(r.message)
+    );
+    const stubFailures = results.filter((r) => r instanceof Error && /stub: no SDK runner/.test(r.message));
+    expect(duplicateRejections).toHaveLength(1);
+    expect(stubFailures).toHaveLength(1);
+    expect(runStepCalls).toBe(1);
+  });
 });
