@@ -72,7 +72,7 @@ import { appendFeedbackEvent, type FeedbackEventInput } from "./feedbackLog";
 import { recordRecipeOutcome } from "./analyticsDb";
 import { ensureWorkflowInventory } from "./workflowInventory";
 import { normalizeWorkflowForApi } from "./workflowNormalize";
-import { loadGpuNodes, pickNode, type GpuNode } from "./gpuNodes";
+import { loadGpuNodes, mergeModelRoots, pickNode, type GpuNode } from "./gpuNodes";
 import { archiveAcceptedWorkflowIfNeeded } from "./workflowArchive";
 
 type EventListener = (event: AgentEvent) => void;
@@ -315,7 +315,7 @@ export class MigrationOrchestrator {
       const resolveEnumPackage = buildEnumPackageResolver();
       const intake = await ensureIntakePreflight({
         task,
-        modelRoots: this.config.modelRoots,
+        modelRoots: this.resolveModelRoots(task),
         comfyuiRoot: this.config.comfyuiRoot,
         sourceObjectInfo,
         resolveEnumPackage
@@ -362,7 +362,7 @@ export class MigrationOrchestrator {
     if (stepId === "01") {
       const prep = await ensureAssetPrep({
         task,
-        modelRoots: this.config.modelRoots,
+        modelRoots: this.resolveModelRoots(task),
         comfyuiRoot: this.config.comfyuiRoot,
         stepId
       });
@@ -407,7 +407,7 @@ export class MigrationOrchestrator {
         try {
           const acquisition = await ensureAssetAcquisitionJob({
             task,
-            modelRoots: this.config.modelRoots,
+            modelRoots: this.resolveModelRoots(task),
             comfyuiRoot: this.config.comfyuiRoot,
             humanContext: "",
             redactedHumanContext: "",
@@ -523,7 +523,7 @@ export class MigrationOrchestrator {
     if (stepId === "02") {
       const feasibility = await ensureFeasibility({
         task,
-        modelRoots: this.config.modelRoots,
+        modelRoots: this.resolveModelRoots(task),
         stepId
       });
       await this.store.appendArtifact({
@@ -1991,7 +1991,7 @@ export class MigrationOrchestrator {
     if (stepId === "01") {
       step01Acquisition = await ensureAssetAcquisitionJob({
         task,
-        modelRoots: this.config.modelRoots,
+        modelRoots: this.resolveModelRoots(task),
         comfyuiRoot: this.config.comfyuiRoot,
         humanContext: decision.answer,
         redactedHumanContext: redactedAnswer,
@@ -3082,6 +3082,21 @@ export class MigrationOrchestrator {
       console.warn(`[lookupTaskNode] Failed to load gpu-nodes.json: ${(err as Error).message}`);
       return undefined;
     }
+  }
+
+  /**
+   * Model roots for Step 00/01/02's deterministic local filesystem search --
+   * the union of the global default and the task's pinned GPU node's own
+   * model_roots (see gpuNodes.ts's mergeModelRoots), not just the global
+   * default alone. These steps run plain `fs` calls on the orchestrator's
+   * own host, so this only makes sense for roots that resolve identically
+   * everywhere they're mounted (the same assumption promptSkillCompiler.ts
+   * already relies on for Steps 02+). Falls back to the global default if
+   * gpu-nodes.json can't be loaded, matching lookupTaskNode's own fallback.
+   */
+  private resolveModelRoots(task: MigrationTask): string[] {
+    const node = this.lookupTaskNode(task);
+    return node ? mergeModelRoots(this.config.modelRoots, node.model_roots) : this.config.modelRoots;
   }
 }
 

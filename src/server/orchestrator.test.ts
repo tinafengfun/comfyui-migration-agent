@@ -378,6 +378,85 @@ describe("migration orchestrator", () => {
     );
   });
 
+  it("merges the task's pinned GPU node's own model_roots into Step 00's local search (real bug: a node whose model_roots list omitted a root that's still genuinely valid there made the search blind to it)", async () => {
+    const root = path.join(process.cwd(), ".demo-state", "tests", `orchestrator-step00-node-modelroots-${Date.now()}`);
+    const globalModelsDir = path.join(root, "models-global");
+    const nodeOnlyModelsDir = path.join(root, "models-node-only");
+    const config: AppConfig = {
+      port: 0,
+      projectRoot: root,
+      workspaceRoot: path.join(root, "workspaces"),
+      stateRoot: path.join(root, "state"),
+      draftDocRoot: root,
+      comfyuiRoot: path.join(root, "ComfyUI"),
+      modelRoots: [globalModelsDir],
+      gpuNodesPath: path.join(root, "gpu-nodes.json"),
+      workflowArchiveRoot: path.join(root, "nfs-workflows"),
+      autoApproveAgentPermissions: false
+    };
+    await ensureDir(config.workspaceRoot);
+    await ensureDir(path.join(config.comfyuiRoot, "custom_nodes"));
+    await ensureDir(globalModelsDir);
+    await ensureDir(nodeOnlyModelsDir);
+    // The target asset only exists under the NODE's own model root, not the
+    // global default -- proving the search actually merged both, not just
+    // fell back to the node's list alone or the global list alone.
+    await fs.writeFile(path.join(nodeOnlyModelsDir, "only-on-remote-node.safetensors"), "fake", "utf8");
+    await fs.writeFile(
+      config.gpuNodesPath,
+      JSON.stringify({
+        default_node: "remote-test",
+        nodes: [
+          {
+            name: "remote-test",
+            kind: "ssh",
+            comfyui_root: config.comfyuiRoot,
+            venv_python: "/nfs_share/venv/bin/python3",
+            model_roots: [nodeOnlyModelsDir],
+            api_host: "172.16.124.12",
+            api_port: 8188,
+            ssh: { host: "172.16.124.12", user: "intel", port: 22, key_path: "/root/.ssh/id_ed25519" }
+          }
+        ]
+      }),
+      "utf8"
+    );
+    const store = new StateStore(config);
+    await store.initialize();
+    const orchestrator = new MigrationOrchestrator(config, store, [
+      {
+        id: "00",
+        name: "Intake",
+        requiredOutput: "00-intake-preflight.md",
+        humanIntervention: "Provide missing sources"
+      }
+    ]);
+
+    const task = await orchestrator.createTask({
+      name: "Step00 node model_roots",
+      workflowFileName: "workflow.json",
+      gpuNode: "remote-test",
+      workflowJson: {
+        nodes: [
+          {
+            id: 1,
+            type: "UNETLoader",
+            properties: { cnr_id: "comfy-core" },
+            outputs: [{ links: [1] }],
+            widgets_values: ["only-on-remote-node.safetensors", "default"]
+          }
+        ],
+        links: []
+      }
+    });
+
+    await orchestrator.runStep(task.id, "00");
+
+    const artifact = await fs.readFile(path.join(task.artifactPath, "00-intake-preflight.md"), "utf8");
+    expect(artifact).toContain("exact filename found");
+    expect(artifact).not.toContain("not found under checked model roots");
+  });
+
   it("runs Step 01 asset resolution and pauses on source-identical gaps", async () => {
     const root = path.join(process.cwd(), ".demo-state", "tests", `orchestrator-step01-assets-${Date.now()}`);
     const config: AppConfig = {

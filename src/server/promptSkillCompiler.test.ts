@@ -76,6 +76,75 @@ describe("prompt skill compiler", () => {
     expect(serializeStepJobForAgent(job)).toContain("read the artifacts listed");
   });
 
+  it("merges the pinned GPU node's own model_roots with the global default instead of overriding it (real bug: a node whose model_roots list omits a root that's still genuinely valid there made the agent blind to it)", async () => {
+    const root = path.join(process.cwd(), ".demo-state", "tests", `compiler-gpu-node-${Date.now()}`);
+    await ensureDir(root);
+    const promptPath = path.join(root, "prompt.md");
+    const skillPath = path.join(root, "skill.md");
+    await fs.writeFile(promptPath, "Prompt body", "utf8");
+    await fs.writeFile(skillPath, "Skill body", "utf8");
+    const gpuNodesPath = path.join(root, "gpu-nodes.json");
+    await fs.writeFile(
+      gpuNodesPath,
+      JSON.stringify({
+        default_node: "remote-test",
+        nodes: [
+          {
+            name: "remote-test",
+            kind: "ssh",
+            comfyui_root: "/home/intel/ComfyUI",
+            venv_python: "/nfs_share/venv/bin/python3",
+            model_roots: ["/nfs_share"],
+            api_host: "172.16.124.12",
+            api_port: 8188,
+            ssh: { host: "172.16.124.12", user: "intel", port: 22, key_path: "/root/.ssh/id_ed25519" }
+          }
+        ]
+      }),
+      "utf8"
+    );
+
+    const config: AppConfig = {
+      port: 0,
+      projectRoot: root,
+      workspaceRoot: root,
+      stateRoot: root,
+      draftDocRoot: root,
+      comfyuiRoot: "/tmp/comfy",
+      modelRoots: ["/home/intel/hf_models"],
+      gpuNodesPath,
+      workflowArchiveRoot: path.join(root, "nfs-workflows"),
+      autoApproveAgentPermissions: false
+    };
+
+    const job = await compileStepJob({
+      config,
+      task: {
+        id: "task-gpu-node",
+        name: "Task",
+        status: "pending",
+        workflowPath: path.join(root, "workflow.json"),
+        workspacePath: root,
+        artifactPath: path.join(root, "artifacts"),
+        createdAt: "now",
+        updatedAt: "now",
+        gpuNode: "remote-test",
+        steps: [{ id: "05", status: "pending" }]
+      },
+      step: {
+        id: "05",
+        name: "Environment deployment",
+        promptPath,
+        skillPath,
+        requiredOutput: "05-environment.md",
+        humanIntervention: "Resolve environment gaps"
+      }
+    });
+
+    expect(job.modelRoots).toEqual(["/home/intel/hf_models", "/nfs_share"]);
+    expect(job.comfyuiRoot).toBe("/home/intel/ComfyUI");
+  });
+
   it("passes durable artifact memory to each SDK step job", async () => {
     const root = path.join(process.cwd(), ".demo-state", "tests", "compiler-artifacts");
     const artifactPath = path.join(root, "artifacts");

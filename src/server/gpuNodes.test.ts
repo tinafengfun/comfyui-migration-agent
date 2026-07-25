@@ -16,6 +16,7 @@ import {
   syncDockerImageFromNfs,
   syncCustomNodesFromNfs,
   formatNfsHealthSuffix,
+  mergeModelRoots,
   type GpuNode
 } from "./gpuNodes";
 
@@ -428,6 +429,27 @@ describe("gpuNodes", () => {
       const result = await syncCustomNodesFromNfs(node, { projectRoot: root });
       expect(result.ok).toBe(true);
       expect(result.detail).toContain("/comfy-root /custom-share/custom_nodes");
+    });
+  });
+
+  describe("mergeModelRoots", () => {
+    it("unions the global default roots with a node's own roots", () => {
+      expect(mergeModelRoots(["/home/intel/hf_models"], ["/nfs_share"])).toEqual([
+        "/home/intel/hf_models",
+        "/nfs_share"
+      ]);
+    });
+
+    it("dedupes overlapping entries, keeping global-first ordering", () => {
+      expect(mergeModelRoots(["/a", "/b"], ["/b", "/c"])).toEqual(["/a", "/b", "/c"]);
+    });
+
+    it("returns just the global roots when the node declares none", () => {
+      expect(mergeModelRoots(["/home/intel/hf_models"], [])).toEqual(["/home/intel/hf_models"]);
+    });
+
+    it("returns just the node roots when the global list is empty", () => {
+      expect(mergeModelRoots([], ["/nfs_share"])).toEqual(["/nfs_share"]);
     });
   });
 });

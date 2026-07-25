@@ -107,6 +107,19 @@ export function loadGpuNodes(config: AppConfig): GpuNodeRegistry {
   return normalizeRegistry(parsed, config, filePath);
 }
 
+/**
+ * Union of the global default model roots and a specific node's own roots,
+ * deduped, global-first. A node's `model_roots` list is meant to be
+ * additional/override roots for that node, not a replacement for the global
+ * default -- a node whose list omits a root that's actually still valid
+ * there (e.g. hf_models genuinely NFS-mounted at the same path on both the
+ * orchestrator host and a remote node, just never added to that node's own
+ * list) shouldn't make callers blind to it.
+ */
+export function mergeModelRoots(globalRoots: string[], nodeRoots: string[]): string[] {
+  return [...new Set([...globalRoots, ...nodeRoots])];
+}
+
 /** Pick a node by name, falling back to the registry default, then to nodes[0]. */
 export function pickNode(registry: GpuNodeRegistry, name?: string): GpuNode {
   if (name) {

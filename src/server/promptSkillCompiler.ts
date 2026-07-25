@@ -7,7 +7,7 @@ import { injectSkillsForWorkflow, getMatchedSkillIds } from "./skillInjector";
 import { extractNodeModelPairs } from "./recipeInjector";
 import { recordRecipeApplied, recordSkillInjected } from "./analyticsDb";
 import { computeWorkflowSha256, formatRulesForPrompt, loadWorkflowKnowledge } from "./workflowKnowledge";
-import { loadGpuNodes, pickNode, renderGpuNodeBlock } from "./gpuNodes";
+import { loadGpuNodes, mergeModelRoots, pickNode, renderGpuNodeBlock } from "./gpuNodes";
 
 export async function compileStepJob(input: {
   config: AppConfig;
@@ -93,7 +93,7 @@ export async function compileStepJob(input: {
     const registry = loadGpuNodes(input.config);
     const node = pickNode(registry, input.task.gpuNode);
     comfyuiRoot = node.comfyui_root;
-    modelRoots = node.model_roots;
+    modelRoots = mergeModelRoots(input.config.modelRoots, node.model_roots);
     gpuNodeBlock = renderGpuNodeBlock(node, input.task.id);
   } catch (err) {
     // Config error → log and fall through with defaults. The Step 05 skill
