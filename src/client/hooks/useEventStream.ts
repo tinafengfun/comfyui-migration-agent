@@ -67,7 +67,17 @@ function extractActivity(event: AgentEvent): ActivityLine | undefined {
 }
 
 function shouldRefreshTaskState(event: AgentEvent): boolean {
-  if (["step_completed", "step_failed", "hard_stop", "human_question", "step_summary", "reflection_proposed"].includes(event.type)) {
+  // Real bug this closes: "step_started" wasn't in this list, so clicking
+  // Run fired the request and the server flipped the step to "running", but
+  // the client's own steps/tasks state (which drives the StatusBadge and
+  // which action buttons show) never re-fetched -- it stayed on "pending"
+  // until some LATER event (step_completed, human_question, ...) happened
+  // to trigger a refresh, or the user manually reloaded the page.
+  if (
+    ["step_started", "step_completed", "step_failed", "hard_stop", "human_question", "step_summary", "reflection_proposed"].includes(
+      event.type
+    )
+  ) {
     return true;
   }
   if (event.type !== "progress") return false;
