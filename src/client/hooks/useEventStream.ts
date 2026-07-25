@@ -138,7 +138,22 @@ export function useEventStream(taskId: string | undefined) {
         if (shouldRefreshTaskState(event)) {
           setNeedsRefresh((n) => n + 1);
         }
-        if (["step_completed", "step_failed", "hard_stop", "human_question", "step_summary", "reflection_proposed"].includes(event.type)) {
+        // "Human decision recorded..." fires near-instantly when a decision
+        // is submitted (see orchestrator.ts's recordHumanDecision) -- long
+        // before the SDK session's own reply (which can take 30-90+ seconds
+        // for a step like feasibility analysis). Without this, decisions
+        // (which render the "You: ..." chat bubble) only ever refetch on the
+        // NEXT human_question/step_completed, so a submitted answer stayed
+        // invisible in the chat for the entire wait -- indistinguishable
+        // from "my message didn't send," which is exactly what it looked
+        // like to a real user testing this.
+        const isDecisionRecorded = event.type === "progress" && event.message.startsWith("Human decision recorded");
+        if (
+          ["step_completed", "step_failed", "hard_stop", "human_question", "step_summary", "reflection_proposed"].includes(
+            event.type
+          ) ||
+          isDecisionRecorded
+        ) {
           setNeedsArtifactRefresh((n) => n + 1);
         }
       };

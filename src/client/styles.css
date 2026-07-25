@@ -378,6 +378,8 @@ button, input, select, textarea { font: inherit; }
   align-self: flex-end; background: #6366f1; color: white;
   word-break: break-word;
 }
+.chat-msg-pending { animation: chat-pending-pulse 1.4s ease-in-out infinite; }
+@keyframes chat-pending-pulse { 0%, 100% { opacity: 0.55; } 50% { opacity: 1; } }
 .chat-msg-role { font-size: 11px; font-weight: 700; margin-bottom: 2px; opacity: 0.7; }
 .chat-msg-time { font-size: 10px; opacity: 0.5; margin-top: 4px; text-align: right; }
 .chat-msg.human .chat-msg-time { color: rgba(255,255,255,0.7); }

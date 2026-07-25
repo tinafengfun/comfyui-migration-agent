@@ -1759,6 +1759,13 @@ function InteractiveChat({ event, stepId, decisions, allEvents, draft, onDraftCh
     return msgs;
   }, [allEvents, decisions, stepId]);
 
+  // True whenever the most recent message is ours and the agent hasn't
+  // replied yet -- Step 02-style analysis can genuinely take 30-90+ seconds
+  // to formulate its next question, and with no indicator at all a sent
+  // message that's simply awaiting a slow reply is indistinguishable from
+  // "the Send button didn't do anything."
+  const waitingForAgent = messages.length > 0 && messages[messages.length - 1].role === "human";
+
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
   // Auto-focus input when component mounts or new agent message arrives
@@ -1798,6 +1805,12 @@ function InteractiveChat({ event, stepId, decisions, allEvents, draft, onDraftCh
             <div className="chat-msg-time">{msg.time.slice(11, 19)}</div>
           </div>
         ))}
+        {waitingForAgent && (
+          <div className="chat-msg agent chat-msg-pending">
+            <div className="chat-msg-role">Agent</div>
+            <div className="chat-msg-text muted">Thinking… (feasibility analysis can take a minute or two)</div>
+          </div>
+        )}
         <div ref={chatEndRef} />
       </div>
       <div className="chat-input-area">
