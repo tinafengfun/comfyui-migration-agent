@@ -18,6 +18,7 @@ import {
 } from "./assetAcquisition";
 import { judgeFuzzyMatch, type FreeformSessionRunner } from "./assetFuzzyMatch";
 import { discoverCoreNodeRecipe } from "./coreNodeRecipeDiscovery";
+import { verifyCoreNodeRecipe } from "./coreNodeRecipeVerification";
 import { ensureAssetPrep } from "./assetPrep";
 import { checkRequiredArtifactCompletion, checkRequiredArtifactGate } from "./artifactCompletion";
 import { analyzeRunReport } from "./evolutionAnalyzer";
@@ -438,7 +439,12 @@ export class MigrationOrchestrator {
                     sessionId: `${task.id}-01-core-node-${sanitizeSessionIdSegment(nodeType)}`,
                     evidenceArtifact: `${stepId}-acquisition-report.md`
                   })
-              : undefined
+              : undefined,
+            // Verification is plain subprocess work (git/python3), not an SDK
+            // session -- runs unconditionally once a draft exists, unlike
+            // discovery above which needs sdkRunner.
+            verifyCoreNodeRecipe: ({ nodeType, patchTarget, stagedPatchPath }) =>
+              verifyCoreNodeRecipe({ nodeType, patchTarget, stagedPatchPath, comfyuiRoot: this.config.comfyuiRoot })
           });
           acquisitionItems = acquisition.unresolvedItems;
           await this.emit({

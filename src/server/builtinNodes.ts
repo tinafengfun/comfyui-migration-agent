@@ -18,7 +18,13 @@ const FALLBACK_CORE_TYPES = new Set<string>([
   "Note", "Reroute",
 ]);
 
-let cachedTypes: Set<string> | undefined;
+// Keyed by comfyuiRoot (not a single unkeyed cache): a caller that checks a
+// scratch worktree/alternate checkout -- e.g. coreNodeRecipeVerification.ts,
+// which applies a candidate patch to an isolated copy before ever touching
+// the live checkout -- needs its own fresh parse, not the live root's
+// already-cached result. Still safe/cheap for the common single-root case:
+// each distinct root is parsed once per process lifetime.
+const cachedTypesByRoot = new Map<string, Set<string>>();
 
 /**
  * Parse ComfyUI source files (nodes.py + comfy_extras/*.py) to build the
@@ -30,11 +36,14 @@ let cachedTypes: Set<string> | undefined;
  *
  * This parser captures both patterns to produce the complete set.
  *
- * The result is cached for the process lifetime (safe because the
- * ComfyUI checkout doesn't change during a single server run).
+ * The result is cached per comfyuiRoot for the process lifetime (safe
+ * because a given checkout's source doesn't change during a single server
+ * run -- but a *different* root, like a scratch verification worktree, gets
+ * its own independent parse).
  */
 export function loadBuiltinNodeTypes(comfyuiRoot: string): Set<string> {
-  if (cachedTypes) return cachedTypes;
+  const cached = cachedTypesByRoot.get(comfyuiRoot);
+  if (cached) return cached;
 
   const types = new Set<string>(FALLBACK_CORE_TYPES);
 
@@ -54,7 +63,7 @@ export function loadBuiltinNodeTypes(comfyuiRoot: string): Set<string> {
     // comfy_extras not found — fallback list is still usable
   }
 
-  cachedTypes = types;
+  cachedTypesByRoot.set(comfyuiRoot, types);
   return types;
 }
 
@@ -89,5 +98,5 @@ function extractNodeMappings(filePath: string, types: Set<string>): void {
  * Reset the cache. Only for testing.
  */
 export function resetBuiltinNodeCache(): void {
-  cachedTypes = undefined;
+  cachedTypesByRoot.clear();
 }

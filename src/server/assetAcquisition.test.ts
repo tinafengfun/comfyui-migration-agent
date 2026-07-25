@@ -582,6 +582,222 @@ describe("asset acquisition job", () => {
     expect(stagedPatch).toContain("nodes_boogu.py");
   });
 
+  it("attaches isolated verification results to a Tier 2 draft, merging a passing validationCommand into the recipe", async () => {
+    const root = path.join(process.cwd(), ".demo-state", "tests", `asset-acquisition-core-verify-${Date.now()}`);
+    const artifactPath = path.join(root, "artifacts");
+    const recipesRoot = path.join(root, "recipes-empty");
+    await ensureDir(artifactPath);
+    await ensureDir(recipesRoot);
+    const task: MigrationTask = {
+      id: "task-core-verify",
+      name: "Core node verify",
+      status: "waiting_for_human",
+      workflowPath: path.join(root, "workflow.json"),
+      workspacePath: root,
+      artifactPath,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      steps: [{ id: "01", status: "waiting_for_human" }]
+    };
+    await fs.writeFile(
+      path.join(artifactPath, "01-assets.csv"),
+      [
+        "asset_name,requested_name,resolved_path,source,state,staged_path,custom_node_repo,custom_node_cache_path,wrapper_source_evidence,commit,install_status,acquisition_status,mirror_used,credential_recorded,gap",
+        ""
+      ].join("\n"),
+      "utf8"
+    );
+    await fs.writeFile(
+      path.join(artifactPath, "01-custom-nodes.md"),
+      [
+        "| Node type | Source package or repo | Installed/source evidence | State | Human action |",
+        "| --- | --- | --- | --- | --- |",
+        "| TextEncodeBooguEdit | comfy-core | comfy-core (missing locally) | source unknown | Provide upstream commit or legacy package |",
+        ""
+      ].join("\n"),
+      "utf8"
+    );
+
+    let verifyCalledWithPatchPath = "";
+    const result = await ensureAssetAcquisitionJob({
+      task,
+      modelRoots: [path.join(root, "models")],
+      comfyuiRoot: path.join(root, "ComfyUI"),
+      humanContext: "",
+      redactedHumanContext: "",
+      recipesRoot,
+      sourceSearch: async () => ({
+        config: {
+          profileName: "test",
+          enableNetworkSearch: true,
+          allowInsecureTls: false,
+          requestTimeoutSeconds: 1,
+          maxResultsPerProvider: 1,
+          huggingFaceEndpoint: "https://huggingface.co",
+          modelScopeEndpoint: "https://modelscope.cn",
+          hasHuggingFaceToken: false,
+          hasCivitaiToken: false,
+          hasGitHubToken: false,
+          proxyConfigured: false,
+          enableDownload: false,
+          explicitHuggingFaceFiles: [],
+          huggingFaceFallbackEndpoints: [],
+          tokenEnvNames: { huggingface: [], civitai: [], github: [] },
+          proxyEnvNames: []
+        },
+        issues: [],
+        candidates: []
+      }),
+      discoverCoreNodeRecipe: async ({ nodeType, patchFile }) => ({
+        recipe: {
+          recipeId: `${nodeType}-core-support-draft`,
+          version: "0.1.0",
+          nodeType,
+          xpuSupport: "unknown",
+          patchFile,
+          patchTarget: "comfy_extras/nodes_boogu.py",
+          knownIssues: ["Auto-drafted; not yet validated."],
+          provenance: { taskOrigin: task.id, createdAt: "2026-07-24" }
+        },
+        patchContent: "diff --git a/comfy_extras/nodes_boogu.py b/comfy_extras/nodes_boogu.py\n",
+        discovery: {
+          found: true,
+          confidence: "high",
+          commitSha: "abc1234",
+          filesTouched: ["comfy_extras/nodes_boogu.py"],
+          reason: "confirmed via merge commit diff"
+        }
+      }),
+      verifyCoreNodeRecipe: async ({ stagedPatchPath }) => {
+        verifyCalledWithPatchPath = stagedPatchPath;
+        return {
+          verified: true,
+          verificationDetail: "Patch applied cleanly and TextEncodeBooguEdit is confirmed registered.",
+          validationCommand: "python3 -m py_compile comfy_extras/nodes_boogu.py"
+        };
+      }
+    });
+
+    expect(verifyCalledWithPatchPath).toBe(
+      path.join(root, "artifacts", "staged-recipes", "TextEncodeBooguEdit-core-support.patch")
+    );
+    const job = JSON.parse(await fs.readFile(result.jobPath, "utf8")) as {
+      customNodeItems: Array<{
+        coreNodeRecipeDraft?: {
+          recipe: { validationCommand?: string };
+          verification?: { verified: boolean; verificationDetail: string };
+        };
+      }>;
+    };
+    expect(job.customNodeItems[0]?.coreNodeRecipeDraft?.verification).toEqual({
+      verified: true,
+      verificationDetail: "Patch applied cleanly and TextEncodeBooguEdit is confirmed registered."
+    });
+    expect(job.customNodeItems[0]?.coreNodeRecipeDraft?.recipe.validationCommand).toBe(
+      "python3 -m py_compile comfy_extras/nodes_boogu.py"
+    );
+  });
+
+  it("attaches a failed verification without merging a validationCommand, still leaving the draft available for manual review", async () => {
+    const root = path.join(process.cwd(), ".demo-state", "tests", `asset-acquisition-core-verify-fail-${Date.now()}`);
+    const artifactPath = path.join(root, "artifacts");
+    const recipesRoot = path.join(root, "recipes-empty");
+    await ensureDir(artifactPath);
+    await ensureDir(recipesRoot);
+    const task: MigrationTask = {
+      id: "task-core-verify-fail",
+      name: "Core node verify fail",
+      status: "waiting_for_human",
+      workflowPath: path.join(root, "workflow.json"),
+      workspacePath: root,
+      artifactPath,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      steps: [{ id: "01", status: "waiting_for_human" }]
+    };
+    await fs.writeFile(
+      path.join(artifactPath, "01-assets.csv"),
+      [
+        "asset_name,requested_name,resolved_path,source,state,staged_path,custom_node_repo,custom_node_cache_path,wrapper_source_evidence,commit,install_status,acquisition_status,mirror_used,credential_recorded,gap",
+        ""
+      ].join("\n"),
+      "utf8"
+    );
+    await fs.writeFile(
+      path.join(artifactPath, "01-custom-nodes.md"),
+      [
+        "| Node type | Source package or repo | Installed/source evidence | State | Human action |",
+        "| --- | --- | --- | --- | --- |",
+        "| TextEncodeBooguEdit | comfy-core | comfy-core (missing locally) | source unknown | Provide upstream commit or legacy package |",
+        ""
+      ].join("\n"),
+      "utf8"
+    );
+
+    const result = await ensureAssetAcquisitionJob({
+      task,
+      modelRoots: [path.join(root, "models")],
+      comfyuiRoot: path.join(root, "ComfyUI"),
+      humanContext: "",
+      redactedHumanContext: "",
+      recipesRoot,
+      sourceSearch: async () => ({
+        config: {
+          profileName: "test",
+          enableNetworkSearch: true,
+          allowInsecureTls: false,
+          requestTimeoutSeconds: 1,
+          maxResultsPerProvider: 1,
+          huggingFaceEndpoint: "https://huggingface.co",
+          modelScopeEndpoint: "https://modelscope.cn",
+          hasHuggingFaceToken: false,
+          hasCivitaiToken: false,
+          hasGitHubToken: false,
+          proxyConfigured: false,
+          enableDownload: false,
+          explicitHuggingFaceFiles: [],
+          huggingFaceFallbackEndpoints: [],
+          tokenEnvNames: { huggingface: [], civitai: [], github: [] },
+          proxyEnvNames: []
+        },
+        issues: [],
+        candidates: []
+      }),
+      discoverCoreNodeRecipe: async ({ nodeType, patchFile }) => ({
+        recipe: {
+          recipeId: `${nodeType}-core-support-draft`,
+          version: "0.1.0",
+          nodeType,
+          xpuSupport: "unknown",
+          patchFile,
+          knownIssues: ["Auto-drafted; not yet validated."],
+          provenance: { taskOrigin: task.id, createdAt: "2026-07-24" }
+        },
+        patchContent: "diff --git a/comfy_extras/nodes_boogu.py b/comfy_extras/nodes_boogu.py\n",
+        discovery: { found: true, confidence: "high", commitSha: "abc1234", reason: "confirmed via merge commit diff" }
+      }),
+      verifyCoreNodeRecipe: async () => ({
+        verified: false,
+        verificationDetail: "Patch did not apply cleanly to an isolated worktree."
+      })
+    });
+
+    const job = JSON.parse(await fs.readFile(result.jobPath, "utf8")) as {
+      customNodeItems: Array<{
+        coreNodeRecipeDraft?: {
+          recipe: { validationCommand?: string };
+          verification?: { verified: boolean; verificationDetail: string };
+        };
+      }>;
+    };
+    const draft = job.customNodeItems[0]?.coreNodeRecipeDraft;
+    expect(draft?.verification).toEqual({
+      verified: false,
+      verificationDetail: "Patch did not apply cleanly to an isolated worktree."
+    });
+    expect(draft?.recipe.validationCommand).toBeUndefined();
+  });
+
   it("skips upstream discovery entirely when a recipe already covers this node type (Tier 2 short-circuit)", async () => {
     const root = path.join(process.cwd(), ".demo-state", "tests", `asset-acquisition-core-has-recipe-${Date.now()}`);
     const artifactPath = path.join(root, "artifacts");

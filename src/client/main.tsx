@@ -1099,6 +1099,8 @@ type CoreNodeRecipeDraftInfo = {
   confidence: "high" | "medium" | "low" | "none";
   reason: string;
   patchTarget?: string;
+  verified?: boolean;
+  verificationDetail?: string;
 };
 
 /**
@@ -1116,7 +1118,11 @@ function parseCoreNodeRecipeDrafts(raw: string): Record<string, CoreNodeRecipeDr
       customNodeItems?: Array<{
         packageHint?: string;
         nodeType?: string;
-        coreNodeRecipeDraft?: { discovery?: { confidence?: string; reason?: string }; recipe?: { patchTarget?: string } };
+        coreNodeRecipeDraft?: {
+          discovery?: { confidence?: string; reason?: string };
+          recipe?: { patchTarget?: string };
+          verification?: { verified: boolean; verificationDetail: string };
+        };
       }>;
     };
     for (const item of parsed.customNodeItems ?? []) {
@@ -1129,7 +1135,9 @@ function parseCoreNodeRecipeDrafts(raw: string): Record<string, CoreNodeRecipeDr
         nodeType: item.nodeType,
         confidence,
         reason: draft.discovery.reason ?? "",
-        patchTarget: draft.recipe?.patchTarget
+        patchTarget: draft.recipe?.patchTarget,
+        verified: draft.verification?.verified,
+        verificationDetail: draft.verification?.verificationDetail
       });
       result[item.packageHint] = list;
     }
@@ -1438,6 +1446,12 @@ function AssetUploadPanel({ event, taskId, api, onAnswer, onResolved }: {
                     </span>
                     <span className="asset-suggestion-reason">{draft.reason}</span>
                     {draft.patchTarget && <span className="asset-suggestion-reason">touches: {draft.patchTarget}</span>}
+                    {draft.verified === true && (
+                      <span className="asset-url-verified ok">✓ isolated verification passed: {draft.verificationDetail}</span>
+                    )}
+                    {draft.verified === false && (
+                      <span className="asset-url-verified fail">✗ isolated verification did not pass: {draft.verificationDetail} — review carefully before adopting</span>
+                    )}
                     {adoptState === "adopted" ? (
                       <span className="asset-url-verified ok">✓ recipe adopted — Step 05 will apply it automatically next run</span>
                     ) : adoptState && adoptState !== "adopting" ? (

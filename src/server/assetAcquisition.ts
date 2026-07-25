@@ -93,6 +93,14 @@ interface CustomNodeJobItem {
     recipe: Recipe;
     patchContent: string;
     discovery: CoreNodeDiscoveryResult;
+    /**
+     * Best-effort isolated structural verification (see
+     * coreNodeRecipeVerification.ts) -- present only when a verifier was
+     * injected. Never gates whether the draft is shown; only makes the
+     * human's "Adopt this drafted recipe" decision faster by attaching real
+     * proof instead of a raw diff to judge unaided.
+     */
+    verification?: { verified: boolean; verificationDetail: string };
   };
 }
 
@@ -187,6 +195,19 @@ export async function ensureAssetAcquisitionJob(input: {
     nodeType: string;
     patchFile: string;
   }) => Promise<{ recipe: Recipe; patchContent: string; discovery: CoreNodeDiscoveryResult } | undefined>;
+  /**
+   * Only called right after discoverCoreNodeRecipe returns a draft. Runs
+   * isolated structural verification (see coreNodeRecipeVerification.ts)
+   * and attaches the result to the draft -- still never auto-applied; a
+   * human still clicks "Adopt this drafted recipe," just with real proof
+   * attached instead of a raw diff to judge unaided. Omit to skip
+   * verification (the draft is still shown, just without a verification badge).
+   */
+  verifyCoreNodeRecipe?: (input: {
+    nodeType: string;
+    patchTarget?: string;
+    stagedPatchPath: string;
+  }) => Promise<{ verified: boolean; verificationDetail: string; validationCommand?: string }>;
   /** Override for findRecipesForNode's lookup dir; tests only. Defaults to the real recipes/ tree. */
   recipesRoot?: string;
 }): Promise<AssetAcquisitionJobResult> {
@@ -389,6 +410,7 @@ export async function ensureAssetAcquisitionJob(input: {
       providerConfig,
       sourceSearch,
       discoverCoreNodeRecipe: input.discoverCoreNodeRecipe,
+      verifyCoreNodeRecipe: input.verifyCoreNodeRecipe,
       recipesRoot: input.recipesRoot
     });
     customNodeCandidateCount += item.candidates.length;
@@ -840,6 +862,11 @@ async function ensureCustomNodeSource(input: {
     nodeType: string;
     patchFile: string;
   }) => Promise<{ recipe: Recipe; patchContent: string; discovery: CoreNodeDiscoveryResult } | undefined>;
+  verifyCoreNodeRecipe?: (input: {
+    nodeType: string;
+    patchTarget?: string;
+    stagedPatchPath: string;
+  }) => Promise<{ verified: boolean; verificationDetail: string; validationCommand?: string }>;
   recipesRoot?: string;
 }): Promise<CustomNodeJobItem> {
   const item = await resolveCustomNodeSource(input);
@@ -856,13 +883,37 @@ async function ensureCustomNodeSource(input: {
   await fs.mkdir(path.dirname(absolutePatchPath), { recursive: true }).catch(() => undefined);
   await fs.writeFile(absolutePatchPath, draft.patchContent, "utf8").catch(() => undefined);
 
+  let coreNodeRecipeDraft: CustomNodeJobItem["coreNodeRecipeDraft"] = draft;
+  const plannedActions = [
+    ...item.plannedActions,
+    `Drafted a candidate recipe from upstream history (confidence: ${draft.discovery.confidence}) -- review before adopting.`
+  ];
+  if (input.verifyCoreNodeRecipe) {
+    const verification = await input
+      .verifyCoreNodeRecipe({ nodeType: item.nodeType, patchTarget: draft.recipe.patchTarget, stagedPatchPath: absolutePatchPath })
+      .catch((error) => ({
+        verified: false,
+        verificationDetail: `Verification could not run: ${error instanceof Error ? error.message : String(error)}`,
+        validationCommand: undefined as string | undefined
+      }));
+    coreNodeRecipeDraft = {
+      ...draft,
+      recipe: verification.verified && verification.validationCommand
+        ? { ...draft.recipe, validationCommand: verification.validationCommand }
+        : draft.recipe,
+      verification: { verified: verification.verified, verificationDetail: verification.verificationDetail }
+    };
+    plannedActions.push(
+      verification.verified
+        ? `Isolated structural verification passed: ${verification.verificationDetail}`
+        : `Isolated structural verification did not pass: ${verification.verificationDetail}`
+    );
+  }
+
   return {
     ...item,
-    coreNodeRecipeDraft: draft,
-    plannedActions: [
-      ...item.plannedActions,
-      `Drafted a candidate recipe from upstream history (confidence: ${draft.discovery.confidence}) -- review before adopting.`
-    ]
+    coreNodeRecipeDraft,
+    plannedActions
   };
 }
 
