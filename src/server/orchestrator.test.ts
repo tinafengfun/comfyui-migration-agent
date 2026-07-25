@@ -457,6 +457,85 @@ describe("migration orchestrator", () => {
     expect(artifact).not.toContain("not found under checked model roots");
   });
 
+  it("uses the task's pinned GPU node's own comfyui_root for Step 00's local search, not the global default (real bug: the default node's comfyui_root doesn't even exist on this host, so deterministic steps were silently analyzing the wrong checkout)", async () => {
+    const root = path.join(process.cwd(), ".demo-state", "tests", `orchestrator-step00-node-comfyuiroot-${Date.now()}`);
+    const globalWrongComfyuiRoot = path.join(root, "ComfyUI-global-wrong");
+    const nodeRealComfyuiRoot = path.join(root, "ComfyUI-node-real");
+    const config: AppConfig = {
+      port: 0,
+      projectRoot: root,
+      workspaceRoot: path.join(root, "workspaces"),
+      stateRoot: path.join(root, "state"),
+      draftDocRoot: root,
+      // Deliberately does NOT exist on disk -- mirrors the confirmed live bug
+      // where the global default pointed at a checkout the actual pinned
+      // node doesn't use.
+      comfyuiRoot: globalWrongComfyuiRoot,
+      modelRoots: [path.join(root, "models")],
+      gpuNodesPath: path.join(root, "gpu-nodes.json"),
+      workflowArchiveRoot: path.join(root, "nfs-workflows"),
+      autoApproveAgentPermissions: false
+    };
+    await ensureDir(config.workspaceRoot);
+    // Only the NODE's own comfyui_root has the installed custom-node package
+    // on disk -- proving the search used it, not the (nonexistent) global default.
+    await ensureDir(path.join(nodeRealComfyuiRoot, "custom_nodes", "rgthree-comfy"));
+    await fs.writeFile(
+      config.gpuNodesPath,
+      JSON.stringify({
+        default_node: "remote-test",
+        nodes: [
+          {
+            name: "remote-test",
+            kind: "ssh",
+            comfyui_root: nodeRealComfyuiRoot,
+            venv_python: "/nfs_share/venv/bin/python3",
+            model_roots: ["/nfs_share"],
+            api_host: "172.16.124.12",
+            api_port: 8188,
+            ssh: { host: "172.16.124.12", user: "intel", port: 22, key_path: "/root/.ssh/id_ed25519" }
+          }
+        ]
+      }),
+      "utf8"
+    );
+    const store = new StateStore(config);
+    await store.initialize();
+    const orchestrator = new MigrationOrchestrator(config, store, [
+      {
+        id: "00",
+        name: "Intake",
+        requiredOutput: "00-intake-preflight.md",
+        humanIntervention: "Provide missing sources"
+      }
+    ]);
+
+    const task = await orchestrator.createTask({
+      name: "Step00 node comfyui_root",
+      workflowFileName: "workflow.json",
+      gpuNode: "remote-test",
+      workflowJson: {
+        nodes: [
+          {
+            id: 1,
+            type: "Seed (rgthree)",
+            properties: { cnr_id: "rgthree-comfy" },
+            outputs: [{ links: [1] }],
+            widgets_values: []
+          }
+        ],
+        links: []
+      }
+    });
+
+    await orchestrator.runStep(task.id, "00");
+
+    const updated = await store.getTask(task.id);
+    expect(updated?.steps.find((step) => step.id === "00")?.status).toBe("completed");
+    const artifact = await fs.readFile(path.join(task.artifactPath, "00-intake-preflight.md"), "utf8");
+    expect(artifact).toContain("custom_nodes/rgthree-comfy");
+  }, 30000);
+
   it("runs Step 01 asset resolution and pauses on source-identical gaps", async () => {
     const root = path.join(process.cwd(), ".demo-state", "tests", `orchestrator-step01-assets-${Date.now()}`);
     const config: AppConfig = {

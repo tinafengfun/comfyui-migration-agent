@@ -316,7 +316,7 @@ export class MigrationOrchestrator {
       const intake = await ensureIntakePreflight({
         task,
         modelRoots: this.resolveModelRoots(task),
-        comfyuiRoot: this.config.comfyuiRoot,
+        comfyuiRoot: this.resolveComfyuiRoot(task),
         sourceObjectInfo,
         resolveEnumPackage
       });
@@ -363,7 +363,7 @@ export class MigrationOrchestrator {
       const prep = await ensureAssetPrep({
         task,
         modelRoots: this.resolveModelRoots(task),
-        comfyuiRoot: this.config.comfyuiRoot,
+        comfyuiRoot: this.resolveComfyuiRoot(task),
         stepId
       });
       await this.store.appendArtifact({
@@ -408,7 +408,7 @@ export class MigrationOrchestrator {
           const acquisition = await ensureAssetAcquisitionJob({
             task,
             modelRoots: this.resolveModelRoots(task),
-            comfyuiRoot: this.config.comfyuiRoot,
+            comfyuiRoot: this.resolveComfyuiRoot(task),
             humanContext: "",
             redactedHumanContext: "",
             stepId,
@@ -431,7 +431,7 @@ export class MigrationOrchestrator {
               ? async ({ nodeType, patchFile }) =>
                   discoverCoreNodeRecipe({
                     nodeType,
-                    comfyuiRoot: this.config.comfyuiRoot,
+                    comfyuiRoot: this.resolveComfyuiRoot(task),
                     taskId: task.id,
                     patchFile,
                     runner: this.sdkRunner as FreeformSessionRunner,
@@ -444,7 +444,7 @@ export class MigrationOrchestrator {
             // session -- runs unconditionally once a draft exists, unlike
             // discovery above which needs sdkRunner.
             verifyCoreNodeRecipe: ({ nodeType, patchTarget, stagedPatchPath }) =>
-              verifyCoreNodeRecipe({ nodeType, patchTarget, stagedPatchPath, comfyuiRoot: this.config.comfyuiRoot })
+              verifyCoreNodeRecipe({ nodeType, patchTarget, stagedPatchPath, comfyuiRoot: this.resolveComfyuiRoot(task) })
           });
           acquisitionItems = acquisition.unresolvedItems;
           await this.emit({
@@ -657,7 +657,7 @@ export class MigrationOrchestrator {
     if (stepId === "04") {
       const checkpoint = await ensureSourceAuditCheckpoint({
         task,
-        comfyuiRoot: this.config.comfyuiRoot
+        comfyuiRoot: this.resolveComfyuiRoot(task)
       });
       if (checkpoint.created) {
         await this.store.appendArtifact({
@@ -1992,7 +1992,7 @@ export class MigrationOrchestrator {
       step01Acquisition = await ensureAssetAcquisitionJob({
         task,
         modelRoots: this.resolveModelRoots(task),
-        comfyuiRoot: this.config.comfyuiRoot,
+        comfyuiRoot: this.resolveComfyuiRoot(task),
         humanContext: decision.answer,
         redactedHumanContext: redactedAnswer,
         modelRepoPath: path.resolve(this.config.projectRoot, "../model_repo"),
@@ -3097,6 +3097,24 @@ export class MigrationOrchestrator {
   private resolveModelRoots(task: MigrationTask): string[] {
     const node = this.lookupTaskNode(task);
     return node ? mergeModelRoots(this.config.modelRoots, node.model_roots) : this.config.modelRoots;
+  }
+
+  /**
+   * ComfyUI root for Step 00/01/04's deterministic local filesystem/git
+   * work -- the task's pinned GPU node's own comfyui_root (matching
+   * promptSkillCompiler.ts's existing override for Steps 02+), not the
+   * global default alone. Real bug this closes: the global default is
+   * local-xpu's checkout; a task pinned to a different node (e.g.
+   * remote-124-12, whose comfyui_root doesn't even exist on this host) had
+   * these deterministic steps silently analyzing the WRONG checkout's
+   * custom_nodes/models/input dirs and registered node types -- no crash,
+   * just wrong asset-gap/custom-node-presence/core-node-registration
+   * results baked into artifacts. Falls back to the global default if
+   * gpu-nodes.json can't be loaded, matching lookupTaskNode's own fallback.
+   */
+  private resolveComfyuiRoot(task: MigrationTask): string {
+    const node = this.lookupTaskNode(task);
+    return node?.comfyui_root ?? this.config.comfyuiRoot;
   }
 }
 
