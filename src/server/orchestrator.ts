@@ -72,7 +72,18 @@ import { appendFeedbackEvent, type FeedbackEventInput } from "./feedbackLog";
 import { recordRecipeOutcome } from "./analyticsDb";
 import { ensureWorkflowInventory } from "./workflowInventory";
 import { normalizeWorkflowForApi } from "./workflowNormalize";
-import { checkRecipeEnvironmentDrift, ensureDockerImageSynced, loadGpuNodes, mergeModelRoots, pickNode, type GpuNode } from "./gpuNodes";
+import {
+  checkOmniXpuAcceleration,
+  checkPortOccupant,
+  checkRecipeEnvironmentDrift,
+  ensureDockerImageSynced,
+  getProcessElapsedSeconds,
+  killProcessOnNode,
+  loadGpuNodes,
+  mergeModelRoots,
+  pickNode,
+  type GpuNode
+} from "./gpuNodes";
 import { extractNodeModelPairs, findMatchingRecipes } from "./recipeInjector";
 import { archiveAcceptedWorkflowIfNeeded } from "./workflowArchive";
 
@@ -685,6 +696,22 @@ export class MigrationOrchestrator {
           }
         } catch {
           // Best-effort -- a malformed workflow or unreadable env must never block Step 05.
+        }
+
+        // Stale-process reclaim + patch-freshness + acceleration-capability
+        // visibility -- see assessComfyUIEnvironment's own doc comment for
+        // the exact incident this closes.
+        const assessment = await this.assessComfyUIEnvironment(task, node).catch((err) => ({
+          notes: [`assessComfyUIEnvironment failed: ${err instanceof Error ? err.message : String(err)}`]
+        }));
+        if (assessment.notes.length > 0) {
+          await this.emit({
+            taskId,
+            stepId,
+            type: "progress",
+            message: `Environment assessment before Step 05: ${assessment.notes.join(" | ")}`,
+            data: assessment
+          });
         }
       }
     }
@@ -3193,6 +3220,113 @@ export class MigrationOrchestrator {
   private resolveComfyuiRoot(task: MigrationTask): string {
     const node = this.lookupTaskNode(task);
     return node?.comfyui_root ?? this.config.comfyuiRoot;
+  }
+
+  /**
+   * Deterministic pre-check for Step 05, replacing what used to be pure SDK
+   * improvisation. Confirmed live: a docker container was built and launched
+   * correctly, but exited on a port conflict with an unrelated bare-metal
+   * ComfyUI process left running since an earlier, unrelated task -- the
+   * SDK agent then adopted that stale process rather than reclaiming the
+   * port, and nobody ever restarted it after a later patch was applied to
+   * disk, so several steps' real inference runs executed against unpatched
+   * code the whole time. This surfaces (and, only when clearly safe,
+   * resolves) exactly that class of gap:
+   *
+   * 1. Stale-process reclaim: if the node's own api_port is occupied by a
+   *    process attributable to a DIFFERENT task that is not currently live
+   *    (task deleted, or its own persisted status is terminal), kill it so
+   *    a fresh docker launch gets a fair shot. A port occupant that can't be
+   *    attributed to any known task, or belongs to a task still considered
+   *    active, is deliberately left alone and only flagged -- never killed
+   *    on ambiguous evidence.
+   * 2. Process-freshness: if bare-metal ends up in play anyway (either the
+   *    node isn't runtime=docker, or the occupant couldn't be reclaimed),
+   *    compare that process's age against the mtime of any file a matched
+   *    recipe's patchTarget names -- flags (never forces) a restart when
+   *    the process predates a patch that's since landed on disk.
+   * 3. Acceleration visibility: when bare-metal is in play, checks whether
+   *    ComfyUI-OmniXPU's omni_xpu_kernel (cute/esimd attention backends,
+   *    only ever shipped in the docker image) is actually importable in
+   *    this specific environment, so a real capability gap is always
+   *    stated up front instead of requiring independent investigation.
+   *
+   * Detection (and only conservatively-safe reclaim) -- never blocks Step 05,
+   * and any check failure degrades to "not checked" rather than throwing.
+   */
+  private async assessComfyUIEnvironment(
+    task: MigrationTask,
+    node: GpuNode
+  ): Promise<{ notes: string[] }> {
+    const notes: string[] = [];
+    try {
+      const occupant = await checkPortOccupant(node, node.api_port);
+      let reclaimed = false;
+      if (occupant.occupied && occupant.pid) {
+        const uuidMatch = occupant.commandLine?.match(
+          /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i
+        );
+        const occupantTaskId = uuidMatch?.[0];
+        if (!occupantTaskId) {
+          notes.push(
+            `Port ${node.api_port} is occupied by PID ${occupant.pid}, not attributable to any known task workspace -- leaving it alone (ambiguous; could be an unrelated process).`
+          );
+        } else if (occupantTaskId === task.id) {
+          // This task's own already-running process (e.g. a prior step already launched it) -- nothing to reclaim.
+        } else {
+          const occupantTask = await this.store.getTask(occupantTaskId).catch(() => undefined);
+          const terminal = new Set(["completed", "failed", "terminated", "hard_stopped"]);
+          const staleTask = !occupantTask || terminal.has(occupantTask.status);
+          if (staleTask) {
+            const killed = await killProcessOnNode(node, occupant.pid);
+            reclaimed = killed;
+            notes.push(
+              killed
+                ? `Port ${node.api_port} was occupied by a stale process (task ${occupantTaskId}, status ${occupantTask?.status ?? "deleted"}) -- reclaimed so this task's docker launch gets a fair shot.`
+                : `Port ${node.api_port} occupant (task ${occupantTaskId}, status ${occupantTask?.status ?? "deleted"}) looked stale but could not be killed.`
+            );
+          } else {
+            notes.push(
+              `Port ${node.api_port} is occupied by task ${occupantTaskId}, which is still active (status ${occupantTask?.status}) -- not reclaiming; this task's docker launch may need to fall back to bare-metal or wait.`
+            );
+          }
+        }
+      }
+
+      const bareMetalInPlay = node.runtime !== "docker" || (occupant.occupied && !reclaimed);
+      if (bareMetalInPlay && occupant.occupied && occupant.pid) {
+        try {
+          const workflow = JSON.parse(await fs.readFile(task.workflowPath, "utf8"));
+          const pairs = extractNodeModelPairs(workflow);
+          const recipes = findMatchingRecipes(pairs).filter((r) => r.patchTarget);
+          const elapsed = await getProcessElapsedSeconds(node, occupant.pid);
+          if (elapsed !== undefined) {
+            const processStartedAt = Date.now() - elapsed * 1000;
+            for (const recipe of recipes) {
+              const filePath = recipe.patchTarget!.split("::")[0].split(",")[0].trim();
+              const stat = await fs.stat(path.join(node.comfyui_root, filePath)).catch(() => undefined);
+              if (stat && stat.mtimeMs > processStartedAt) {
+                notes.push(
+                  `Recipe ${recipe.recipeId}'s patch target ${filePath} was modified after the running server (PID ${occupant.pid}) started -- that process is likely running unpatched code; verify or restart before trusting patch-dependent behavior.`
+                );
+              }
+            }
+          }
+        } catch {
+          // Best-effort -- a malformed workflow or unreadable file must never block Step 05.
+        }
+
+        const acceleration = await checkOmniXpuAcceleration(node);
+        if (acceleration.omniXpuNodePresent && !acceleration.kernelImportable) {
+          notes.push(
+            "This bare-metal environment does not have omni_xpu_kernel-based attention acceleration available (ComfyUI-OmniXPU is present, but its compiled kernel only ships in the docker image) -- attention will run on plain PyTorch SDPA."
+          );
+        }
+      }
+    } catch (err) {
+      notes.push(`assessComfyUIEnvironment check failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    return { notes };
   }
 }
 

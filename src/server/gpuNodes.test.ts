@@ -17,6 +17,10 @@ import {
   syncDockerImageFromNfs,
   ensureDockerImageSynced,
   checkRecipeEnvironmentDrift,
+  checkPortOccupant,
+  checkOmniXpuAcceleration,
+  getProcessElapsedSeconds,
+  killProcessOnNode,
   syncCustomNodesFromNfs,
   formatNfsHealthSuffix,
   mergeModelRoots,
@@ -608,6 +612,100 @@ describe("gpuNodes", () => {
       );
       expect(result.checked).toBe(0);
       expect(result.drifted).toHaveLength(0);
+    });
+  });
+
+  describe("checkPortOccupant", () => {
+    const localNode: GpuNode = {
+      name: "local-test", kind: "local", comfyui_root: "/x", venv_python: "/usr/bin/python3",
+      model_roots: ["/m"], api_host: "127.0.0.1", api_port: 8188
+    };
+
+    it("detects a real bound port and identifies the occupying process", async () => {
+      const net = await import("node:net");
+      const server = net.createServer();
+      const port = await new Promise<number>((resolve, reject) => {
+        server.listen(0, "127.0.0.1", () => {
+          const addr = server.address();
+          if (addr && typeof addr !== "string") resolve(addr.port);
+          else reject(new Error("failed to bind test server"));
+        });
+      });
+      try {
+        const result = await checkPortOccupant(localNode, port);
+        expect(result.occupied).toBe(true);
+        expect(result.pid).toBe(String(process.pid));
+        expect(result.commandLine).toBeTruthy();
+      } finally {
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+      }
+    });
+
+    it("reports occupied:false for a port nothing is bound to", async () => {
+      // High port unlikely to be in use; ss/grep simply finds nothing.
+      const result = await checkPortOccupant(localNode, 54217);
+      expect(result.occupied).toBe(false);
+      expect(result.pid).toBeUndefined();
+    });
+  });
+
+  describe("checkOmniXpuAcceleration", () => {
+    it("reports omniXpuNodePresent:false when the custom-node directory doesn't exist", async () => {
+      const root = path.join(process.cwd(), ".demo-state", "tests", `gn-omnixpu-absent-${Date.now()}`);
+      await fs.mkdir(root, { recursive: true });
+      const node: GpuNode = {
+        name: "d", kind: "local", comfyui_root: root, venv_python: "/usr/bin/python3",
+        model_roots: ["/m"], api_host: "127.0.0.1", api_port: 8188
+      };
+      const result = await checkOmniXpuAcceleration(node);
+      expect(result).toEqual({ omniXpuNodePresent: false, kernelImportable: false });
+    });
+
+    it("reports omniXpuNodePresent:true but kernelImportable:false when the dir exists but the kernel isn't installed in this Python", async () => {
+      const root = path.join(process.cwd(), ".demo-state", "tests", `gn-omnixpu-present-${Date.now()}`);
+      await fs.mkdir(path.join(root, "custom_nodes", "ComfyUI-OmniXPU"), { recursive: true });
+      const node: GpuNode = {
+        name: "d", kind: "local", comfyui_root: root, venv_python: "/usr/bin/python3",
+        model_roots: ["/m"], api_host: "127.0.0.1", api_port: 8188
+      };
+      const result = await checkOmniXpuAcceleration(node);
+      expect(result).toEqual({ omniXpuNodePresent: true, kernelImportable: false });
+    });
+  });
+
+  describe("getProcessElapsedSeconds / killProcessOnNode", () => {
+    const localNode: GpuNode = {
+      name: "local-test", kind: "local", comfyui_root: "/x", venv_python: "/usr/bin/python3",
+      model_roots: ["/m"], api_host: "127.0.0.1", api_port: 8188
+    };
+
+    it("returns a plausible non-negative elapsed time for a real running process", async () => {
+      const elapsed = await getProcessElapsedSeconds(localNode, String(process.pid));
+      expect(elapsed).toBeDefined();
+      expect(elapsed).toBeGreaterThanOrEqual(0);
+    });
+
+    it("returns undefined for a pid that doesn't exist", async () => {
+      // A PID far beyond any plausible real process, and not reused within this test run.
+      const elapsed = await getProcessElapsedSeconds(localNode, "999999999");
+      expect(elapsed).toBeUndefined();
+    });
+
+    it("actually terminates a real spawned process", async () => {
+      const { spawn } = await import("node:child_process");
+      const child = spawn("sleep", ["100"]);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      const killed = await killProcessOnNode(localNode, String(child.pid));
+      expect(killed).toBe(true);
+      const exitPromise = new Promise<void>((resolve) => child.once("exit", () => resolve()));
+      await Promise.race([exitPromise, new Promise((resolve) => setTimeout(resolve, 2000))]);
+      const stillRunning = await getProcessElapsedSeconds(localNode, String(child.pid));
+      expect(stillRunning).toBeUndefined();
+    });
+
+    it("returns false when the pid doesn't exist", async () => {
+      const killed = await killProcessOnNode(localNode, "999999999");
+      expect(killed).toBe(false);
     });
   });
 });

@@ -549,28 +549,18 @@ export async function checkRecipeEnvironmentDrift(
 }
 
 /**
- * `importlib.metadata.version(packageName)` resolved inside the node's own
- * environment. For docker-runtime nodes, wrapped in a throwaway container
- * (mirrors the manual check that found comfy_kitchen's real version this
- * session -- the persisted venv's packages don't resolve correctly run bare
- * on the host, only from inside a container with the right system libs).
- * Returns undefined on any failure (package not installed, node
- * unreachable, etc.) -- never throws.
+ * Runs a shell command directly on the node's HOST (local or ssh) --
+ * deliberately NEVER docker-wrapped. Use for checks that need the host's own
+ * OS-level state (port bindings, process listings) rather than a
+ * container's isolated view -- a throwaway `docker run --rm` (without
+ * `--network host`) has its own network namespace and wouldn't see the
+ * host's actual bound ports at all. Best-effort: returns undefined on any
+ * failure (unreachable node, command not found, etc.), never throws.
  */
-async function resolveInstalledPackageVersion(node: GpuNode, packageName: string): Promise<string | undefined> {
-  const pyCode = `import importlib.metadata as m; print(m.version(${JSON.stringify(packageName)}))`;
-  const pyCmd = `${shellQuote(node.venv_python)} -c ${shellQuote(pyCode)} 2>/dev/null || true`;
-
-  const dockerWrap = (innerCmd: string): string => {
-    if (node.runtime !== "docker" || !node.docker_image) return innerCmd;
-    const nfsRoot = resolveNfsShareRoot(node) ?? "/nfs_share";
-    return `docker run --rm -v ${shellQuote(`${nfsRoot}:${nfsRoot}`)} ${shellQuote(node.docker_image)} bash -c ${shellQuote(innerCmd)}`;
-  };
-
+async function runShellOnNode(node: GpuNode, cmd: string, timeoutMs = 15_000): Promise<string | undefined> {
   try {
-    const cmd = dockerWrap(pyCmd);
     if (node.kind === "local") {
-      const { stdout } = await execFileAsync("bash", ["-c", cmd], { timeout: 60_000 });
+      const { stdout } = await execFileAsync("bash", ["-c", cmd], { timeout: timeoutMs });
       return stdout.trim() || undefined;
     }
     if (!node.ssh) return undefined;
@@ -578,17 +568,115 @@ async function resolveInstalledPackageVersion(node: GpuNode, packageName: string
     const sshKeyArgs = node.ssh.key_path ? ["-i", node.ssh.key_path] : [];
     const { stdout } = await execFileAsync(
       "ssh",
-      [
-        "-p", String(port), "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", ...sshKeyArgs,
-        `${node.ssh.user}@${node.ssh.host}`,
-        cmd
-      ],
-      { timeout: 65_000 }
+      ["-p", String(port), "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", ...sshKeyArgs, `${node.ssh.user}@${node.ssh.host}`, cmd],
+      { timeout: timeoutMs + 5_000 }
     );
     return stdout.trim() || undefined;
   } catch {
     return undefined;
   }
+}
+
+/**
+ * Runs a shell command inside the node's own Python environment --
+ * docker-wrapped (throwaway `docker run --rm`) for runtime=docker nodes,
+ * since the persisted venv only resolves its packages correctly from inside
+ * a container with the matching system libs (confirmed live: running it
+ * bare on the host fails to even find comfy_kitchen). Otherwise identical
+ * to runShellOnNode. Best-effort, never throws.
+ */
+async function runInNodeEnv(node: GpuNode, cmd: string, timeoutMs = 60_000): Promise<string | undefined> {
+  if (node.runtime !== "docker" || !node.docker_image) {
+    return runShellOnNode(node, cmd, timeoutMs);
+  }
+  const nfsRoot = resolveNfsShareRoot(node) ?? "/nfs_share";
+  const wrapped = `docker run --rm -v ${shellQuote(`${nfsRoot}:${nfsRoot}`)} ${shellQuote(node.docker_image)} bash -c ${shellQuote(cmd)}`;
+  return runShellOnNode(node, wrapped, timeoutMs);
+}
+
+/**
+ * `importlib.metadata.version(packageName)` resolved inside the node's own
+ * environment. Returns undefined on any failure (package not installed,
+ * node unreachable, etc.) -- never throws.
+ */
+async function resolveInstalledPackageVersion(node: GpuNode, packageName: string): Promise<string | undefined> {
+  const pyCode = `import importlib.metadata as m; print(m.version(${JSON.stringify(packageName)}))`;
+  const pyCmd = `${shellQuote(node.venv_python)} -c ${shellQuote(pyCode)} 2>/dev/null || true`;
+  return runInNodeEnv(node, pyCmd);
+}
+
+export interface PortOccupant {
+  occupied: boolean;
+  pid?: string;
+  commandLine?: string;
+}
+
+/**
+ * Checks whether `port` is bound on the node's host and, if so, identifies
+ * the occupying process's PID + full command line (callers use this to
+ * extract e.g. the ComfyUI workspace path a stale process was launched
+ * from). Best-effort: `occupied: false` covers both "genuinely free" and
+ * "couldn't determine" -- a failed check should never trigger a kill
+ * attempt, and a normal docker/bare-metal launch attempt is a safe fallback
+ * either way (it will itself fail loudly if the port really is taken).
+ */
+export async function checkPortOccupant(node: GpuNode, port: number): Promise<PortOccupant> {
+  const findPidCmd = `ss -ltnp 2>/dev/null | grep -E ":${port}\\s" | grep -oP 'pid=\\K[0-9]+' | head -1`;
+  const pid = await runShellOnNode(node, findPidCmd, 15_000);
+  if (!pid) return { occupied: false };
+  const commandLine = await runShellOnNode(node, `ps -o cmd= -p ${shellQuote(pid)} 2>/dev/null || true`, 15_000);
+  return { occupied: true, pid, commandLine };
+}
+
+/**
+ * Seconds since `pid` started (`ps -o etimes=`), on the node's host.
+ * Elapsed-time rather than an absolute start timestamp specifically to
+ * avoid parsing `ps -o lstart=`'s locale-dependent date format across local
+ * and remote hosts. Returns undefined if the process doesn't exist or the
+ * node is unreachable -- never throws.
+ */
+export async function getProcessElapsedSeconds(node: GpuNode, pid: string): Promise<number | undefined> {
+  const result = await runShellOnNode(node, `ps -o etimes= -p ${shellQuote(pid)} 2>/dev/null || true`, 15_000);
+  if (!result) return undefined;
+  const seconds = Number(result.trim());
+  return Number.isFinite(seconds) ? seconds : undefined;
+}
+
+/**
+ * SIGTERMs `pid` on the node's host. Only meant for a PID already confirmed
+ * (via checkPortOccupant) to be a specific, known-stale process -- not a
+ * general-purpose kill. Returns true on a clean `kill` exit, false
+ * otherwise (already gone, permission denied, node unreachable) -- never
+ * throws.
+ */
+export async function killProcessOnNode(node: GpuNode, pid: string): Promise<boolean> {
+  const result = await runShellOnNode(node, `kill -TERM ${shellQuote(pid)} 2>/dev/null && echo killed || echo failed`, 15_000);
+  return result === "killed";
+}
+
+export interface OmniXpuAccelerationCapability {
+  /** Whether ComfyUI-OmniXPU's custom-node directory is present under this node's comfyui_root/custom_nodes. */
+  omniXpuNodePresent: boolean;
+  /** Whether omni_xpu_kernel (the compiled cute/esimd attention backend) actually imports in this node's environment. */
+  kernelImportable: boolean;
+}
+
+/**
+ * Checks whether real XPU-native attention acceleration (ComfyUI-OmniXPU's
+ * cute/esimd backends via omni_xpu_kernel) is actually available in this
+ * node's resolved environment -- not just "is the custom node symlinked",
+ * since the compiled kernel is a separate, environment-specific dependency
+ * (ships in the docker image's system dist-packages; a bare-metal venv
+ * typically won't have it). Best-effort, never throws.
+ */
+export async function checkOmniXpuAcceleration(node: GpuNode): Promise<OmniXpuAccelerationCapability> {
+  const dirCheckCmd = `test -d ${shellQuote(path.join(node.comfyui_root, "custom_nodes", "ComfyUI-OmniXPU"))} && echo present || echo absent`;
+  const dirResult = await runShellOnNode(node, dirCheckCmd, 15_000);
+  if (dirResult !== "present") return { omniXpuNodePresent: false, kernelImportable: false };
+
+  const importCmd = `${shellQuote(node.venv_python)} -c "import omni_xpu_kernel" >/dev/null 2>&1 && echo importable || echo not_importable`;
+  const importResult = await runInNodeEnv(node, importCmd, 30_000);
+  return { omniXpuNodePresent: true, kernelImportable: importResult === "importable" };
 }
 
 /** `docker image inspect --format '{{.Id}}'` on the node, local or over ssh. Returns undefined on any failure (image missing, node unreachable, etc.) -- never throws. */

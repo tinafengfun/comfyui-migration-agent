@@ -1658,4 +1658,141 @@ describe("migration orchestrator", () => {
     expect(stubFailures).toHaveLength(1);
     expect(runStepCalls).toBe(1);
   });
+
+  describe("assessComfyUIEnvironment", () => {
+    async function makeOrchestratorAndTask(root: string) {
+      const config: AppConfig = {
+        port: 0,
+        projectRoot: root,
+        workspaceRoot: path.join(root, "workspaces"),
+        stateRoot: path.join(root, "state"),
+        draftDocRoot: root,
+        comfyuiRoot: path.join(root, "ComfyUI"),
+        modelRoots: ["/home/intel/hf_models"],
+        gpuNodesPath: path.join(root, "gpu-nodes.json"),
+        workflowArchiveRoot: path.join(root, "nfs-workflows"),
+        autoApproveAgentPermissions: false
+      };
+      await ensureDir(config.workspaceRoot);
+      const store = new StateStore(config);
+      await store.initialize();
+      const orchestrator = new MigrationOrchestrator(config, store, [
+        { id: "05", name: "Environment deployment", requiredOutput: "05-environment.md", humanIntervention: "Approve" }
+      ]);
+      const task = await orchestrator.createTask({
+        name: "Assess env",
+        workflowFileName: "workflow.json",
+        workflowJson: { nodes: [], links: [] }
+      });
+      return { config, store, orchestrator, task };
+    }
+
+    it("flags an occupied port not attributable to any known task as ambiguous, and does not touch it", async () => {
+      const root = path.join(process.cwd(), ".demo-state", "tests", `orchestrator-assess-ambiguous-${Date.now()}`);
+      const { orchestrator, task } = await makeOrchestratorAndTask(root);
+      const net = await import("node:net");
+      const server = net.createServer();
+      const port = await new Promise<number>((resolve, reject) => {
+        server.listen(0, "127.0.0.1", () => {
+          const addr = server.address();
+          if (addr && typeof addr !== "string") resolve(addr.port);
+          else reject(new Error("failed to bind test server"));
+        });
+      });
+      try {
+        const node = {
+          name: "n", kind: "local" as const, comfyui_root: path.join(root, "ComfyUI"),
+          venv_python: "/usr/bin/python3", model_roots: ["/m"], api_host: "127.0.0.1", api_port: port
+        };
+        const result = await (orchestrator as unknown as {
+          assessComfyUIEnvironment: (t: typeof task, n: typeof node) => Promise<{ notes: string[] }>;
+        }).assessComfyUIEnvironment(task, node);
+        expect(result.notes.some((n) => n.includes("not attributable to any known task"))).toBe(true);
+        expect(server.listening).toBe(true);
+      } finally {
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+      }
+    });
+
+    it("reclaims a port occupied by a process attributable to a task that is no longer live", async () => {
+      const root = path.join(process.cwd(), ".demo-state", "tests", `orchestrator-assess-reclaim-${Date.now()}`);
+      const { store, orchestrator, task } = await makeOrchestratorAndTask(root);
+
+      // Use store.createTask directly (not orchestrator.createTask) -- the
+      // orchestrator enforces single-active-task semantics and would delete
+      // `task` (created above) as a side effect of creating a second one.
+      const staleTask = await store.createTask({
+        name: "Stale",
+        workflowPath: path.join(root, "stale-workflow.json"),
+        workspacePath: path.join(root, "stale-workspace"),
+        artifactPath: path.join(root, "stale-artifacts"),
+        steps: [{ id: "05", name: "Environment deployment", requiredOutput: "05-environment.md", humanIntervention: "Approve" }]
+      });
+      await store.updateStep(staleTask.id, "05", "completed");
+      await store.updateTaskStatus(staleTask.id, "completed");
+
+      const port = 20000 + Math.floor(Math.random() * 10000);
+      const { spawn } = await import("node:child_process");
+      const child = spawn(
+        "node",
+        ["-e", `require('net').createServer().listen(${port}, '127.0.0.1', () => {}); setInterval(() => {}, 1000);`, "--", staleTask.id],
+        { stdio: "ignore" }
+      );
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      try {
+        const node = {
+          name: "n", kind: "local" as const, comfyui_root: path.join(root, "ComfyUI"),
+          venv_python: "/usr/bin/python3", model_roots: ["/m"], api_host: "127.0.0.1", api_port: port
+        };
+        const result = await (orchestrator as unknown as {
+          assessComfyUIEnvironment: (t: typeof task, n: typeof node) => Promise<{ notes: string[] }>;
+        }).assessComfyUIEnvironment(task, node);
+        expect(result.notes.some((n) => n.includes("reclaimed"))).toBe(true);
+
+        const exitPromise = new Promise<void>((resolve) => child.once("exit", () => resolve()));
+        await Promise.race([exitPromise, new Promise((resolve) => setTimeout(resolve, 2000))]);
+        expect(child.exitCode !== null || child.signalCode !== null).toBe(true);
+      } finally {
+        child.kill("SIGKILL");
+      }
+    });
+
+    it("does not reclaim a port occupied by a process attributable to a task that is still live", async () => {
+      const root = path.join(process.cwd(), ".demo-state", "tests", `orchestrator-assess-live-${Date.now()}`);
+      const { store, orchestrator, task } = await makeOrchestratorAndTask(root);
+
+      const liveTask = await store.createTask({
+        name: "Live",
+        workflowPath: path.join(root, "live-workflow.json"),
+        workspacePath: path.join(root, "live-workspace"),
+        artifactPath: path.join(root, "live-artifacts"),
+        steps: [{ id: "05", name: "Environment deployment", requiredOutput: "05-environment.md", humanIntervention: "Approve" }]
+      });
+      await store.updateStep(liveTask.id, "05", "running");
+      await store.updateTaskStatus(liveTask.id, "running");
+
+      const port = 20000 + Math.floor(Math.random() * 10000);
+      const { spawn } = await import("node:child_process");
+      const child = spawn(
+        "node",
+        ["-e", `require('net').createServer().listen(${port}, '127.0.0.1', () => {}); setInterval(() => {}, 1000);`, "--", liveTask.id],
+        { stdio: "ignore" }
+      );
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      try {
+        const node = {
+          name: "n", kind: "local" as const, comfyui_root: path.join(root, "ComfyUI"),
+          venv_python: "/usr/bin/python3", model_roots: ["/m"], api_host: "127.0.0.1", api_port: port
+        };
+        const result = await (orchestrator as unknown as {
+          assessComfyUIEnvironment: (t: typeof task, n: typeof node) => Promise<{ notes: string[] }>;
+        }).assessComfyUIEnvironment(task, node);
+        expect(result.notes.some((n) => n.includes("still active"))).toBe(true);
+        expect(child.exitCode).toBeNull();
+        expect(child.signalCode).toBeNull();
+      } finally {
+        child.kill("SIGKILL");
+      }
+    });
+  });
 });
