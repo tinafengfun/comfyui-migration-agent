@@ -8,11 +8,12 @@
   "patchFile": "patches/xpu-bug-investigation/0001-xpu-fp8-fallback-dequantize-before-move-to-xpu.patch",
   "patchTarget": "comfy/ops.py::_quantized_apply",
   "validationCommand": "python -c \"import torch; t=torch.zeros(1,dtype=torch.float8_e4m3fn); assert t.to('xpu').device.type=='xpu'; print('FP8 XPU OK')\"",
-  "baseVersion": "comfy_kitchen@0e1a2f3",
+  "baseVersion": "comfy_kitchen@0.2.16",
   "knownIssues": [
     "comfy_kitchen QTensor.clone() segfaults on .to('xpu') when the FP8 quantized text encoder is moved to Intel XPU directly.",
     "fp8 -> bf16 dequant roughly doubles activation memory; pair with a VRAM gate.",
-    "Without the patch, ComfyUI may appear to import and register CLIPLoader fine but segfault on first inference, so 'node registered' evidence is not sufficient."
+    "Without the patch, ComfyUI may appear to import and register CLIPLoader fine but segfault on first inference, so 'node registered' evidence is not sufficient.",
+    "Confirmed live 2026-07-26 after upgrading the shared docker-runtime venv's comfy_kitchen from 0.2.8 (which lacked TensorWiseINT8Layout, breaking FP8 entirely) to 0.2.16: comfy_kitchen 0.2.16 still needs this patch. Direct end-to-end test on real XPU hardware (Intel Arc Pro B60) -- a genuine QuantizedTensor(TensorCoreFP8E4M3Layout) run through the patched _quantized_apply -- confirmed _is_fp8_quantized_tensor still triggers, the dequant-to-bf16 fallback still fires (logged), and the tensor lands on xpu:0 correctly with no segfault. comfy_kitchen 0.2.16 does not fix the underlying QTensor.clone() issue itself; only retireCondition's >=0.3.0 is expected to."
   ],
   "workarounds": [
     {
