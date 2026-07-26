@@ -709,8 +709,14 @@ def main() -> int:
             "object_info_stderr": object_info_result["stderr"],
         }
         write_json(reg_json_path, reg_output)
-        reg_csv_path_rel = reg_csv_path.relative_to(Path.cwd())
-        reg_json_path_rel = reg_json_path.relative_to(Path.cwd())
+        try:
+            reg_csv_path_rel = reg_csv_path.relative_to(Path.cwd())
+        except ValueError:
+            reg_csv_path_rel = reg_csv_path
+        try:
+            reg_json_path_rel = reg_json_path.relative_to(Path.cwd())
+        except ValueError:
+            reg_json_path_rel = reg_json_path
         for row in reg_rows:
             mark = "OK" if row["registered"] == "yes" else "MISSING"
             print(f"  [{mark}] {row['node_type']} (x{row['count_in_workflow']})")
