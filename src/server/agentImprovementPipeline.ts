@@ -37,7 +37,23 @@ import type {
 
 const execFileAsync = promisify(execFile);
 
-export const VALIDATE_COMMANDS_FILE = ".agent-improvement-validate.json";
+/**
+ * Per-item validate-commands file and helper-script directory names.
+ * Confirmed live: a shared, non-item-scoped name (".agent-improvement-validate.json"
+ * for every item) caused a real add/add merge conflict the first time two
+ * items' disposable branches were merged into main back to back -- each
+ * branch independently created a file with the identical path. Scoping by
+ * item id makes that class of collision structurally impossible.
+ */
+export function validateCommandsFile(itemId: string): string {
+  return `.agent-improvement-validate.${sanitizeForFilename(itemId)}.json`;
+}
+export function validateHelpersDir(itemId: string): string {
+  return `.agent-improvement-validate-helpers/${sanitizeForFilename(itemId)}`;
+}
+function sanitizeForFilename(value: string): string {
+  return value.replace(/[^a-zA-Z0-9._-]/g, "_");
+}
 
 export type FreeformSessionRunner = { runFreeformSession: CopilotSdkRunner["runFreeformSession"] };
 export type Logger = (message: string) => void;
@@ -63,6 +79,8 @@ export interface DraftRunResult {
 function buildDraftPrompt(item: AgentImprovementItem, sourceTaskArtifactPath: string): string {
   const targetFiles = (item.target_files ?? []).join("\n  - ");
   const validation = (item.required_validation ?? []).map((v) => `  - ${v}`).join("\n") || "  (none specified)";
+  const validateFile = validateCommandsFile(item.id);
+  const helpersDir = validateHelpersDir(item.id);
   return [
     `You are applying ONE human-approved improvement to this ComfyUI migration agent's own repo.`,
     `This is not a ComfyUI migration step -- you are editing the agent's own prompts/skills/scripts.`,
@@ -84,19 +102,23 @@ function buildDraftPrompt(item: AgentImprovementItem, sourceTaskArtifactPath: st
     `(read-only -- do NOT modify anything there). Resolve each "Required validation" item above into an`,
     `actual, directly-runnable shell command by substituting its placeholder paths with real files from`,
     `that directory (e.g. <03-inventory.md> -> the real absolute path to that file in the artifact dir).`,
-    `Write the resolved commands to ${VALIDATE_COMMANDS_FILE} at the root of this worktree, as JSON:`,
+    `Write the resolved commands to ${validateFile} at the root of this worktree, as JSON:`,
     `  {"commands": ["<literal command 1>", "<literal command 2>", ...]}`,
+    `IMPORTANT: this exact filename is scoped to THIS improvement specifically -- a different, shared`,
+    `filename caused a real merge conflict the first time two improvements were merged back to back.`,
+    `Do not rename it to something more generic.`,
     `Each command must be runnable via "bash -c" from this worktree's root with no further edits. If a`,
     `validation item genuinely isn't a runnable command (e.g. "re-read the skill and verify X"), omit it`,
     `from the JSON and instead note it in your final summary as something a human must check by reading.`,
-    `If there is nothing runnable at all, still write ${VALIDATE_COMMANDS_FILE} with an empty commands array.`,
+    `If there is nothing runnable at all, still write ${validateFile} with an empty commands array.`,
     `If a check needs more than one Python statement or any control flow (for/if/loops), do NOT write a`,
     `"python3 -c ..." one-liner or a heredoc inline in the command string -- both are fragile to get right`,
-    `and, worse, a heredoc's embedded newlines break ${VALIDATE_COMMANDS_FILE}'s own JSON encoding (this`,
-    `has happened for real). Instead write an actual small helper script file INSIDE this worktree (e.g.`,
-    `.agent-improvement-validate-helpers/check_foo.py), commit it alongside your other changes, and make`,
-    `the command a single flat line with no embedded newlines: "python3 .agent-improvement-validate-helpers/check_foo.py".`,
-    `Confirm ${VALIDATE_COMMANDS_FILE} is valid JSON yourself (e.g. "python3 -m json.tool ${VALIDATE_COMMANDS_FILE}") before finishing.`,
+    `and, worse, a heredoc's embedded newlines break ${validateFile}'s own JSON encoding (this has`,
+    `happened for real). Instead write an actual small helper script file INSIDE this worktree, under`,
+    `${helpersDir}/ (this directory is also scoped to THIS improvement -- for the same merge-conflict`,
+    `reason, do not put helper scripts anywhere else), commit it alongside your other changes, and make`,
+    `the command a single flat line with no embedded newlines: "python3 ${helpersDir}/check_foo.py".`,
+    `Confirm ${validateFile} is valid JSON yourself (e.g. "python3 -m json.tool ${validateFile}") before finishing.`,
     "",
     "## Non-negotiable constraints",
     "- Only modify the files listed in \"Target files\" above (plus the new validate-commands JSON file). If the change genuinely requires touching an unlisted file, stop and explain why instead of proceeding.",
@@ -117,6 +139,8 @@ function buildFixPrompt(item: AgentImprovementItem, sourceTaskArtifactPath: stri
           `### Failure ${i + 1}\nCommand: ${f.command}\nExit code: ${f.exitCode}\nStderr:\n\`\`\`\n${f.stderr.slice(0, 4000)}\n\`\`\``
       )
       .join("\n\n") || "(no failed validation commands recorded -- check item.verification manually)";
+  const validateFile = validateCommandsFile(item.id);
+  const helpersDir = validateHelpersDir(item.id);
   return [
     `You are fixing a real, verified failure in an already-drafted agent improvement, in the SAME`,
     `disposable git branch/worktree you (or an earlier session) already committed to. Do not start over --`,
@@ -129,7 +153,7 @@ function buildFixPrompt(item: AgentImprovementItem, sourceTaskArtifactPath: stri
     "",
     `**Proposed change:** ${item.proposed_change ?? "(not provided)"}`,
     "",
-    `**Target files (only touch these, plus ${VALIDATE_COMMANDS_FILE} if the fix is there instead):**`,
+    `**Target files (only touch these, plus ${validateFile} if the fix is there instead):**`,
     `  - ${targetFiles || "(none listed)"}`,
     "",
     `## What actually failed when this was verified for real`,
@@ -137,20 +161,20 @@ function buildFixPrompt(item: AgentImprovementItem, sourceTaskArtifactPath: stri
     failureBlock,
     "",
     `Fix the root cause of each failure above. If the bug is in the target file(s) themselves, fix the`,
-    `target file. If the bug is only in ${VALIDATE_COMMANDS_FILE}'s own auxiliary validation command (not`,
+    `target file. If the bug is only in ${validateFile}'s own auxiliary validation command (not`,
     `the actual improvement), fix that file instead -- don't touch the target files for a bug that's only`,
     `in your own throwaway validation script. The source task's real artifacts are (read-only) at:`,
     `${sourceTaskArtifactPath}`,
     "",
     `If the fix involves a multi-line/multi-statement check, write it as an actual helper script file in`,
-    `this worktree (e.g. .agent-improvement-validate-helpers/check_foo.py) and reference it with a single`,
-    `flat command -- do NOT embed a heredoc or multi-line script inline in ${VALIDATE_COMMANDS_FILE}'s`,
-    `command string; its embedded newlines will corrupt that file's own JSON encoding (this has happened`,
-    `for real). Confirm ${VALIDATE_COMMANDS_FILE} is valid JSON yourself before finishing, e.g.:`,
-    `  python3 -m json.tool ${VALIDATE_COMMANDS_FILE}`,
+    `this worktree, under ${helpersDir}/, and reference it with a single flat command -- do NOT embed a`,
+    `heredoc or multi-line script inline in ${validateFile}'s command string; its embedded newlines will`,
+    `corrupt that file's own JSON encoding (this has happened for real). Confirm ${validateFile} is valid`,
+    `JSON yourself before finishing, e.g.:`,
+    `  python3 -m json.tool ${validateFile}`,
     "",
     "## Non-negotiable constraints",
-    "- Only modify the files listed in \"Target files\" above and/or " + VALIDATE_COMMANDS_FILE + ".",
+    "- Only modify the files listed in \"Target files\" above and/or " + validateFile + ".",
     "- Do NOT run `git commit`, `git push`, `git merge`, or any command that changes git history or branches.",
     "- Do NOT touch task-state.json, any workspaces/ directory, or any other task's artifacts.",
     "- After fixing, re-run the validation command(s) yourself to confirm the fix actually works before finishing.",
@@ -254,8 +278,9 @@ export async function fixImprovement(input: {
  * raw, unescaped newline inside a JSON string value, corrupting the file --
  * without this distinction the corrupt file would have silently verified.
  */
-export async function readValidateCommands(worktreePath: string): Promise<string[]> {
-  const filePath = path.join(worktreePath, VALIDATE_COMMANDS_FILE);
+export async function readValidateCommands(worktreePath: string, itemId: string): Promise<string[]> {
+  const validateFile = validateCommandsFile(itemId);
+  const filePath = path.join(worktreePath, validateFile);
   let raw: string;
   try {
     raw = await fs.readFile(filePath, "utf8");
@@ -268,7 +293,7 @@ export async function readValidateCommands(worktreePath: string): Promise<string
     if (!Array.isArray(parsed.commands)) return [];
     return parsed.commands.filter((c): c is string => typeof c === "string");
   } catch (error) {
-    throw new Error(`${VALIDATE_COMMANDS_FILE} exists but is not valid JSON: ${error instanceof Error ? error.message : error}`);
+    throw new Error(`${validateFile} exists but is not valid JSON: ${error instanceof Error ? error.message : error}`);
   }
 }
 
@@ -381,7 +406,7 @@ export async function verifyImprovement(input: {
 
   let commands: string[];
   try {
-    commands = await readValidateCommands(worktreePath);
+    commands = await readValidateCommands(worktreePath, input.item.id);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     log(`  ${message}`);
@@ -389,7 +414,7 @@ export async function verifyImprovement(input: {
       passed: false,
       verification: {
         ranAt: new Date().toISOString(),
-        validationResults: [{ command: `(read ${VALIDATE_COMMANDS_FILE})`, exitCode: null, stdout: "", stderr: message, passed: false }],
+        validationResults: [{ command: `(read ${validateCommandsFile(input.item.id)})`, exitCode: null, stdout: "", stderr: message, passed: false }],
         passed: false
       }
     };
