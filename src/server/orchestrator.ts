@@ -28,6 +28,7 @@ import { ensureBranchSmokeAggregate } from "./branchSmokeAggregate";
 import {
   CopilotSdkRunner,
   SdkStepTimeoutError,
+  isRetryableSdkConnectionError,
   type AgentEventSink,
   type HumanDecisionWaiter,
   type SdkRawEventObserver,
@@ -99,6 +100,23 @@ import {
 import { extractNodeModelPairs, findMatchingRecipes } from "./recipeInjector";
 import { archiveAcceptedWorkflowIfNeeded } from "./workflowArchive";
 import { syncGuiWorkflowToComfyUIServer } from "./guiWorkflowSync";
+
+// Real incident: "Could not connect to provider at <url>" (a raw connection
+// failure, distinct from SdkStepTimeoutError's no-progress watchdog) used to
+// get ZERO retries -- only SdkStepTimeoutError was retried, and only once.
+// Read dynamically (not a module-level constant computed once at import
+// time) matching MIGRATION_AGENT_STEP_TIMEOUT_MS's own convention elsewhere
+// in this project -- lets a max-retry bump happen via env var alone, and
+// lets tests override it per-case.
+function sdkStepMaxRetries(): number {
+  return Number(process.env.MIGRATION_AGENT_SDK_MAX_RETRIES ?? "3");
+}
+// Backoff before each retry attempt (not just an immediate re-call) -- a
+// transient connection failure (proxy blip, provider restart) is more likely
+// to have cleared after a few seconds than immediately.
+function sdkStepRetryBackoffMs(): number {
+  return Number(process.env.MIGRATION_AGENT_SDK_RETRY_BACKOFF_MS ?? "10000");
+}
 
 type EventListener = (event: AgentEvent) => void;
 type QuestionEventData = Record<string, unknown> & {
@@ -372,6 +390,10 @@ export class MigrationOrchestrator {
         : await checkRequiredArtifactCompletion(task, step);
     this.activeStepRuns.add(runKey);
 
+    // See the retry branch below and the `finally` block at the end of this
+    // function: must be declared here (not inside `catch`) so `finally` --
+    // a separate block scope -- can read it.
+    let isRetrying = false;
     try {
     await this.updateStepAndPersist(taskId, stepId, "running");
     await this.emit({
@@ -982,26 +1004,40 @@ export class MigrationOrchestrator {
         });
         return;
       }
-      if (error instanceof SdkStepTimeoutError) {
-        // Retry once on SDK timeout — LLM API transient failures are common
+      const isSdkTimeout = error instanceof SdkStepTimeoutError;
+      const isRetryableConnectionError = isRetryableSdkConnectionError(error);
+      if (isSdkTimeout || isRetryableConnectionError) {
+        // Retry on SDK timeout OR a raw provider-connection failure (e.g.
+        // "Could not connect to provider..." -- confirmed live: previously
+        // only SdkStepTimeoutError was retried, so this exact error class got
+        // zero retries and failed the step outright on one transient network
+        // hiccup). Backoff before retrying gives a transient issue (proxy
+        // blip, provider restart) time to actually clear.
+        const maxRetries = sdkStepMaxRetries();
+        const backoffMs = sdkStepRetryBackoffMs();
         const retryCount = this.sdkTimeoutRetries.get(runKey) ?? 0;
-        if (retryCount < 1) {
+        if (retryCount < maxRetries) {
           this.sdkTimeoutRetries.set(runKey, retryCount + 1);
           this.activeStepRuns.delete(runKey);
           await this.updateStepAndPersist(taskId, stepId, "running");
+          const reasonLabel = isSdkTimeout ? "SDK timeout (LLM API unresponsive)" : `SDK connection error (${message})`;
           await this.emit({
             taskId,
             stepId,
             type: "progress",
-            message: `Step ${stepId} SDK timeout (LLM API unresponsive). Retrying (attempt ${retryCount + 1}/1)...`
+            message: `Step ${stepId} ${reasonLabel}. Retrying in ${Math.round(backoffMs / 1000)}s (attempt ${retryCount + 1}/${maxRetries})...`
           });
+          if (backoffMs > 0) {
+            await new Promise((resolve) => setTimeout(resolve, backoffMs));
+          }
+          isRetrying = true;
           return this.runStep(taskId, stepId, undefined, options);
         }
         this.sdkTimeoutRetries.delete(runKey);
         if (await this.pauseIfArtifactHumanGate(task, step, message)) return;
         const artifactCompletion = await checkRequiredArtifactCompletion(task, step);
         if (artifactCompletion.complete) {
-          const summary = `Step ${stepId} completed by required artifact after SDK watchdog timeout. ${artifactCompletion.reason}`;
+          const summary = `Step ${stepId} completed by required artifact after SDK ${isSdkTimeout ? "watchdog timeout" : "connection retries exhausted"}. ${artifactCompletion.reason}`;
           await this.updateStepAndPersist(taskId, stepId, "completed", { summary });
           await this.emit({
             taskId,
@@ -1025,6 +1061,11 @@ export class MigrationOrchestrator {
           message: `Step ${stepId} paused for human input: ${message}`
         });
       } else if (error instanceof SdkStepTimeoutError) {
+        // Deliberately `instanceof SdkStepTimeoutError` only, not the broader
+        // isRetryableSdkConnectionError check above -- a raw connection
+        // failure means the SDK never had a live session to begin with, so
+        // there's nothing to "resume"; once its retries are exhausted it
+        // correctly falls through to the plain `failed` branch below instead.
         // SDK watchdog timed out but the underlying SDK session may still be
         // alive — keep the step in `paused` so the user can resume without
         // losing prior agent context. rerunStep remains available as the
@@ -1070,7 +1111,9 @@ export class MigrationOrchestrator {
       throw error;
     } finally {
       this.activeStepRuns.delete(runKey);
-      this.sdkTimeoutRetries.delete(runKey);
+      if (!isRetrying) {
+        this.sdkTimeoutRetries.delete(runKey);
+      }
     }
   }
 

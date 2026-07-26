@@ -2152,3 +2152,113 @@ describe("migration orchestrator", () => {
     );
   });
 });
+
+describe("SDK connection-error retry (real incident: NO_PROXY misrouted an internal provider through the corporate proxy, which returns 403 for private IPs and surfaces as \"Could not connect to provider...\" -- previously only SdkStepTimeoutError got retried, so this exact error class failed the step outright on one transient network hiccup)", () => {
+  async function makeOrchestratorWithStubRunStep(
+    root: string,
+    runStep: (job: unknown) => Promise<{ sessionId: string; summary: string }>
+  ) {
+    const config: AppConfig = {
+      port: 0,
+      projectRoot: root,
+      workspaceRoot: path.join(root, "workspaces"),
+      stateRoot: path.join(root, "state"),
+      draftDocRoot: root,
+      comfyuiRoot: path.join(root, "ComfyUI"),
+      modelRoots: [path.join(root, "models")],
+      gpuNodesPath: path.join(root, "gpu-nodes.json"),
+      workflowArchiveRoot: path.join(root, "nfs-workflows"),
+      autoApproveAgentPermissions: false
+    };
+    await ensureDir(config.workspaceRoot);
+    const store = new StateStore(config);
+    await store.initialize();
+    const orchestrator = new MigrationOrchestrator(
+      config,
+      store,
+      // requiredOutput must exactly match a single candidate in
+      // expectedArtifactGroups' step-"06" case (artifactCompletion.ts) so
+      // stepMentionsOnlyOneRequiredArtifact resolves to one concrete file --
+      // otherwise Step 06's default two-group requirement would need both
+      // files of a group written.
+      [{ id: "06", name: "Retry test step", requiredOutput: "06-prompt.json", humanIntervention: "n/a" }],
+      { runStep }
+    );
+    const task = await orchestrator.createTask({
+      name: "SDK retry test",
+      workflowFileName: "workflow.json",
+      workflowJson: { nodes: [], links: [] }
+    });
+    return { store, orchestrator, task };
+  }
+
+  const CONNECTION_ERROR_MESSAGE =
+    "Could not connect to provider at http://test:8000/v1.\n  Check the URL and your network connection.";
+
+  it("retries a raw connection-failure error and completes once the provider recovers", async () => {
+    const originalMaxRetries = process.env.MIGRATION_AGENT_SDK_MAX_RETRIES;
+    const originalBackoff = process.env.MIGRATION_AGENT_SDK_RETRY_BACKOFF_MS;
+    process.env.MIGRATION_AGENT_SDK_MAX_RETRIES = "3";
+    process.env.MIGRATION_AGENT_SDK_RETRY_BACKOFF_MS = "0";
+    try {
+      const root = path.join(process.cwd(), ".demo-state", "tests", `orchestrator-sdk-conn-retry-recovers-${Date.now()}`);
+      let attempts = 0;
+      const { store, orchestrator, task } = await makeOrchestratorWithStubRunStep(root, async () => {
+        attempts += 1;
+        if (attempts <= 2) {
+          throw new Error(CONNECTION_ERROR_MESSAGE);
+        }
+        await fs.writeFile(path.join(task.artifactPath, "06-prompt.json"), "{}", "utf8");
+        return { sessionId: "fake-session", summary: "Recovered after connection retries." };
+      });
+
+      await orchestrator.runStep(task.id, "06");
+
+      expect(attempts).toBe(3);
+      const updated = await store.getTask(task.id);
+      const step = updated?.steps.find((s) => s.id === "06");
+      expect(step?.status).toBe("completed");
+      expect(step?.summary).toBe("Recovered after connection retries.");
+      const events = await store.listEvents(task.id);
+      expect(
+        events.some(
+          (e) => e.type === "progress" && e.message.includes("SDK connection error") && e.message.includes("Retrying in")
+        )
+      ).toBe(true);
+    } finally {
+      if (originalMaxRetries === undefined) delete process.env.MIGRATION_AGENT_SDK_MAX_RETRIES;
+      else process.env.MIGRATION_AGENT_SDK_MAX_RETRIES = originalMaxRetries;
+      if (originalBackoff === undefined) delete process.env.MIGRATION_AGENT_SDK_RETRY_BACKOFF_MS;
+      else process.env.MIGRATION_AGENT_SDK_RETRY_BACKOFF_MS = originalBackoff;
+    }
+  });
+
+  it("fails the step (not paused) once connection-error retries are exhausted -- unlike SdkStepTimeoutError, a raw connection failure never had a live session to resume", async () => {
+    const originalMaxRetries = process.env.MIGRATION_AGENT_SDK_MAX_RETRIES;
+    const originalBackoff = process.env.MIGRATION_AGENT_SDK_RETRY_BACKOFF_MS;
+    process.env.MIGRATION_AGENT_SDK_MAX_RETRIES = "1";
+    process.env.MIGRATION_AGENT_SDK_RETRY_BACKOFF_MS = "0";
+    try {
+      const root = path.join(process.cwd(), ".demo-state", "tests", `orchestrator-sdk-conn-retry-exhausted-${Date.now()}`);
+      let attempts = 0;
+      const { store, orchestrator, task } = await makeOrchestratorWithStubRunStep(root, async () => {
+        attempts += 1;
+        throw new Error(CONNECTION_ERROR_MESSAGE);
+      });
+
+      await expect(orchestrator.runStep(task.id, "06")).rejects.toThrow(/Could not connect to provider/);
+
+      // 1 initial attempt + 1 retry = 2 calls before giving up.
+      expect(attempts).toBe(2);
+      const updated = await store.getTask(task.id);
+      const step = updated?.steps.find((s) => s.id === "06");
+      expect(step?.status).toBe("failed");
+      expect(step?.error).toMatch(/Could not connect to provider/);
+    } finally {
+      if (originalMaxRetries === undefined) delete process.env.MIGRATION_AGENT_SDK_MAX_RETRIES;
+      else process.env.MIGRATION_AGENT_SDK_MAX_RETRIES = originalMaxRetries;
+      if (originalBackoff === undefined) delete process.env.MIGRATION_AGENT_SDK_RETRY_BACKOFF_MS;
+      else process.env.MIGRATION_AGENT_SDK_RETRY_BACKOFF_MS = originalBackoff;
+    }
+  });
+});

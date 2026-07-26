@@ -47,6 +47,40 @@ export class SdkStepTimeoutError extends Error {
   }
 }
 
+/**
+ * Real incident this closes: a mis-scoped NO_PROXY meant provider requests
+ * to an internal model server got routed through the corporate proxy, which
+ * returns 403 for private-range destinations -- the underlying HTTP client
+ * doesn't fail fast on that, it hangs at the TCP level for several minutes
+ * before finally raising "Could not connect to provider at <url>. Check the
+ * URL and your network connection." This error is NOT an SdkStepTimeoutError
+ * (that's our own no-progress watchdog, unrelated) -- it's a raw connection
+ * failure thrown directly from the SDK's own provider call, and previously
+ * orchestrator.ts's retry logic only matched `instanceof SdkStepTimeoutError`,
+ * so this exact error class got ZERO retries: one transient network hiccup
+ * (proxy blip, provider restart, DNS flake) failed the whole step outright.
+ * The network misconfiguration is fixed separately (see env's NO_PROXY), but
+ * this is a legitimate defense-in-depth: transient connection failures to
+ * the model provider are exactly the kind of thing worth retrying.
+ */
+const RETRYABLE_CONNECTION_ERROR_PATTERNS = [
+  /could not connect to provider/i,
+  /ECONNREFUSED/,
+  /ECONNRESET/,
+  /ETIMEDOUT/,
+  /ENOTFOUND/,
+  /EHOSTUNREACH/,
+  /ENETUNREACH/,
+  /fetch failed/i,
+  /network error/i,
+  /socket hang up/i
+];
+
+export function isRetryableSdkConnectionError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  return RETRYABLE_CONNECTION_ERROR_PATTERNS.some((pattern) => pattern.test(error.message));
+}
+
 export class CopilotSdkRunner {
   // Tracks the live CopilotClient for each in-flight task so a hard stop
   // (terminateWithHardStop) can actually reach and kill it. Previously hard
