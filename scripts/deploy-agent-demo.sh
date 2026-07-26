@@ -89,10 +89,11 @@ for dir in src scripts prompts recipes schemas; do
 done
 
 echo ""
-echo "==> Verifying sync (diff -rq)..."
+echo "==> Verifying sync (diff -rq, ignoring Python bytecode caches -- those are expected"
+echo "    to diverge locally in agent-demo from real tool runs, not sync artifacts)..."
 for dir in src scripts prompts recipes schemas; do
   if [ -d "$CMA_STAGING/$dir" ]; then
-    if diff -rq "$CMA_STAGING/$dir" "$AGENT_DEMO/$dir"; then
+    if diff -rq -x "__pycache__" -x "*.pyc" "$CMA_STAGING/$dir" "$AGENT_DEMO/$dir"; then
       echo "  OK: $dir"
     else
       echo "  MISMATCH: $dir -- sync did not produce an identical copy, investigate before restarting"
@@ -117,4 +118,5 @@ bash "$AGENT_DEMO/scripts/restart.sh"
 
 echo ""
 echo "==> Confirming task state survived the restart..."
-curl -s "$API/api/tasks" | python3 -m json.tool | head -20
+curl -s "$API/api/tasks" | python3 -m json.tool 2>/dev/null | head -20 || true
+echo "==> Done."
