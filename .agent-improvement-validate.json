@@ -1,5 +1,0 @@
-{
-  "commands": [
-    "python3 prompts/migration-workflow-v2/tools/step02_feasibility_scaffold.py --target-ssh intel@172.16.124.12 --port 8188 --workflow /home/intel/tianfeng/comfy/ComfyUI/agent-demo/workspaces/19ddae81-22d5-4c23-a06c-a3fe07c3479c/source/Smart_Photo_Rewrite_workflow.json"
-  ]
-}
