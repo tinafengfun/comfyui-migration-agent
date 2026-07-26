@@ -1,4 +1,4 @@
-import { CopilotClient, type SessionEvent } from "@github/copilot-sdk";
+import { CopilotClient, RuntimeConnection, type SessionEvent } from "@github/copilot-sdk";
 import fs from "node:fs/promises";
 import path from "node:path";
 import type {
@@ -437,9 +437,14 @@ export class CopilotSdkRunner {
   }
 
   private createClient(cwd: string, gitHubToken?: string): CopilotClient {
+    // copilot-sdk 1.0.8 renamed the client-level `cwd` option to
+    // `workingDirectory`, and moved the CLI binary override from a top-level
+    // `cliPath` into `connection: RuntimeConnection.forStdio({ path })`.
     return new CopilotClient({
-      cwd,
-      cliPath: this.config.copilotCliPath,
+      workingDirectory: cwd,
+      connection: this.config.copilotCliPath
+        ? RuntimeConnection.forStdio({ path: this.config.copilotCliPath })
+        : undefined,
       logLevel: "error",
       gitHubToken,
       useLoggedInUser: gitHubToken ? false : true

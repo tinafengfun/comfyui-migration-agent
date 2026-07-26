@@ -22,7 +22,7 @@
     "playwright:migration": "playwright test --grep @migration"
   },
   "dependencies": {
-    "@github/copilot-sdk": "^0.3.0",
+    "@github/copilot-sdk": "^1.0.8",
     "@vitejs/plugin-react": "^5.1.1",
     "ajv": "^8.20.0",
     "ajv-formats": "^3.0.1",
@@ -47,5 +47,8 @@
     "tsx": "^4.21.0",
     "typescript": "^5.9.3",
     "vitest": "^4.0.15"
+  },
+  "overrides": {
+    "@github/copilot": "1.0.73"
   }
 }
