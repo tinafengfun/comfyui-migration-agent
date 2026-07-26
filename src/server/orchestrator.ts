@@ -320,7 +320,32 @@ export class MigrationOrchestrator {
     if (!task) throw new Error(`Task not found: ${taskId}`);
     const step = this.steps.find((item) => item.id === stepId);
     if (!step) throw new Error(`Step not found: ${stepId}`);
-    const preRunArtifactCompletion = await checkRequiredArtifactCompletion(task, step);
+    // Confirmed live: if a step's SDK session is lost while paused
+    // waiting_for_human (e.g. a backend restart) and the human answers after
+    // the fact, resumeStep() re-invokes runStep() with the recorded answers
+    // in resumeContext.humanDecisions so a fresh SDK session can act on them
+    // (they're threaded through into the compiled StepJob's own
+    // resumeContext field). But most steps write their required-output
+    // artifact *before* reaching the human gate within the same run, so that
+    // artifact already exists on disk by the time resume happens -- the
+    // fast-path check below would then declare the step "complete" without
+    // ever starting the SDK session that was supposed to process the human's
+    // actual answer. A real human "passed the test looks good" was silently
+    // discarded this way: manual_result stayed "not_performed", the NFS
+    // archive never fired, and the task advanced past a step whose own
+    // reflection said next_step_allowed=false. Skip the fast path entirely
+    // whenever there are pending resume decisions -- the SDK must be given
+    // the chance to consume them.
+    const pendingResumeDecisions = Array.isArray(resumeContext?.humanDecisions)
+      ? (resumeContext.humanDecisions as unknown[])
+      : [];
+    const preRunArtifactCompletion =
+      pendingResumeDecisions.length > 0
+        ? {
+            complete: false,
+            reason: `Resuming with ${pendingResumeDecisions.length} pending human decision(s) -- skipping fast-path artifact completion so the SDK can process them.`
+          }
+        : await checkRequiredArtifactCompletion(task, step);
     this.activeStepRuns.add(runKey);
 
     try {

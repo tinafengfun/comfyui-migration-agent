@@ -1886,4 +1886,104 @@ describe("migration orchestrator", () => {
       }
     });
   });
+
+  describe("resumeStep vs. the required-artifact fast path", () => {
+    // Regression test for a real, live incident: Step 12 wrote its required
+    // artifact (12-gui-acceptance.md) before pausing for human review; the
+    // backend was restarted while it waited, orphaning the live SDK session;
+    // when the human later answered "passed the test looks good" in chat,
+    // resumeStep() re-invoked runStep() with that answer in
+    // resumeContext.humanDecisions -- but the fast-path artifact check fired
+    // first, saw 12-gui-acceptance.md already existed, and declared the step
+    // "completed" without ever starting an SDK session to process the
+    // answer. The human's real signoff was silently discarded: manual_result
+    // stayed "not_performed" and the task advanced anyway.
+    async function makeOrchestratorWithStubRunner(root: string, runStepCalls: unknown[][]) {
+      const config: AppConfig = {
+        port: 0,
+        projectRoot: root,
+        workspaceRoot: path.join(root, "workspaces"),
+        stateRoot: path.join(root, "state"),
+        draftDocRoot: root,
+        comfyuiRoot: "/tmp/comfy",
+        modelRoots: ["/home/intel/hf_models"],
+        gpuNodesPath: path.join(root, "gpu-nodes.json"),
+        workflowArchiveRoot: path.join(root, "nfs-workflows"),
+        autoApproveAgentPermissions: false
+      };
+      await ensureDir(config.workspaceRoot);
+      const store = new StateStore(config);
+      await store.initialize();
+      const stubRunner = {
+        runStep: async (job: unknown) => {
+          runStepCalls.push([job]);
+          return { sessionId: "stub-session", summary: "Stub SDK session processed the resume decision." };
+        }
+      };
+      const orchestrator = new MigrationOrchestrator(
+        config,
+        store,
+        [{ id: "12", name: "GUI acceptance and demo", requiredOutput: "12-gui-acceptance.md", humanIntervention: "Approve" }],
+        stubRunner
+      );
+      return { store, orchestrator };
+    }
+
+    it("does NOT fast-path-complete a resumed step that has a pending human decision, even though its required artifact already exists", async () => {
+      const root = path.join(process.cwd(), ".demo-state", "tests", `orchestrator-resume-bug-${Date.now()}`);
+      const runStepCalls: unknown[][] = [];
+      const { store, orchestrator } = await makeOrchestratorWithStubRunner(root, runStepCalls);
+
+      const task = await orchestrator.createTask({
+        name: "Resume bug repro",
+        workflowFileName: "workflow.json",
+        workflowJson: { nodes: [], links: [] }
+      });
+
+      // Step 12 already wrote its required artifact (as it does before
+      // pausing for human review) and is sitting at waiting_for_human --
+      // exactly the state a lost SDK session leaves behind.
+      await fs.writeFile(path.join(task.artifactPath, "12-gui-acceptance.md"), "# prepared for GUI acceptance\n", "utf8");
+      await store.updateStep(task.id, "12", "waiting_for_human");
+
+      // The human's real answer, recorded while no live SDK session existed
+      // to receive it (mirrors recordHumanDecision's "for next resume" path).
+      await store.appendDecision({
+        taskId: task.id,
+        stepId: "12",
+        questionEventId: "q1",
+        answer: "passed the test looks good",
+        wasFreeform: true,
+        decidedAt: new Date().toISOString()
+      });
+
+      await orchestrator.resumeStep(task.id, "12");
+
+      expect(runStepCalls).toHaveLength(1);
+      const finalTask = await store.getTask(task.id);
+      const step12 = finalTask?.steps.find((s) => s.id === "12");
+      expect(step12?.summary).not.toMatch(/completed from existing required artifact/);
+    });
+
+    it("still uses the fast path for a plain run with no pending resume decisions", async () => {
+      const root = path.join(process.cwd(), ".demo-state", "tests", `orchestrator-resume-fastpath-${Date.now()}`);
+      const runStepCalls: unknown[][] = [];
+      const { store, orchestrator } = await makeOrchestratorWithStubRunner(root, runStepCalls);
+
+      const task = await orchestrator.createTask({
+        name: "Fast path still works",
+        workflowFileName: "workflow.json",
+        workflowJson: { nodes: [], links: [] }
+      });
+      await fs.writeFile(path.join(task.artifactPath, "12-gui-acceptance.md"), "# already done\n", "utf8");
+
+      await orchestrator.runStep(task.id, "12");
+
+      expect(runStepCalls).toHaveLength(0);
+      const finalTask = await store.getTask(task.id);
+      const step12 = finalTask?.steps.find((s) => s.id === "12");
+      expect(step12?.status).toBe("completed");
+      expect(step12?.summary).toMatch(/completed from existing required artifact/);
+    });
+  });
 });
