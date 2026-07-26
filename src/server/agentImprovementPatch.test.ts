@@ -7,6 +7,7 @@ import {
   applyItemStatusUpdates,
   parseAgentImprovementFile,
   parseApprovalAnswer,
+  parsePushDeployAnswer,
   readAgentImprovementFile,
   writeAgentImprovementFile,
   type AgentImprovementFile,
@@ -132,6 +133,60 @@ describe("parseApprovalAnswer", () => {
     const { unrecognizedTokens, decisions } = parseApprovalAnswer("approve: I01,I99", ids);
     expect(unrecognizedTokens).toEqual(["i99"]);
     expect(decisions.I01).toBe("approved_to_apply");
+  });
+});
+
+describe("parsePushDeployAnswer", () => {
+  const verifiedIds = ["I01", "I02", "I03"];
+
+  it("parses 'push: <ids>' without deploy", () => {
+    const { pushIds, deploy, unrecognizedTokens } = parsePushDeployAnswer("push: I01,I03", verifiedIds);
+    expect(pushIds).toEqual(["I01", "I03"]);
+    expect(deploy).toBe(false);
+    expect(unrecognizedTokens).toEqual([]);
+  });
+
+  it("parses 'push: <ids> deploy' with the trailing deploy keyword", () => {
+    const { pushIds, deploy } = parsePushDeployAnswer("push: I01 deploy", verifiedIds);
+    expect(pushIds).toEqual(["I01"]);
+    expect(deploy).toBe(true);
+  });
+
+  it("'push: all' selects every verified item", () => {
+    const { pushIds } = parsePushDeployAnswer("push: all", verifiedIds);
+    expect(pushIds).toEqual(verifiedIds);
+  });
+
+  it("'push: all deploy' selects everything and deploys", () => {
+    const { pushIds, deploy } = parsePushDeployAnswer("push: all deploy", verifiedIds);
+    expect(pushIds).toEqual(verifiedIds);
+    expect(deploy).toBe(true);
+  });
+
+  it("'push: none' / empty answer selects nothing and never deploys", () => {
+    for (const answer of ["push: none", "none", ""]) {
+      const { pushIds, deploy } = parsePushDeployAnswer(answer, verifiedIds);
+      expect(pushIds).toEqual([]);
+      expect(deploy).toBe(false);
+    }
+  });
+
+  it("forces deploy:false even if the word 'deploy' appears, when nothing was selected to push", () => {
+    const { pushIds, deploy } = parsePushDeployAnswer("push: none deploy", verifiedIds);
+    expect(pushIds).toEqual([]);
+    expect(deploy).toBe(false);
+  });
+
+  it("is case-insensitive", () => {
+    const { pushIds, deploy } = parsePushDeployAnswer("PUSH: i01 DEPLOY", verifiedIds);
+    expect(pushIds).toEqual(["I01"]);
+    expect(deploy).toBe(true);
+  });
+
+  it("surfaces unrecognized tokens instead of silently dropping typos", () => {
+    const { pushIds, unrecognizedTokens } = parsePushDeployAnswer("push: I01,I99", verifiedIds);
+    expect(pushIds).toEqual(["I01"]);
+    expect(unrecognizedTokens).toEqual(["i99"]);
   });
 });
 

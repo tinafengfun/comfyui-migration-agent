@@ -1,62 +1,21 @@
 /**
- * verify-agent-improvement.mts -- stage (c)+(d) of the generate -> verify ->
- * merge pipeline for Step 13 agent self-improvements. Never touches main,
- * never pushes, never touches the live deployment or the live task's own
- * StateStore -- everything here runs against the disposable worktree
- * apply-agent-improvements.mts already created, plus (for --replay) a
- * throwaway scratch orchestrator instance in a temp directory.
- *
- * For each item at apply_status "drafted":
- *   1. Run the concrete validation commands apply-agent-improvements.mts's
- *      SDK session already resolved into `.agent-improvement-validate.json`
- *      at the worktree root (the item's own `required_validation` entries
- *      are human-readable templates like "<03-inventory.md>", not literal
- *      commands -- resolving placeholders happens once, at draft time, by
- *      the same session that made the edit and knows the real file paths).
- *      Each command runs via `bash -c` from the worktree root; exit code 0
- *      = passed. Real fixture data, not synthetic: the source task's own
- *      artifact folder (e.g. `03-inventory.md`, `10-node-coverage.csv`) is
- *      genuine ground truth from a run that already happened.
- *   2. Only with --replay (off by default -- a replay can trigger real
- *      Step 05+ environment/GPU work if the target step is downstream of
- *      those, so this stays an explicit, deliberate action): if every one
- *      of the item's target_files lives under prompts/ or skills/ (a tool
- *      script change can't be verified by replay -- the SDK doesn't re-read
- *      .py files as instructions), spin up a fully isolated
- *      MigrationOrchestrator (scratch StateStore/workspace/state root,
- *      draftDocRoot pointed at the worktree's own prompts/ dir) and replay
- *      the source task's workflow through it, auto-injecting the source
- *      task's own recorded human decisions (mirrors the existing
- *      `POST /api/tasks/:taskId/replay` endpoint's logic exactly, just
- *      pointed at the worktree's code instead of the live deployment).
- *
- * Writes results to item.verification and sets apply_status to "verified"
- * or "verification_failed" via agentImprovementPatch.ts's safe
- * read-modify-write helpers.
+ * verify-agent-improvement.mts — CLI wrapper around
+ * src/server/agentImprovementPipeline.ts's verifyImprovement(). See that
+ * module for the actual validation-command + optional-replay logic and
+ * safety rationale (never touches main, never touches the live task's own
+ * StateStore).
  *
  * Usage:
  *   npx tsx scripts/verify-agent-improvement.mts --task <taskId> [--item <id>] [--replay] [--api http://127.0.0.1:3001]
  */
-import { execFile } from "node:child_process";
-import fs from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
-import { promisify } from "node:util";
-import { loadConfig } from "../src/server/config";
-import { loadStepDefinitions } from "../src/server/workflowLoader";
-import { MigrationOrchestrator } from "../src/server/orchestrator";
-import { StateStore } from "../src/server/state";
-import { ensureDir } from "../src/server/fsUtils";
+import { verifyImprovement } from "../src/server/agentImprovementPipeline";
 import {
   applyItemPatches,
   readAgentImprovementFile,
   writeAgentImprovementFile,
-  type AgentImprovementItem,
-  type AgentImprovementValidationResult,
-  type AgentImprovementReplayResult
+  type AgentImprovementVerification
 } from "../src/server/agentImprovementPatch";
-
-const execFileAsync = promisify(execFile);
 
 const API = argValue("--api") ?? process.env.PW_API ?? "http://127.0.0.1:3001";
 const taskId = argValue("--task");
@@ -66,136 +25,6 @@ const attemptReplay = process.argv.includes("--replay");
 function argValue(flag: string): string | undefined {
   const i = process.argv.indexOf(flag);
   return i >= 0 ? process.argv[i + 1] : undefined;
-}
-
-/**
- * Distinguishes "no validate-commands file" (nothing to run -- fine, not a
- * failure) from "file exists but is corrupt" (a REAL failure -- must not
- * silently degrade to an empty command list, which would make
- * `validationResults.every(passed)` vacuously true on an empty array and
- * falsely report "verified" for something that was never actually checked).
- * Caught live: a fix session's heredoc-based validation command embedded a
- * raw, unescaped newline inside a JSON string value, corrupting the file --
- * without this distinction the corrupt file would have silently verified.
- */
-async function readValidateCommands(worktreePath: string): Promise<string[]> {
-  const filePath = path.join(worktreePath, ".agent-improvement-validate.json");
-  let raw: string;
-  try {
-    raw = await fs.readFile(filePath, "utf8");
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
-    throw error;
-  }
-  try {
-    const parsed = JSON.parse(raw) as { commands?: unknown };
-    if (!Array.isArray(parsed.commands)) return [];
-    return parsed.commands.filter((c): c is string => typeof c === "string");
-  } catch (error) {
-    throw new Error(`.agent-improvement-validate.json exists but is not valid JSON: ${error instanceof Error ? error.message : error}`);
-  }
-}
-
-async function runValidationCommand(worktreePath: string, command: string): Promise<AgentImprovementValidationResult> {
-  try {
-    const { stdout, stderr } = await execFileAsync("bash", ["-c", command], {
-      cwd: worktreePath,
-      maxBuffer: 16 * 1024 * 1024,
-      timeout: 5 * 60 * 1000
-    });
-    return { command, exitCode: 0, stdout, stderr, passed: true };
-  } catch (error) {
-    const err = error as { code?: number; stdout?: string; stderr?: string; message?: string };
-    return {
-      command,
-      exitCode: typeof err.code === "number" ? err.code : null,
-      stdout: err.stdout ?? "",
-      stderr: err.stderr ?? err.message ?? String(error),
-      passed: false
-    };
-  }
-}
-
-/** Only prompt/skill changes are replayable -- a .py tool edit isn't "read" by the SDK as instructions. */
-function isReplayEligible(item: AgentImprovementItem): boolean {
-  const files = item.target_files ?? [];
-  if (files.length === 0) return false;
-  return files.every((f) => f.includes("/prompts/") || f.includes("/skills/") || f.startsWith("prompts/") || f.startsWith("skills/"));
-}
-
-async function runScopedReplay(input: {
-  worktreePath: string;
-  sourceTaskId: string;
-  api: string;
-}): Promise<AgentImprovementReplayResult> {
-  const { worktreePath, sourceTaskId, api } = input;
-  const scratchRoot = await fs.mkdtemp(path.join(os.tmpdir(), "agent-improvement-verify-"));
-  try {
-    const res = await fetch(`${api}/api/tasks/${sourceTaskId}`);
-    if (!res.ok) return { ranReplay: false, reason: `source task fetch failed: HTTP ${res.status}` };
-    const { task: sourceTask } = (await res.json()) as {
-      task: { id: string; workflowPath: string; artifactPath: string };
-    };
-    const workflowJson = JSON.parse(await fs.readFile(sourceTask.workflowPath, "utf8"));
-
-    const decisionsRes = await fetch(`${api}/api/tasks/${sourceTaskId}/human-decisions`);
-    const sourceDecisions = decisionsRes.ok ? ((await decisionsRes.json()) as { decisions: unknown[] }).decisions : [];
-
-    const draftDocRoot = path.join(worktreePath, "prompts");
-    if (
-      !(await fs
-        .stat(draftDocRoot)
-        .then((s) => s.isDirectory())
-        .catch(() => false))
-    ) {
-      return { ranReplay: false, reason: `worktree has no prompts/ dir at ${draftDocRoot}` };
-    }
-
-    const scratchConfig = {
-      ...loadConfig(),
-      projectRoot: scratchRoot,
-      workspaceRoot: path.join(scratchRoot, "workspaces"),
-      stateRoot: path.join(scratchRoot, ".demo-state"),
-      draftDocRoot,
-      gpuNodesPath: path.join(scratchRoot, "gpu-nodes.json"),
-      workflowArchiveRoot: path.join(scratchRoot, "nfs-workflows")
-    };
-    await ensureDir(scratchConfig.workspaceRoot);
-
-    const steps = await loadStepDefinitions(scratchConfig);
-    const store = new StateStore(scratchConfig);
-    await store.initialize();
-    const orchestrator = new MigrationOrchestrator(scratchConfig, store, steps);
-
-    const replayTask = await orchestrator.createTask({
-      name: `verify-replay-${sourceTaskId}`,
-      workflowFileName: path.basename(sourceTask.workflowPath),
-      workflowJson
-    });
-
-    if (Array.isArray(sourceDecisions) && sourceDecisions.length > 0) {
-      await fs.writeFile(
-        path.join(replayTask.artifactPath, "replay-decisions.json"),
-        JSON.stringify({ sourceTaskId, decisions: sourceDecisions }),
-        "utf8"
-      );
-    }
-
-    await orchestrator.runUntilGate(replayTask.id);
-
-    const finalTask = await store.getTask(replayTask.id);
-    const hasFailure = finalTask?.steps.some((s) => s.status === "failed" || s.status === "hard_stopped");
-    return {
-      ranReplay: true,
-      taskId: replayTask.id,
-      stepStatus: finalTask?.status,
-      hardStopped: Boolean(hasFailure)
-    };
-  } catch (error) {
-    return { ranReplay: false, reason: error instanceof Error ? error.message : String(error) };
-  } finally {
-    await fs.rm(scratchRoot, { recursive: true, force: true }).catch(() => {});
-  }
 }
 
 async function main(): Promise<void> {
@@ -238,65 +67,19 @@ async function main(): Promise<void> {
       continue;
     }
 
-    const { worktreePath } = item.draft;
-    let commands: string[];
-    const validationResults: AgentImprovementValidationResult[] = [];
-    try {
-      commands = await readValidateCommands(worktreePath);
-    } catch (error) {
-      console.error(`  ${error instanceof Error ? error.message : error}`);
-      await patchItem(filePath, item.id, "verification_failed", {
-        ranAt: new Date().toISOString(),
-        validationResults: [
-          {
-            command: "(read .agent-improvement-validate.json)",
-            exitCode: null,
-            stdout: "",
-            stderr: error instanceof Error ? error.message : String(error),
-            passed: false
-          }
-        ],
-        passed: false
-      });
-      console.log(`  ${item.id} -> verification_failed (corrupt validate-commands file)`);
-      continue;
-    }
-    console.log(`  ${commands.length} validation command(s) to run`);
-    for (const command of commands) {
-      console.log(`  $ ${command}`);
-      const result = await runValidationCommand(worktreePath, command);
-      validationResults.push(result);
-      console.log(`    ${result.passed ? "PASS" : "FAIL"} (exit ${result.exitCode ?? "null"})`);
-      if (!result.passed) console.log(`    stderr: ${result.stderr.split("\n").slice(0, 10).join("\n    ")}`);
-    }
-
-    let replayResult: AgentImprovementReplayResult | undefined;
-    if (attemptReplay && isReplayEligible(item)) {
-      console.log("  running scoped replay (--replay)...");
-      replayResult = await runScopedReplay({ worktreePath, sourceTaskId: taskId, api: API });
-      console.log(`  replay: ${replayResult.ranReplay ? `ran, task ${replayResult.taskId} ended at ${replayResult.stepStatus}` : `skipped/failed -- ${replayResult.reason}`}`);
-    } else if (isReplayEligible(item)) {
-      console.log("  item touches prompts/skills but --replay wasn't passed -- skipping behavioral replay (validation commands only).");
-    }
-
-    const passed =
-      validationResults.every((r) => r.passed) && (!replayResult || (replayResult.ranReplay && !replayResult.hardStopped));
-    await patchItem(filePath, item.id, passed ? "verified" : "verification_failed", {
-      ranAt: new Date().toISOString(),
-      validationResults,
-      ...(replayResult ? { replayResult } : {}),
-      passed
+    const { verification, passed } = await verifyImprovement({
+      item: item as typeof item & { draft: NonNullable<typeof item.draft> },
+      sourceTaskId: taskId,
+      api: API,
+      attemptReplay,
+      log: console.log
     });
+    await patchItem(filePath, item.id, passed ? "verified" : "verification_failed", verification);
     console.log(`  ${item.id} -> ${passed ? "verified" : "verification_failed"}`);
   }
 }
 
-async function patchItem(
-  filePath: string,
-  itemId: string,
-  applyStatus: string,
-  verification: import("../src/server/agentImprovementPatch").AgentImprovementVerification
-): Promise<void> {
+async function patchItem(filePath: string, itemId: string, applyStatus: string, verification: AgentImprovementVerification): Promise<void> {
   const current = (await readAgentImprovementFile(filePath))!;
   const { state: updated, unmatchedIds } = applyItemPatches(current, {
     [itemId]: { apply_status: applyStatus, verification }

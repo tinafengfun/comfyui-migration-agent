@@ -62,11 +62,23 @@ import { ensureStepArtifactScaffold } from "./stepArtifactScaffold";
 import { createTaskWorkspace, deleteTaskWorkspace, getLayoutForTask } from "./taskWorkspaces";
 import { writeTaskStateLedger } from "./taskStateLedger";
 import {
+  applyItemPatches,
   applyItemStatusUpdates,
   parseApprovalAnswer,
+  parsePushDeployAnswer,
   readAgentImprovementFile,
-  writeAgentImprovementFile
+  writeAgentImprovementFile,
+  type AgentImprovementItem
 } from "./agentImprovementPatch";
+import {
+  draftImprovement,
+  fixImprovement,
+  verifyImprovement,
+  mergeImprovement,
+  git as improvementGit,
+  type FreeformSessionRunner as ImprovementSdkRunner
+} from "./agentImprovementPipeline";
+import { spawn } from "node:child_process";
 import { STEP_OUTPUT_SUBDIR } from "./paths";
 import { appendFeedbackEvent, type FeedbackEventInput } from "./feedbackLog";
 import { recordRecipeOutcome } from "./analyticsDb";
@@ -1922,6 +1934,10 @@ export class MigrationOrchestrator {
       return true;
     }
 
+    if (decision.stepId === "13" && (await this.applyPushDeployDecision({ task, decision }))) {
+      return true;
+    }
+
     if (decision.stepId !== "00") {
       const artifactGate = await checkRequiredArtifactGate(task, stepDefinition);
       if (!artifactGate.gated) {
@@ -2590,6 +2606,14 @@ export class MigrationOrchestrator {
    * Handles the human's answer to the gate above. Returns false (falls
    * through to generic gate handling) if Step 13 isn't actually waiting on
    * this specific approval gate, so unrelated Step 13 decisions still work.
+   *
+   * If nothing was approved, Step 13 completes immediately (nothing to do)
+   * exactly as before. If anything was approved, Step 13 does NOT complete
+   * here -- it moves to `pipeline_phase: "processing"` and kicks off
+   * runImprovementPipelineAsync in the background (fire-and-forget, mirrors
+   * the existing runUntilGate/resumeStep call-site pattern in index.ts),
+   * which will pause again with a NEW question once draft/verify/fix has
+   * run for every approved item.
    */
   private async applyAgentImprovementApprovalDecision(input: {
     task: MigrationTask;
@@ -2599,30 +2623,264 @@ export class MigrationOrchestrator {
     const filePath = path.join(task.artifactPath, "13-agent-improvement.json");
     const state = await readAgentImprovementFile(filePath);
     if (!state) return false;
+    if (state.pipeline_phase && state.pipeline_phase !== "awaiting_approval") return false;
     const pendingIds = state.improvements
       .filter((item) => item.apply_status === "waiting_for_human_approval")
       .map((item) => item.id);
     if (pendingIds.length === 0) return false;
 
     const { decisions, unrecognizedTokens } = parseApprovalAnswer(decision.answer, pendingIds);
-    const { state: updated, unmatchedIds } = applyItemStatusUpdates(state, decisions);
-    await writeAgentImprovementFile(filePath, updated);
-
+    const { state: afterApproval, unmatchedIds } = applyItemStatusUpdates(state, decisions);
     const approvedCount = Object.values(decisions).filter((value) => value === "approved_to_apply").length;
+
+    if (approvedCount === 0) {
+      await writeAgentImprovementFile(filePath, { ...afterApproval, pipeline_phase: "done" });
+      const summary = `Step 13 improvement approval recorded: 0/${pendingIds.length} item(s) approved. Nothing to apply.`;
+      await this.updateStepAndPersist(task.id, "13", "completed", { summary });
+      await this.emit({
+        taskId: task.id,
+        stepId: "13",
+        type: "step_completed",
+        message: summary,
+        data: { decisions, ...(unrecognizedTokens.length > 0 ? { unrecognizedTokens } : {}), ...(unmatchedIds.length > 0 ? { unmatchedIds } : {}) }
+      });
+      return true;
+    }
+
+    await writeAgentImprovementFile(filePath, { ...afterApproval, pipeline_phase: "processing" });
+    const summary = `Step 13 improvement approval recorded: ${approvedCount}/${pendingIds.length} item(s) approved. Drafting and verifying now (this can take a while)...`;
+    await this.updateStepAndPersist(task.id, "13", "running", { summary });
+    await this.emit({
+      taskId: task.id,
+      stepId: "13",
+      type: "progress",
+      message: summary,
+      data: { decisions, ...(unrecognizedTokens.length > 0 ? { unrecognizedTokens } : {}), ...(unmatchedIds.length > 0 ? { unmatchedIds } : {}) }
+    });
+    void this.runImprovementPipelineAsync(task.id).catch((error) => {
+      console.error(`[step13-pipeline] ${task.id} failed:`, error instanceof Error ? error.message : error);
+    });
+    return true;
+  }
+
+  /**
+   * Background draft -> verify -> (bounded fix retries) -> summarize pass
+   * for every item approved at the gate above. Runs entirely against
+   * `this.config.agentSelfImprovementRepoRoot` (the canonical
+   * comfyui-migration-agent checkout) -- NEVER `this.config.projectRoot`,
+   * which for a live agent-demo deployment can be a stale subtree of a
+   * completely different repo (confirmed live this session). Never touches
+   * the live task's own StateStore beyond this task's own
+   * 13-agent-improvement.json and step status.
+   */
+  private async runImprovementPipelineAsync(taskId: string): Promise<void> {
+    const MAX_FIX_ATTEMPTS = 2;
+    const task = await this.store.getTask(taskId);
+    if (!task) return;
+    const filePath = path.join(task.artifactPath, "13-agent-improvement.json");
+    const repoRoot = this.config.agentSelfImprovementRepoRoot;
+    const log = (message: string) => {
+      void this.emit({ taskId, stepId: "13", type: "progress", message });
+    };
+
+    if (!repoRoot) {
+      const error =
+        "AGENT_SELF_IMPROVEMENT_REPO_ROOT is not configured -- cannot draft/verify/merge agent improvements automatically. " +
+        "Set it in env and restart, or apply approved items manually via scripts/apply-agent-improvements.mts with --api pointed at a canonical checkout.";
+      await this.updateStepAndPersist(taskId, "13", "failed", { error });
+      await this.emit({ taskId, stepId: "13", type: "progress", message: error });
+      return;
+    }
+
+    const state = (await readAgentImprovementFile(filePath))!;
+    const approved = state.improvements.filter((item) => item.apply_status === "approved_to_apply");
+    const sdkRunner = this.sdkRunner as unknown as ImprovementSdkRunner;
+    const outcomes: Array<{ id: string; verified: boolean; reason?: string }> = [];
+
+    for (const original of approved) {
+      let item: AgentImprovementItem = original;
+      try {
+        log(`Drafting ${item.id}...`);
+        const draftResult = await draftImprovement({
+          repoRoot,
+          sdkRunner,
+          item,
+          sourceTaskArtifactPath: task.artifactPath,
+          log
+        });
+        item = {
+          ...item,
+          apply_status: draftResult.madeChanges ? "drafted" : "verification_failed",
+          ...(draftResult.madeChanges && draftResult.commitSha
+            ? { draft: { branch: draftResult.branch, worktreePath: draftResult.worktreePath, commitSha: draftResult.commitSha } }
+            : {})
+        };
+        await this.patchImprovementItem(filePath, item.id, item);
+
+        let verified = false;
+        let attempts = 0;
+        while (item.draft) {
+          log(`Verifying ${item.id}...`);
+          const { verification, passed } = await verifyImprovement({
+            item: item as AgentImprovementItem & { draft: NonNullable<AgentImprovementItem["draft"]> },
+            sourceTaskId: taskId,
+            api: `http://127.0.0.1:${this.config.port}`,
+            attemptReplay: false,
+            log
+          });
+          item = { ...item, apply_status: passed ? "verified" : "verification_failed", verification };
+          await this.patchImprovementItem(filePath, item.id, item);
+          verified = passed;
+          if (passed || attempts >= MAX_FIX_ATTEMPTS) break;
+          attempts += 1;
+          log(`Verification failed for ${item.id} -- attempting fix ${attempts}/${MAX_FIX_ATTEMPTS}...`);
+          const fixResult = await fixImprovement({
+            repoRoot,
+            sdkRunner,
+            item: item as AgentImprovementItem & { draft: NonNullable<AgentImprovementItem["draft"]> },
+            sourceTaskArtifactPath: task.artifactPath,
+            log
+          });
+          item = {
+            ...item,
+            apply_status: fixResult.madeChanges ? "drafted" : "verification_failed",
+            ...(fixResult.madeChanges && fixResult.commitSha
+              ? { draft: { branch: fixResult.branch, worktreePath: fixResult.worktreePath, commitSha: fixResult.commitSha } }
+              : {})
+          };
+          await this.patchImprovementItem(filePath, item.id, item);
+          if (!fixResult.madeChanges) break; // no-op fix -- stop retrying, report as failed
+        }
+        outcomes.push({ id: item.id, verified, reason: verified ? undefined : "still failing after fix attempts -- see item.verification" });
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
+        log(`${item.id} pipeline error: ${reason}`);
+        await this.patchImprovementItem(filePath, item.id, { apply_status: "verification_failed" });
+        outcomes.push({ id: item.id, verified: false, reason });
+      }
+    }
+
+    const verifiedIds = outcomes.filter((o) => o.verified).map((o) => o.id);
+    const failedLines = outcomes
+      .filter((o) => !o.verified)
+      .map((o) => `  - ${o.id}: ${o.reason}`)
+      .join("\n");
     const summary =
-      `Step 13 improvement approval recorded: ${approvedCount}/${pendingIds.length} item(s) approved to apply ` +
-      `(run scripts/apply-agent-improvements.mts; nothing auto-merges to main).`;
+      `Step 13 pipeline finished: ${verifiedIds.length}/${outcomes.length} item(s) verified.` +
+      (failedLines ? `\n\nStill failing after retries:\n${failedLines}` : "");
+
+    const current = (await readAgentImprovementFile(filePath))!;
+    await writeAgentImprovementFile(filePath, { ...current, pipeline_phase: "awaiting_push_deploy_decision" });
+    await this.updateStepAndPersist(taskId, "13", "waiting_for_human", { summary });
+    await this.emit({
+      taskId,
+      stepId: "13",
+      type: "human_question",
+      message: summary,
+      data: {
+        question:
+          `${summary}\n\n` +
+          `Which verified item(s) should be pushed to GitHub? Answer "push: <ids>" (e.g. "push: I02,I05"), "push: all", or "push: none". ` +
+          `Add " deploy" (e.g. "push: all deploy") to also sync the latest code to agent-demo and restart the backend after a successful push.`,
+        choices: verifiedIds.length > 0 ? ["push: all deploy", "push: none"] : ["push: none"],
+        allowFreeform: true,
+        blockingReason: "quality_review",
+        artifactPath: filePath
+      }
+    });
+  }
+
+  /** Safe read-modify-write of a single item, used throughout the pipeline above. */
+  private async patchImprovementItem(filePath: string, itemId: string, patch: Partial<AgentImprovementItem>): Promise<void> {
+    const current = (await readAgentImprovementFile(filePath))!;
+    const { state: updated } = applyItemPatches(current, { [itemId]: patch });
+    await writeAgentImprovementFile(filePath, updated);
+  }
+
+  /**
+   * Handles the human's answer to the push/deploy gate above. Returns false
+   * (falls through to generic gate handling) if Step 13 isn't waiting on
+   * this specific gate. For each selected item: local merge --no-ff + a
+   * full tsc/vitest re-check (mergeImprovement already auto-reverts on
+   * failure), marking successes "applied". A SINGLE `git push origin HEAD`
+   * follows if anything merged. Deploy (sync + restart agent-demo) only
+   * fires if explicitly requested AND the push succeeded -- via a fully
+   * DETACHED child process, since the deploy script kills and relaunches
+   * this very Node process; letting it detach means this handler can finish
+   * persisting state and responding before that happens.
+   */
+  private async applyPushDeployDecision(input: { task: MigrationTask; decision: HumanDecision }): Promise<boolean> {
+    const { task, decision } = input;
+    const filePath = path.join(task.artifactPath, "13-agent-improvement.json");
+    const state = await readAgentImprovementFile(filePath);
+    if (!state || state.pipeline_phase !== "awaiting_push_deploy_decision") return false;
+
+    const repoRoot = this.config.agentSelfImprovementRepoRoot;
+    const verifiedIds = state.improvements.filter((item) => item.apply_status === "verified").map((item) => item.id);
+    const { pushIds, deploy, unrecognizedTokens } = parsePushDeployAnswer(decision.answer, verifiedIds);
+
+    const notes: string[] = [];
+    const mergedIds: string[] = [];
+    if (!repoRoot && pushIds.length > 0) {
+      notes.push("AGENT_SELF_IMPROVEMENT_REPO_ROOT is not configured -- cannot merge/push. Do this manually.");
+    } else if (repoRoot) {
+      for (const id of pushIds) {
+        const item = state.improvements.find((i) => i.id === id);
+        if (!item?.draft) {
+          notes.push(`${id}: no draft info, skipped.`);
+          continue;
+        }
+        const result = await mergeImprovement({
+          repoRoot,
+          item: item as AgentImprovementItem & { draft: NonNullable<AgentImprovementItem["draft"]> },
+          log: (m) => void this.emit({ taskId: task.id, stepId: "13", type: "progress", message: m })
+        });
+        if (result.ok) {
+          await this.patchImprovementItem(filePath, id, { apply_status: "applied" });
+          mergedIds.push(id);
+          notes.push(`${id}: merged locally as ${result.mergeSha}.`);
+        } else {
+          notes.push(`${id}: merge failed and was reverted -- ${result.reason}. Left at "verified".`);
+        }
+      }
+    }
+
+    let pushed = false;
+    if (repoRoot && mergedIds.length > 0) {
+      try {
+        await improvementGit(repoRoot, ["push", "origin", "HEAD"]);
+        pushed = true;
+        notes.push(`Pushed ${mergedIds.length} merge(s) to origin main.`);
+      } catch (error) {
+        notes.push(`git push failed: ${error instanceof Error ? error.message : error}. Merged locally only -- push manually when ready.`);
+      }
+    }
+
+    let deployTriggered = false;
+    if (repoRoot && deploy && pushed) {
+      const deployScript = path.join(repoRoot, "scripts", "deploy-agent-demo.sh");
+      const child = spawn("bash", [deployScript, "--yes"], {
+        cwd: repoRoot,
+        detached: true,
+        stdio: "ignore"
+      });
+      child.unref();
+      deployTriggered = true;
+      notes.push("Deploy triggered: agent-demo will sync the latest code and restart momentarily (detached from this process).");
+    } else if (deploy && !pushed) {
+      notes.push("Deploy was requested but nothing was pushed -- skipped.");
+    }
+
+    const current = (await readAgentImprovementFile(filePath))!;
+    await writeAgentImprovementFile(filePath, { ...current, pipeline_phase: "done" });
+    const summary = `Step 13 push/deploy decision recorded.\n\n${notes.join("\n")}`;
     await this.updateStepAndPersist(task.id, "13", "completed", { summary });
     await this.emit({
       taskId: task.id,
       stepId: "13",
       type: "step_completed",
       message: summary,
-      data: {
-        decisions,
-        ...(unrecognizedTokens.length > 0 ? { unrecognizedTokens } : {}),
-        ...(unmatchedIds.length > 0 ? { unmatchedIds } : {})
-      }
+      data: { pushIds, deploy, deployTriggered, ...(unrecognizedTokens.length > 0 ? { unrecognizedTokens } : {}) }
     });
     return true;
   }

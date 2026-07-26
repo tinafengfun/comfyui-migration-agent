@@ -25,6 +25,17 @@ export interface AppConfig {
   autoApproveAgentPermissions: boolean;
   /** Shared NFS dir accepted (Step 12) migrated workflow delivery bundles are archived to. */
   workflowArchiveRoot: string;
+  /**
+   * Absolute path to the CANONICAL comfyui-migration-agent git checkout used
+   * for Step 13's draft/verify/fix/merge/push pipeline (agentImprovementPipeline.ts).
+   * Deliberately never falls back to `projectRoot`: a live agent-demo deployment's
+   * own `projectRoot` can be a stale subtree of an entirely different repo (confirmed
+   * live -- agent-demo's own git identity was the ComfyUI repo's `v2-agent` branch,
+   * badly behind comfyui-migration-agent's real history). Undefined means the
+   * pipeline isn't configured for this deployment; callers must fail closed with a
+   * clear error rather than silently using `projectRoot`.
+   */
+  agentSelfImprovementRepoRoot?: string;
 }
 
 const projectRoot = process.cwd();
@@ -58,7 +69,10 @@ export function loadConfig(): AppConfig {
       : undefined,
     copilotCliPath: process.env.COPILOT_CLI_PATH,
     autoApproveAgentPermissions: process.env.MIGRATION_AGENT_AUTO_APPROVE !== "0",
-    workflowArchiveRoot: resolveFromProject(process.env.WORKFLOW_ARCHIVE_ROOT ?? "/nfs_share/workflows")
+    workflowArchiveRoot: resolveFromProject(process.env.WORKFLOW_ARCHIVE_ROOT ?? "/nfs_share/workflows"),
+    agentSelfImprovementRepoRoot: process.env.AGENT_SELF_IMPROVEMENT_REPO_ROOT
+      ? resolveFromProject(process.env.AGENT_SELF_IMPROVEMENT_REPO_ROOT)
+      : undefined
   };
 }
 

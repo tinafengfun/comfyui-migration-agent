@@ -103,7 +103,7 @@ describe("Step 13 improvement approval gate", () => {
     expect(state.improvements.every((i: { apply_status: string }) => i.apply_status === "waiting_for_human_approval")).toBe(true);
   });
 
-  it("applies the human's approval decision and only then completes the step", async () => {
+  it("applies the human's approval decision and moves to the background draft/verify pipeline, not straight to completed", async () => {
     const { orchestrator, store, taskId, artifactPath } = await setupTask();
     await orchestrator.runStep(taskId, "13");
     const question = (await store.listEvents(taskId)).find((event) => event.type === "human_question");
@@ -116,13 +116,43 @@ describe("Step 13 improvement approval gate", () => {
       wasFreeform: true
     });
 
+    // Something was approved -- Step 13 must NOT jump straight to "completed"
+    // anymore (that was the old single-round behavior). It moves to
+    // "running" while the background draft/verify/fix pipeline works.
     const task = await store.getTask(taskId);
-    expect(task?.steps.find((s) => s.id === "13")?.status).toBe("completed");
+    expect(task?.steps.find((s) => s.id === "13")?.status).toBe("running");
 
     const state = JSON.parse(await fs.readFile(path.join(artifactPath, "13-agent-improvement.json"), "utf8"));
+    expect(state.pipeline_phase).toBe("processing");
     const byId = Object.fromEntries(state.improvements.map((i: { id: string; apply_status: string }) => [i.id, i.apply_status]));
     expect(byId.I01).toBe("do_not_apply");
     expect(byId.I02).toBe("approved_to_apply");
+  });
+
+  it("fails Step 13 closed (never falls back to config.projectRoot) when AGENT_SELF_IMPROVEMENT_REPO_ROOT isn't configured", async () => {
+    const { orchestrator, store, taskId } = await setupTask();
+    await orchestrator.runStep(taskId, "13");
+    const question = (await store.listEvents(taskId)).find((event) => event.type === "human_question");
+
+    await orchestrator.recordHumanDecision({
+      taskId,
+      stepId: "13",
+      questionEventId: question?.id ?? "",
+      answer: "approve: I02",
+      wasFreeform: true
+    });
+
+    // The background pipeline's very first check (no repoRoot configured)
+    // is synchronous file/store I/O only -- no real git or SDK calls -- so
+    // it settles fast. Poll briefly instead of a fixed sleep.
+    let task = await store.getTask(taskId);
+    for (let i = 0; i < 50 && task?.steps.find((s) => s.id === "13")?.status === "running"; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      task = await store.getTask(taskId);
+    }
+    const step13 = task?.steps.find((s) => s.id === "13");
+    expect(step13?.status).toBe("failed");
+    expect(step13?.error).toContain("AGENT_SELF_IMPROVEMENT_REPO_ROOT");
   });
 
   it("completes normally without a gate when Step 13 proposes zero improvements", async () => {

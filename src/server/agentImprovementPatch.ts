@@ -73,8 +73,21 @@ export interface AgentImprovementItem {
   [key: string]: unknown;
 }
 
+/**
+ * Tracks which round of Step 13's multi-round chat flow a task is in.
+ * Deliberately stored in this durable JSON file (not in-memory) so it
+ * survives a backend restart the same way apply_status does -- the
+ * deterministic gate dispatch (applyDeterministicGateDecision in
+ * orchestrator.ts) reads this to know what the human's next answer means,
+ * rather than relying on a live SDK session that a restart would orphan
+ * (see the resumeStep fast-path bug fixed earlier this project for exactly
+ * why that distinction matters).
+ */
+export type PipelinePhase = "awaiting_approval" | "processing" | "awaiting_push_deploy_decision" | "done";
+
 export interface AgentImprovementFile {
   improvements: AgentImprovementItem[];
+  pipeline_phase?: PipelinePhase;
   [key: string]: unknown;
 }
 
@@ -183,4 +196,37 @@ export function parseApprovalAnswer(
     decisions[id] = approvedIds.has(id) ? "approved_to_apply" : "do_not_apply";
   }
   return { decisions, unrecognizedTokens };
+}
+
+/**
+ * Parses the human's freeform answer at the (new) post-verification push/
+ * deploy gate: "push: <ids>", "push: all", or "push: none", each optionally
+ * suffixed with the word "deploy" (e.g. "push: all deploy") to additionally
+ * trigger a sync + restart of the live agent-demo backend after a
+ * successful push. `deploy` is forced false if no items end up selected --
+ * restarting the live service over nothing pushed is never intentional.
+ */
+export function parsePushDeployAnswer(
+  answer: string,
+  verifiedItemIds: string[]
+): { pushIds: string[]; deploy: boolean; unrecognizedTokens: string[] } {
+  const normalized = answer.trim().toLowerCase();
+  const wantsDeploy = /\bdeploy\b/.test(normalized);
+  const withoutDeploy = normalized.replace(/\bdeploy\b/g, " ").trim();
+  const withoutPrefix = withoutDeploy.replace(/^push\s*:?\s*/, "").trim();
+
+  let pushIds: string[] = [];
+  const unrecognizedTokens: string[] = [];
+  if (/^all$/.test(withoutPrefix)) {
+    pushIds = [...verifiedItemIds];
+  } else if (withoutPrefix !== "" && !/^none$/.test(withoutPrefix)) {
+    const idsById = new Map(verifiedItemIds.map((id) => [id.toLowerCase(), id]));
+    const tokens = withoutPrefix.split(/[\s,;]+/).filter(Boolean);
+    for (const token of tokens) {
+      const matched = idsById.get(token);
+      if (matched) pushIds.push(matched);
+      else unrecognizedTokens.push(token);
+    }
+  }
+  return { pushIds, deploy: wantsDeploy && pushIds.length > 0, unrecognizedTokens };
 }
