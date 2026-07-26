@@ -2066,7 +2066,10 @@ describe("migration orchestrator", () => {
     // a fresh human_question landed 119ms after the real step_completed
     // event, and the resulting stale "Missing Assets" panel persisted all
     // the way into Step 02.
-    async function makeTaskWithStaleAcquisitionJob(root: string, step01Status: "completed" | "waiting_for_human") {
+    async function makeTaskWithStaleAcquisitionJob(
+      root: string,
+      step01Status: "completed" | "waiting_for_human" | "hard_stopped" | "failed" | "terminated"
+    ) {
       const config: AppConfig = {
         port: 0,
         projectRoot: root,
@@ -2127,5 +2130,25 @@ describe("migration orchestrator", () => {
       const events = await store.listEvents(task.id);
       expect(events.some((e) => e.type === "human_question" && e.stepId === "01")).toBe(true);
     });
+
+    // Regression test for a second real gap in the same fix: answering this
+    // exact gate with "Stop migration at Step 01" sets the step to
+    // hard_stopped, not completed -- the original fix's guard only excluded
+    // "completed"/"failed"/"terminated", so a hard-stopped Step 01 still fell
+    // through and re-emitted the identical stale question right after the
+    // operator explicitly stopped the migration.
+    it.each(["hard_stopped", "failed", "terminated"] as const)(
+      "does NOT re-emit the acquisition human_question once Step 01 is %s",
+      async (terminalStatus) => {
+        const root = path.join(process.cwd(), ".demo-state", "tests", `orchestrator-step01-stale-${terminalStatus}-${Date.now()}`);
+        const { store, orchestrator, task } = await makeTaskWithStaleAcquisitionJob(root, terminalStatus);
+
+        const fired = await orchestrator.ensurePhase1HumanGateExposed(task.id);
+
+        expect(fired).toBe(false);
+        const events = await store.listEvents(task.id);
+        expect(events.some((e) => e.type === "human_question" && e.stepId === "01")).toBe(false);
+      }
+    );
   });
 });

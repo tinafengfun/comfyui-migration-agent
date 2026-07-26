@@ -1550,7 +1550,15 @@ export class MigrationOrchestrator {
     // Step 02, because nothing else about the step's own state ever
     // resolved it. Since the legacy driver mode this guarded against isn't
     // reachable from the UI, stop re-litigating a step that's already done.
-    if (!step || step.status === "completed" || step.status === "failed" || step.status === "terminated") return false;
+    // Matches this codebase's own terminal-status convention (see the
+    // `terminal` set a few thousand lines down at the resumeStep fast-path
+    // check) -- hard_stopped is reachable here too: answering this exact
+    // gate with "Stop migration at Step 01" sets the step to hard_stopped
+    // (not completed), and without this it fell through the same stale
+    // 01-acquisition-job.json re-read and re-emitted the identical question
+    // right after the operator explicitly stopped the migration.
+    if (!step || step.status === "completed" || step.status === "failed" || step.status === "terminated" || step.status === "hard_stopped")
+      return false;
 
     const jobPath = path.join(task.artifactPath, "01-acquisition-job.json");
     let job: Record<string, unknown>;

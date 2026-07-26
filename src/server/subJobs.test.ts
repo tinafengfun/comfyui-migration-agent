@@ -150,6 +150,42 @@ describe("sub job manager", () => {
     expect(discovery?.message).toContain("2 item(s) remain unresolved");
   });
 
+  it("reports 'completed' (not stale 'blocked') once Step 01 itself has reached a terminal status, even with unresolvedCount > 0 in the acquisition job", async () => {
+    // Same staleness root cause as the Missing-Assets-panel bug fixed
+    // elsewhere this session: 01-acquisition-job.json's own unresolvedCount
+    // never gets cleared when the step resolves through a different path
+    // (e.g. the general gate-signal mechanism, or a hard stop). Once the
+    // step has genuinely moved on, this summary row must not keep reporting
+    // "blocked" -- that reads as a current blocker, not historical info.
+    const root = path.join(process.cwd(), ".demo-state", "tests", `subjobs-terminal-${Date.now()}`);
+    const artifactPath = path.join(root, "artifacts");
+    await ensureDir(artifactPath);
+    await fs.writeFile(
+      path.join(artifactPath, "01-acquisition-job.json"),
+      JSON.stringify({ status: "waiting_for_secure_download", providerCandidateCount: 0, customNodeCandidateCount: 0, unresolvedCount: 1, items: [] }, null, 2),
+      "utf8"
+    );
+    const manager = new SubJobManager();
+
+    for (const terminalStatus of ["completed", "hard_stopped", "failed", "terminated"] as const) {
+      const task: MigrationTask = {
+        id: `task-subjobs-terminal-${terminalStatus}`,
+        name: "Subjobs terminal",
+        status: terminalStatus,
+        workflowPath: path.join(root, "workflow.json"),
+        workspacePath: root,
+        artifactPath,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        steps: [{ id: "01", status: terminalStatus }]
+      };
+      const jobs = await manager.listTaskSubJobs(task);
+      const discovery = jobs.find((job) => job.id === "01-provider-discovery");
+      expect(discovery?.status, `expected 'completed' when step 01 status is ${terminalStatus}`).toBe("completed");
+      expect(discovery?.message).toContain("Step 01 has since moved on");
+    }
+  });
+
   it("allows download sub-jobs through the demo download profile", async () => {
     delete process.env.ASSET_ACQUISITION_ENABLE_DOWNLOAD;
     process.env.MIGRATION_AGENT_DOWNLOAD_PROFILE = "demo";

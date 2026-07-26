@@ -76,6 +76,17 @@ export class SubJobManager {
   async listTaskSubJobs(task: MigrationTask): Promise<SubJob[]> {
     const acquisition = await readAcquisitionJob(task);
     if (!acquisition) return [];
+    // Same staleness root cause as the Missing-Assets-panel bug this session
+    // fixed elsewhere (see emitStep01AcquisitionGateIfNeeded): these two
+    // summary rows derive "blocked" purely from 01-acquisition-job.json's own
+    // unresolvedCount, which nothing clears when Step 01 resolves through a
+    // DIFFERENT path (the general gate-signal mechanism). Once the step
+    // itself has actually reached a terminal state, showing "blocked" here
+    // is misleading historical info, not a current blocker -- report
+    // "completed" instead (the step moved on regardless of how).
+    const step01Terminal = ["completed", "failed", "terminated", "hard_stopped"].includes(
+      task.steps.find((s) => s.id === "01")?.status ?? ""
+    );
     const jobs: SubJob[] = [
       {
         id: "01-provider-discovery",
@@ -85,15 +96,18 @@ export class SubJobManager {
         title: "Step 01 provider search",
         // Ran to completion either way -- but only report "completed" (all
         // gaps resolved) when unresolvedCount is actually zero, instead of
-        // always claiming success regardless of whether anything was found.
-        status: (acquisition.unresolvedCount ?? 0) === 0 ? "completed" : "blocked",
+        // always claiming success regardless of whether anything was found
+        // -- UNLESS the step itself has since moved past the gate anyway.
+        status: (acquisition.unresolvedCount ?? 0) === 0 || step01Terminal ? "completed" : "blocked",
         artifactPath: "artifacts/01-acquisition-job.json",
         candidateCount:
           (acquisition.providerCandidateCount ?? 0) + (acquisition.customNodeCandidateCount ?? 0),
         progress: { percent: 100 },
         message: (acquisition.unresolvedCount ?? 0) === 0
           ? "Provider discovery completed and all gaps were resolved."
-          : `Provider discovery ran, but ${acquisition.unresolvedCount} item(s) remain unresolved -- see candidates/fuzzy-match judgment in the acquisition job.`
+          : step01Terminal
+            ? `Provider discovery ran with ${acquisition.unresolvedCount} item(s) unresolved at the time, but Step 01 has since moved on.`
+            : `Provider discovery ran, but ${acquisition.unresolvedCount} item(s) remain unresolved -- see candidates/fuzzy-match judgment in the acquisition job.`
       },
       {
         id: "01-custom-node-search",
@@ -101,7 +115,7 @@ export class SubJobManager {
         stepId: "01",
         type: "custom_node_search",
         title: "Step 01 custom-node source search",
-        status: acquisition.customNodeCandidateCount ? "completed" : "blocked",
+        status: acquisition.customNodeCandidateCount || step01Terminal ? "completed" : "blocked",
         artifactPath: "artifacts/01-acquisition-job.json",
         candidateCount: acquisition.customNodeCandidateCount ?? 0,
         progress: { percent: 100 },
