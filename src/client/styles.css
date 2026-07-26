@@ -147,6 +147,8 @@ button, input, select, textarea { font: inherit; }
 .health-dot.reconnecting { background: #f59e0b; animation: pulse-dot 1.2s ease-in-out infinite; }
 .step-progress-label { color: #9ca3af; font-size: 13px; }
 .step-progress-label.reconnecting-label { color: #f59e0b; }
+.step-progress-label.deploying-label { color: #3b82f6; font-weight: 600; }
+.step-progress-label.migration-complete-label { color: #22c55e; font-weight: 600; }
 
 @keyframes pulse-dot {
   0%, 100% { opacity: 1; }

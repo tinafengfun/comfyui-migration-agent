@@ -66,28 +66,44 @@ function extractActivity(event: AgentEvent): ActivityLine | undefined {
   return undefined;
 }
 
-function shouldRefreshTaskState(event: AgentEvent): boolean {
-  // Real bug this closes: "step_started" wasn't in this list, so clicking
-  // Run fired the request and the server flipped the step to "running", but
-  // the client's own steps/tasks state (which drives the StatusBadge and
-  // which action buttons show) never re-fetched -- it stayed on "pending"
-  // until some LATER event (step_completed, human_question, ...) happened
-  // to trigger a refresh, or the user manually reloaded the page.
-  if (
-    ["step_started", "step_completed", "step_failed", "hard_stop", "human_question", "step_summary", "reflection_proposed"].includes(
-      event.type
-    )
-  ) {
-    return true;
-  }
-  if (event.type !== "progress") return false;
-  if (event.message.startsWith("Synced Phase 1")) return true;
-  if (isRecord(event.data)) {
-    if (Array.isArray(event.data.synced) && event.data.synced.length > 0) return true;
-    if (stringValue(event.data.resumeFrom) === "phase1-context") return true;
-  }
-  return false;
+// Real bug this closes: task-state/artifact refresh used to require every
+// event TYPE that could possibly change visible state to be enumerated in an
+// allowlist here (shouldRefreshTaskState used to check only
+// step_started/step_completed/.../a couple of specific "progress" message
+// patterns). Every new backend feature that emits its own "progress" events
+// (Step 05's docker-sync/recipe-drift checks, Step 12's GUI-workflow sync,
+// Step 13's whole draft/verify/fix/merge/push/deploy pipeline, ...) silently
+// fell outside that allowlist, so its status changes only ever became
+// visible after a manual page reload -- indistinguishable from "the UI is
+// frozen." Fixed by refreshing on EVERY event instead of matching specific
+// types, with a leading+trailing throttle so a bursty SDK tool-calling
+// session doesn't turn into a refetch storm: the first event after a quiet
+// period refreshes immediately, then updates are capped at one per
+// REFRESH_THROTTLE_MS during a burst, with one final trailing refresh to
+// catch the last state once the burst ends.
+const REFRESH_THROTTLE_MS = 600;
+
+function makeThrottledSignal(bump: () => void) {
+  let lastFire = 0;
+  let trailingTimer: ReturnType<typeof setTimeout> | undefined;
+  return () => {
+    const now = Date.now();
+    const elapsed = now - lastFire;
+    if (elapsed >= REFRESH_THROTTLE_MS) {
+      lastFire = now;
+      bump();
+    } else {
+      if (trailingTimer) clearTimeout(trailingTimer);
+      trailingTimer = setTimeout(() => {
+        lastFire = Date.now();
+        bump();
+      }, REFRESH_THROTTLE_MS - elapsed);
+    }
+  };
 }
+
+/** Message substring the Step 13 push/deploy gate emits right before spawning the detached redeploy process (see orchestrator.ts's applyPushDeployDecision). */
+const DEPLOY_TRIGGERED_MARKER = "Deploy triggered";
 
 export type ConnectionState = "connected" | "reconnecting";
 
@@ -97,12 +113,19 @@ export type ConnectionState = "connected" | "reconnecting";
 const RECONNECT_BASE_MS = 2_000;
 const RECONNECT_MAX_MS = 30_000;
 
+// Safety net: if the disconnect/reconnect signals are somehow missed (the
+// deploy script fails before killing the old process, or the browser's own
+// EventSource retry is fast enough that "reconnecting" never visibly
+// renders), don't leave the "deploying" banner stuck forever.
+const DEPLOY_PENDING_TIMEOUT_MS = 120_000;
+
 export function useEventStream(taskId: string | undefined) {
   const [events, setEvents] = useState<AgentEvent[]>([]);
   const [activities, setActivities] = useState<Map<string, ActivityLine[]>>(new Map());
   const [needsRefresh, setNeedsRefresh] = useState(0);
   const [needsArtifactRefresh, setNeedsArtifactRefresh] = useState(0);
   const [connectionState, setConnectionState] = useState<ConnectionState>("connected");
+  const [deployPending, setDeployPending] = useState(false);
   const eventsRef = useRef(events);
   eventsRef.current = events;
 
@@ -111,11 +134,24 @@ export function useEventStream(taskId: string | undefined) {
     setEvents([]);
     setActivities(new Map());
     setConnectionState("connected");
+    setDeployPending(false);
 
     let stopped = false;
     let source: EventSource | undefined;
     let reconnectAttempt = 0;
     let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+    let hasConnectedBefore = false;
+    let sawDisconnectSinceDeploy = false;
+    let deployTimeoutTimer: ReturnType<typeof setTimeout> | undefined;
+
+    const bumpRefresh = makeThrottledSignal(() => setNeedsRefresh((n) => n + 1));
+    const bumpArtifactRefresh = makeThrottledSignal(() => setNeedsArtifactRefresh((n) => n + 1));
+
+    const clearDeployPending = () => {
+      if (deployTimeoutTimer) clearTimeout(deployTimeoutTimer);
+      sawDisconnectSinceDeploy = false;
+      setDeployPending(false);
+    };
 
     const connect = () => {
       if (stopped) return;
@@ -124,6 +160,19 @@ export function useEventStream(taskId: string | undefined) {
       source.onopen = () => {
         reconnectAttempt = 0;
         setConnectionState("connected");
+        // Force a fresh pull of task/step + artifact state on (re)connect --
+        // events emitted by the backend while it was down (e.g. during a
+        // deploy-triggered restart) are simply lost, not buffered/replayed,
+        // so the UI must not wait for the NEXT event to notice anything
+        // changed while disconnected.
+        if (hasConnectedBefore) {
+          setNeedsRefresh((n) => n + 1);
+          setNeedsArtifactRefresh((n) => n + 1);
+        }
+        hasConnectedBefore = true;
+        if (sawDisconnectSinceDeploy) {
+          clearDeployPending();
+        }
       };
 
       source.onmessage = (message) => {
@@ -145,32 +194,25 @@ export function useEventStream(taskId: string | undefined) {
           });
         }
 
-        if (shouldRefreshTaskState(event)) {
-          setNeedsRefresh((n) => n + 1);
+        if (event.message.includes(DEPLOY_TRIGGERED_MARKER)) {
+          setDeployPending(true);
+          if (deployTimeoutTimer) clearTimeout(deployTimeoutTimer);
+          deployTimeoutTimer = setTimeout(clearDeployPending, DEPLOY_PENDING_TIMEOUT_MS);
         }
-        // "Human decision recorded..." fires near-instantly when a decision
-        // is submitted (see orchestrator.ts's recordHumanDecision) -- long
-        // before the SDK session's own reply (which can take 30-90+ seconds
-        // for a step like feasibility analysis). Without this, decisions
-        // (which render the "You: ..." chat bubble) only ever refetch on the
-        // NEXT human_question/step_completed, so a submitted answer stayed
-        // invisible in the chat for the entire wait -- indistinguishable
-        // from "my message didn't send," which is exactly what it looked
-        // like to a real user testing this.
-        const isDecisionRecorded = event.type === "progress" && event.message.startsWith("Human decision recorded");
-        if (
-          ["step_completed", "step_failed", "hard_stop", "human_question", "step_summary", "reflection_proposed"].includes(
-            event.type
-          ) ||
-          isDecisionRecorded
-        ) {
-          setNeedsArtifactRefresh((n) => n + 1);
-        }
+
+        // Any event can mean visible state changed somewhere (step status,
+        // artifacts, decisions, narrative) -- see the comment above
+        // REFRESH_THROTTLE_MS for why this used to be an allowlist and why
+        // that was the actual bug. Throttled so a bursty SDK session doesn't
+        // turn into a refetch storm.
+        bumpRefresh();
+        bumpArtifactRefresh();
       };
 
       source.onerror = () => {
         if (stopped) return;
         setConnectionState("reconnecting");
+        sawDisconnectSinceDeploy = true;
         // EventSource retries on its own for a transient drop, but when the
         // browser gives up (readyState CLOSED -- e.g. the server rejected
         // the connection outright) it will never retry by itself, so we
@@ -189,6 +231,7 @@ export function useEventStream(taskId: string | undefined) {
     return () => {
       stopped = true;
       if (reconnectTimer) clearTimeout(reconnectTimer);
+      if (deployTimeoutTimer) clearTimeout(deployTimeoutTimer);
       source?.close();
     };
   }, [taskId]);
@@ -211,5 +254,5 @@ export function useEventStream(taskId: string | undefined) {
     return [...latest.values()];
   })();
 
-  return { events, activities, pendingQuestions, needsRefresh, needsArtifactRefresh, connectionState };
+  return { events, activities, pendingQuestions, needsRefresh, needsArtifactRefresh, connectionState, deployPending };
 }

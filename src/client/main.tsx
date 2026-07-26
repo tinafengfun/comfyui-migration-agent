@@ -119,7 +119,7 @@ function App() {
   const [rightTab, setRightTab] = useState<"detail" | "artifacts" | "subjobs">("detail");
 
   // Event stream
-  const { events, activities, pendingQuestions, needsRefresh, needsArtifactRefresh, connectionState } =
+  const { events, activities, pendingQuestions, needsRefresh, needsArtifactRefresh, connectionState, deployPending } =
     useEventStream(selectedTaskId);
 
   // Derived
@@ -332,11 +332,21 @@ function App() {
               title={connectionState === "connected" ? "Live updates connected" : "Reconnecting to live updates…"}
             />
           )}
-          {selectedTaskId && connectionState === "reconnecting" && (
+          {/* deployPending takes priority over the generic reconnecting label --
+              this is an EXPECTED, self-triggered restart (Step 13's push/deploy
+              gate), not a real outage, so it gets its own message instead of
+              looking like the backend just fell over. */}
+          {selectedTaskId && deployPending && (
+            <span className="step-progress-label deploying-label">部署中，正在重启后端（预计30-60秒）…</span>
+          )}
+          {selectedTaskId && !deployPending && connectionState === "reconnecting" && (
             <span className="step-progress-label reconnecting-label">Reconnecting…</span>
           )}
           {stepStats.total > 0 && (
-            <span className="step-progress-label">{stepStats.completed}/{stepStats.total} steps ({stepStats.percent}%)</span>
+            <span className={`step-progress-label ${stepStats.completed === stepStats.total ? "migration-complete-label" : ""}`}>
+              {stepStats.completed}/{stepStats.total} steps ({stepStats.percent}%)
+              {stepStats.completed === stepStats.total ? " — 迁移完成" : ""}
+            </span>
           )}
         </div>
         <div className="header-actions">
