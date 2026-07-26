@@ -68,17 +68,31 @@ function argValue(flag: string): string | undefined {
   return i >= 0 ? process.argv[i + 1] : undefined;
 }
 
+/**
+ * Distinguishes "no validate-commands file" (nothing to run -- fine, not a
+ * failure) from "file exists but is corrupt" (a REAL failure -- must not
+ * silently degrade to an empty command list, which would make
+ * `validationResults.every(passed)` vacuously true on an empty array and
+ * falsely report "verified" for something that was never actually checked).
+ * Caught live: a fix session's heredoc-based validation command embedded a
+ * raw, unescaped newline inside a JSON string value, corrupting the file --
+ * without this distinction the corrupt file would have silently verified.
+ */
 async function readValidateCommands(worktreePath: string): Promise<string[]> {
   const filePath = path.join(worktreePath, ".agent-improvement-validate.json");
+  let raw: string;
   try {
-    const raw = await fs.readFile(filePath, "utf8");
+    raw = await fs.readFile(filePath, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
+  }
+  try {
     const parsed = JSON.parse(raw) as { commands?: unknown };
     if (!Array.isArray(parsed.commands)) return [];
     return parsed.commands.filter((c): c is string => typeof c === "string");
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
-    console.error(`  WARNING: .agent-improvement-validate.json exists but couldn't be parsed: ${error}`);
-    return [];
+    throw new Error(`.agent-improvement-validate.json exists but is not valid JSON: ${error instanceof Error ? error.message : error}`);
   }
 }
 
@@ -225,9 +239,29 @@ async function main(): Promise<void> {
     }
 
     const { worktreePath } = item.draft;
-    const commands = await readValidateCommands(worktreePath);
-    console.log(`  ${commands.length} validation command(s) to run`);
+    let commands: string[];
     const validationResults: AgentImprovementValidationResult[] = [];
+    try {
+      commands = await readValidateCommands(worktreePath);
+    } catch (error) {
+      console.error(`  ${error instanceof Error ? error.message : error}`);
+      await patchItem(filePath, item.id, "verification_failed", {
+        ranAt: new Date().toISOString(),
+        validationResults: [
+          {
+            command: "(read .agent-improvement-validate.json)",
+            exitCode: null,
+            stdout: "",
+            stderr: error instanceof Error ? error.message : String(error),
+            passed: false
+          }
+        ],
+        passed: false
+      });
+      console.log(`  ${item.id} -> verification_failed (corrupt validate-commands file)`);
+      continue;
+    }
+    console.log(`  ${commands.length} validation command(s) to run`);
     for (const command of commands) {
       console.log(`  $ ${command}`);
       const result = await runValidationCommand(worktreePath, command);
