@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import type { AppConfig } from "./config";
+import type { Recipe } from "./recipeLibrary";
 import {
   loadGpuNodes,
   pickNode,
@@ -15,6 +16,7 @@ import {
   resolveNfsShareRoot,
   syncDockerImageFromNfs,
   ensureDockerImageSynced,
+  checkRecipeEnvironmentDrift,
   syncCustomNodesFromNfs,
   formatNfsHealthSuffix,
   mergeModelRoots,
@@ -533,6 +535,79 @@ describe("gpuNodes", () => {
 
     it("returns just the node roots when the global list is empty", () => {
       expect(mergeModelRoots([], ["/nfs_share"])).toEqual(["/nfs_share"]);
+    });
+  });
+
+  describe("checkRecipeEnvironmentDrift", () => {
+    // Real end-to-end checks against an actual local Python + pip install --
+    // "pip" itself is a real, always-present, stably-versioned package,
+    // so these exercise the genuine importlib.metadata round-trip without
+    // needing a fake/mocked package.
+    const localNode: GpuNode = {
+      name: "local-test", kind: "local", comfyui_root: "/x", venv_python: "/usr/bin/python3",
+      model_roots: ["/m"], api_host: "127.0.0.1", api_port: 8188
+    };
+
+    function makeRecipe(overrides: Partial<Recipe> = {}): Recipe {
+      return {
+        recipeId: "test-recipe",
+        version: "1.0.0",
+        nodeType: "CLIPLoader",
+        xpuSupport: "patched",
+        patchFile: "patches/test.patch",
+        knownIssues: ["test"],
+        provenance: { taskOrigin: "test-task", createdAt: "2026-01-01" },
+        ...overrides
+      };
+    }
+
+    it("detects drift when the recipe's baseVersion doesn't match the actually-installed package version", async () => {
+      const result = await checkRecipeEnvironmentDrift(
+        [makeRecipe({ recipeId: "pip-recipe", baseVersion: "pip@0.0.1-definitely-not-real" })],
+        localNode
+      );
+      expect(result.checked).toBe(1);
+      expect(result.drifted).toHaveLength(1);
+      expect(result.drifted[0]).toMatchObject({ recipeId: "pip-recipe", packageName: "pip", expectedRef: "0.0.1-definitely-not-real" });
+      expect(result.drifted[0].actualVersion).toBeTruthy();
+    });
+
+    it("reports no drift when the recipe's baseVersion matches the actually-installed version", async () => {
+      const { execFile } = await import("node:child_process");
+      const { promisify } = await import("node:util");
+      const execFileAsync = promisify(execFile);
+      const { stdout } = await execFileAsync("python3", ["-c", "import importlib.metadata as m; print(m.version('pip'))"]);
+      const actualPipVersion = stdout.trim();
+
+      const result = await checkRecipeEnvironmentDrift(
+        [makeRecipe({ recipeId: "pip-recipe", baseVersion: `pip@${actualPipVersion}` })],
+        localNode
+      );
+      expect(result.checked).toBe(1);
+      expect(result.drifted).toHaveLength(0);
+    });
+
+    it("skips a recipe with no baseVersion", async () => {
+      const result = await checkRecipeEnvironmentDrift([makeRecipe({ baseVersion: undefined })], localNode);
+      expect(result.checked).toBe(0);
+    });
+
+    it("skips a git-repo-style baseVersion (owner/repo@commit) -- not a pip distribution name", async () => {
+      const result = await checkRecipeEnvironmentDrift(
+        [makeRecipe({ baseVersion: "numz/ComfyUI-SeedVR2_VideoUpscaler@4490bd1" })],
+        localNode
+      );
+      expect(result.checked).toBe(0);
+      expect(result.drifted).toHaveLength(0);
+    });
+
+    it("skips a recipe whose package name can't be resolved (not installed / typo)", async () => {
+      const result = await checkRecipeEnvironmentDrift(
+        [makeRecipe({ baseVersion: "definitely-not-a-real-package-xyz@1.0.0" })],
+        localNode
+      );
+      expect(result.checked).toBe(0);
+      expect(result.drifted).toHaveLength(0);
     });
   });
 });

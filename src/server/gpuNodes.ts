@@ -16,6 +16,7 @@ import { promisify } from "node:util";
 import path from "node:path";
 import type { AppConfig } from "./config";
 import type { GpuNodeVerifyResult } from "../shared/types";
+import type { Recipe } from "./recipeLibrary";
 
 const execFileAsync = promisify(execFileCb);
 
@@ -474,6 +475,120 @@ export async function ensureDockerImageSynced(
     synced: result.ok,
     detail: `${reason} -- ${result.ok ? "synced from NFS" : "sync attempt failed"}: ${result.detail}`
   };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Recipe environment-drift detection
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface RecipeVersionCheck {
+  recipeId: string;
+  packageName: string;
+  expectedRef: string;
+  actualVersion?: string;
+  drifted: boolean;
+}
+
+export interface RecipeEnvironmentDriftResult {
+  checked: number;
+  drifted: RecipeVersionCheck[];
+}
+
+/**
+ * The gap this closes: the patch-adaptation-protocol already has the
+ * *concept* of version drift (baseVersion vs. installed version -> escalate
+ * through Layers 1/2/3), but nothing automatically checks whether a matched
+ * recipe's assumed environment still holds before the SDK agent starts
+ * trusting its patch. Confirmed live: comfy_kitchen drifted from what
+ * CLIPLoader-qwen-fp8's baseVersion assumed, and finding that out cost ~10+
+ * minutes of manual bash archaeology in Step 05, not an automatic signal.
+ *
+ * Deliberately scoped to PIP-installable packages only (checked via
+ * `importlib.metadata.version()`, resolved for real inside the node's own
+ * environment -- docker-runtime nodes get wrapped in a throwaway container
+ * since the persisted venv only resolves correctly from inside one, per
+ * ensureDockerImageSynced's own docstring). A recipe whose baseVersion names
+ * a git-cloned custom-node repo (e.g. "numz/ComfyUI-SeedVR2_VideoUpscaler@…")
+ * naturally fails to resolve as a pip distribution name and is silently
+ * skipped -- that case is already handled by the existing protocol's own
+ * commit-based version check (01-acquisition-job.json), not duplicated here.
+ *
+ * Detection only: never blocks Step 05, never applies/adapts anything
+ * itself -- just surfaces a clear, visible flag so re-verification (today,
+ * still a human/agent judgment call) happens on purpose instead of by
+ * accident.
+ */
+export async function checkRecipeEnvironmentDrift(
+  recipes: Recipe[],
+  node: GpuNode
+): Promise<RecipeEnvironmentDriftResult> {
+  const checks: RecipeVersionCheck[] = [];
+  for (const recipe of recipes) {
+    if (!recipe.baseVersion) continue;
+    const at = recipe.baseVersion.lastIndexOf("@");
+    if (at <= 0) continue;
+    const packageName = recipe.baseVersion.slice(0, at);
+    const expectedRef = recipe.baseVersion.slice(at + 1);
+    // Only meaningful for a plain package name (no "/" or path separators --
+    // a git-repo-style reference like "owner/Repo" is never a pip
+    // distribution name, so resolveInstalledPackageVersion would just fail
+    // to find it anyway, but skip the round-trip).
+    if (packageName.includes("/")) continue;
+
+    const actualVersion = await resolveInstalledPackageVersion(node, packageName);
+    if (!actualVersion) continue;
+    checks.push({
+      recipeId: recipe.recipeId,
+      packageName,
+      expectedRef,
+      actualVersion,
+      drifted: actualVersion !== expectedRef
+    });
+  }
+  return { checked: checks.length, drifted: checks.filter((c) => c.drifted) };
+}
+
+/**
+ * `importlib.metadata.version(packageName)` resolved inside the node's own
+ * environment. For docker-runtime nodes, wrapped in a throwaway container
+ * (mirrors the manual check that found comfy_kitchen's real version this
+ * session -- the persisted venv's packages don't resolve correctly run bare
+ * on the host, only from inside a container with the right system libs).
+ * Returns undefined on any failure (package not installed, node
+ * unreachable, etc.) -- never throws.
+ */
+async function resolveInstalledPackageVersion(node: GpuNode, packageName: string): Promise<string | undefined> {
+  const pyCode = `import importlib.metadata as m; print(m.version(${JSON.stringify(packageName)}))`;
+  const pyCmd = `${shellQuote(node.venv_python)} -c ${shellQuote(pyCode)} 2>/dev/null || true`;
+
+  const dockerWrap = (innerCmd: string): string => {
+    if (node.runtime !== "docker" || !node.docker_image) return innerCmd;
+    const nfsRoot = resolveNfsShareRoot(node) ?? "/nfs_share";
+    return `docker run --rm -v ${shellQuote(`${nfsRoot}:${nfsRoot}`)} ${shellQuote(node.docker_image)} bash -c ${shellQuote(innerCmd)}`;
+  };
+
+  try {
+    const cmd = dockerWrap(pyCmd);
+    if (node.kind === "local") {
+      const { stdout } = await execFileAsync("bash", ["-c", cmd], { timeout: 60_000 });
+      return stdout.trim() || undefined;
+    }
+    if (!node.ssh) return undefined;
+    const port = node.ssh.port ?? 22;
+    const sshKeyArgs = node.ssh.key_path ? ["-i", node.ssh.key_path] : [];
+    const { stdout } = await execFileAsync(
+      "ssh",
+      [
+        "-p", String(port), "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", ...sshKeyArgs,
+        `${node.ssh.user}@${node.ssh.host}`,
+        cmd
+      ],
+      { timeout: 65_000 }
+    );
+    return stdout.trim() || undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /** `docker image inspect --format '{{.Id}}'` on the node, local or over ssh. Returns undefined on any failure (image missing, node unreachable, etc.) -- never throws. */

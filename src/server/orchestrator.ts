@@ -72,7 +72,8 @@ import { appendFeedbackEvent, type FeedbackEventInput } from "./feedbackLog";
 import { recordRecipeOutcome } from "./analyticsDb";
 import { ensureWorkflowInventory } from "./workflowInventory";
 import { normalizeWorkflowForApi } from "./workflowNormalize";
-import { ensureDockerImageSynced, loadGpuNodes, mergeModelRoots, pickNode, type GpuNode } from "./gpuNodes";
+import { checkRecipeEnvironmentDrift, ensureDockerImageSynced, loadGpuNodes, mergeModelRoots, pickNode, type GpuNode } from "./gpuNodes";
+import { extractNodeModelPairs, findMatchingRecipes } from "./recipeInjector";
 import { archiveAcceptedWorkflowIfNeeded } from "./workflowArchive";
 
 type EventListener = (event: AgentEvent) => void;
@@ -659,6 +660,32 @@ export class MigrationOrchestrator {
             : `Docker image check before Step 05: ${syncResult.detail}`,
           data: syncResult
         });
+
+        // Same spirit, different gap: even a correctly-synced environment
+        // can have drifted out from under a recipe's own baseVersion
+        // assumption (confirmed live: CLIPLoader-qwen-fp8 assumed a
+        // comfy_kitchen this environment no longer has -- cost ~10+ minutes
+        // of manual bash archaeology to discover, since nothing flagged it
+        // automatically). Detection only -- never blocks Step 05.
+        try {
+          const workflow = JSON.parse(await fs.readFile(task.workflowPath, "utf8"));
+          const pairs = extractNodeModelPairs(workflow);
+          const recipes = findMatchingRecipes(pairs);
+          const drift = await checkRecipeEnvironmentDrift(recipes, node);
+          if (drift.drifted.length > 0) {
+            await this.emit({
+              taskId,
+              stepId,
+              type: "progress",
+              message: `Recipe environment drift detected before Step 05: ${drift.drifted
+                .map((d) => `${d.recipeId} assumes ${d.packageName}@${d.expectedRef}, target has ${d.actualVersion}`)
+                .join("; ")} -- verify the patch still applies/works before trusting it.`,
+              data: drift
+            });
+          }
+        } catch {
+          // Best-effort -- a malformed workflow or unreadable env must never block Step 05.
+        }
       }
     }
 
