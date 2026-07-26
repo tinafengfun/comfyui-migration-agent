@@ -40,3 +40,7 @@ Thumbs.db
 
 # generated precheck reports
 node-precheck-*.json
+
+# Disposable git worktrees created by apply-agent-improvements.mts (each is
+# its own nested repo checkout -- never track these from the main worktree).
+.worktrees/

@@ -19,8 +19,44 @@ export type ApplyStatus =
   | "waiting_for_human_approval"
   | "approved_to_apply"
   | "do_not_apply"
-  | "awaiting_merge_review"
-  | "applied";
+  // The generate -> verify -> merge pipeline, in order:
+  | "drafted" // apply-agent-improvements.mts made + committed the edit in a disposable worktree branch
+  | "verifying" // verify-agent-improvement.mts is running required_validation / replay checks
+  | "verified" // all checks passed -- ready for a human's final merge decision
+  | "verification_failed" // a check failed -- see item.verification for details
+  | "awaiting_merge_review" // (legacy alias of "verified", kept for older files) human's final call before merge
+  | "applied"; // merge-agent-improvement.mts merged the branch into main
+
+export interface AgentImprovementValidationResult {
+  command: string;
+  exitCode: number | null;
+  stdout: string;
+  stderr: string;
+  passed: boolean;
+}
+
+export interface AgentImprovementReplayResult {
+  ranReplay: boolean;
+  reason?: string;
+  taskId?: string;
+  stepId?: string;
+  stepStatus?: string;
+  hardStopped?: boolean;
+}
+
+export interface AgentImprovementVerification {
+  ranAt: string;
+  validationResults: AgentImprovementValidationResult[];
+  replayResult?: AgentImprovementReplayResult;
+  passed: boolean;
+}
+
+/** Where apply-agent-improvements.mts left the disposable worktree/branch/commit for this item. */
+export interface AgentImprovementDraft {
+  branch: string;
+  worktreePath: string;
+  commitSha: string;
+}
 
 export interface AgentImprovementItem {
   id: string;
@@ -32,6 +68,8 @@ export interface AgentImprovementItem {
   approval_required?: boolean;
   required_validation?: string[];
   apply_status: string;
+  draft?: AgentImprovementDraft;
+  verification?: AgentImprovementVerification;
   [key: string]: unknown;
 }
 
@@ -80,6 +118,24 @@ export function applyItemStatusUpdates(
     Object.prototype.hasOwnProperty.call(updates, item.id)
       ? { ...item, apply_status: updates[item.id] }
       : item
+  );
+  return { state: { ...state, improvements }, unmatchedIds };
+}
+
+/**
+ * Like applyItemStatusUpdates, but merges an arbitrary partial patch per item
+ * (used by verify-agent-improvement.mts to set apply_status and the
+ * verification result object in one atomic write, instead of two separate
+ * read-modify-write round trips that could interleave).
+ */
+export function applyItemPatches(
+  state: AgentImprovementFile,
+  patches: Record<string, Partial<AgentImprovementItem>>
+): { state: AgentImprovementFile; unmatchedIds: string[] } {
+  const knownIds = new Set(state.improvements.map((item) => item.id));
+  const unmatchedIds = Object.keys(patches).filter((id) => !knownIds.has(id));
+  const improvements = state.improvements.map((item) =>
+    Object.prototype.hasOwnProperty.call(patches, item.id) ? { ...item, ...patches[item.id] } : item
   );
   return { state: { ...state, improvements }, unmatchedIds };
 }

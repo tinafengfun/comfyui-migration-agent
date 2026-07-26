@@ -3,12 +3,14 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
+  applyItemPatches,
   applyItemStatusUpdates,
   parseAgentImprovementFile,
   parseApprovalAnswer,
   readAgentImprovementFile,
   writeAgentImprovementFile,
-  type AgentImprovementFile
+  type AgentImprovementFile,
+  type AgentImprovementVerification
 } from "./agentImprovementPatch";
 
 function makeState(): AgentImprovementFile {
@@ -54,6 +56,36 @@ describe("applyItemStatusUpdates", () => {
     const original = makeState();
     const originalJson = JSON.stringify(original);
     applyItemStatusUpdates(original, { I01: "approved_to_apply" });
+    expect(JSON.stringify(original)).toBe(originalJson);
+  });
+});
+
+describe("applyItemPatches", () => {
+  it("merges apply_status and verification together in one call, leaving other items untouched", () => {
+    const verification: AgentImprovementVerification = {
+      ranAt: "2026-01-01T00:00:00.000Z",
+      validationResults: [{ command: "echo ok", exitCode: 0, stdout: "ok\n", stderr: "", passed: true }],
+      passed: true
+    };
+    const { state, unmatchedIds } = applyItemPatches(makeState(), {
+      I01: { apply_status: "verified", verification }
+    });
+    expect(unmatchedIds).toEqual([]);
+    const i01 = state.improvements.find((i) => i.id === "I01");
+    expect(i01?.apply_status).toBe("verified");
+    expect(i01?.verification).toEqual(verification);
+    expect(state.improvements.find((i) => i.id === "I02")?.apply_status).toBe("patch_plan_only");
+  });
+
+  it("reports unmatched ids instead of silently ignoring them", () => {
+    const { unmatchedIds } = applyItemPatches(makeState(), { I99: { apply_status: "verified" } });
+    expect(unmatchedIds).toEqual(["I99"]);
+  });
+
+  it("never mutates the input state (returns a new object)", () => {
+    const original = makeState();
+    const originalJson = JSON.stringify(original);
+    applyItemPatches(original, { I01: { apply_status: "verified" } });
     expect(JSON.stringify(original)).toBe(originalJson);
   });
 });
@@ -141,5 +173,33 @@ describe("read/writeAgentImprovementFile (real filesystem round trip)", () => {
     expect(final?.improvements.find((i) => i.id === "I01")?.apply_status).toBe("approved_to_apply");
     expect(final?.improvements.find((i) => i.id === "I02")?.apply_status).toBe("do_not_apply");
     expect(final?.improvements.find((i) => i.id === "I03")?.apply_status).toBe("approved_to_apply");
+  });
+
+  it("round-trips a verification result through applyItemPatches -> write -> read", async () => {
+    const filePath = path.join(tmpDir, "13-agent-improvement.json");
+    await writeAgentImprovementFile(filePath, makeState());
+
+    const state = (await readAgentImprovementFile(filePath))!;
+    const verification: AgentImprovementVerification = {
+      ranAt: "2026-01-01T00:00:00.000Z",
+      validationResults: [
+        { command: "python tool.py --check", exitCode: 0, stdout: "all good\n", stderr: "", passed: true }
+      ],
+      passed: true
+    };
+    const { state: updated, unmatchedIds } = applyItemPatches(state, {
+      I01: {
+        apply_status: "verified",
+        verification,
+        draft: { branch: "apply-improvement/I01-123", worktreePath: "/tmp/cma-staging/.worktrees/I01-123", commitSha: "abc1234" }
+      }
+    });
+    expect(unmatchedIds).toEqual([]);
+    await writeAgentImprovementFile(filePath, updated);
+
+    const final = await readAgentImprovementFile(filePath);
+    const i01 = final?.improvements.find((i) => i.id === "I01");
+    expect(i01?.apply_status).toBe("verified");
+    expect(i01?.verification).toEqual(verification);
   });
 });
