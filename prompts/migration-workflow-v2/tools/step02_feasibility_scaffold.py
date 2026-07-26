@@ -579,11 +579,144 @@ def build_summary(workspace: Path, probe_hardware: bool) -> tuple[dict[str, Any]
     return summary, node_accounting, hardware_probe
 
 
+def fetch_object_info_via_ssh(ssh_target: str, port: int) -> dict[str, Any]:
+    """SSH into the remote host, curl the ComfyUI /object_info API, return parsed JSON."""
+    ssh_cmd = [
+        "ssh", ssh_target, "--",
+        f"curl -s http://127.0.0.1:{port}/object_info",
+    ]
+    result = subprocess.run(
+        ssh_cmd,
+        check=False,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    return {
+        "ssh_command": " ".join(ssh_cmd),
+        "returncode": result.returncode,
+        "stdout": result.stdout,
+        "stderr": result.stderr,
+    }
+
+
+def extract_workflow_node_types(workflow_path: Path) -> list[dict[str, str]]:
+    """Extract unique node types and their counts from a workflow JSON."""
+    workflow = read_json(workflow_path)
+    nodes = workflow.get("nodes", [])
+    type_counter: Counter = Counter()
+    first_id_by_type: dict[str, str] = {}
+    for node in nodes:
+        ntype = node.get("type", "")
+        nid = str(node.get("id", ""))
+        type_counter[ntype] += 1
+        if ntype not in first_id_by_type:
+            first_id_by_type[ntype] = nid
+    rows: list[dict[str, str]] = []
+    for ntype, count in type_counter.most_common():
+        rows.append({
+            "node_type": ntype,
+            "example_node_id": first_id_by_type[ntype],
+            "count_in_workflow": str(count),
+        })
+    return rows
+
+
+def build_node_registration_table(
+    workflow_path: Path,
+    object_info_result: dict[str, Any],
+) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+    """Compare workflow node types against registered types from /object_info.
+
+    Returns (rows, summary_list) where:
+      - rows: one row per workflow node type with registration status
+      - summary_list: aggregate counts (registered, missing, total)
+    """
+    registered_raw = object_info_result.get("stdout", "")
+    registered_types: set[str] = set()
+    if registered_raw.strip():
+        try:
+            registered_data = json.loads(registered_raw)
+            registered_types = set(registered_data.keys())
+        except json.JSONDecodeError:
+            pass
+
+    type_rows = extract_workflow_node_types(workflow_path)
+    rows: list[dict[str, str]] = []
+    for tr in type_rows:
+        ntype = tr["node_type"]
+        is_registered = ntype in registered_types
+        rows.append({
+            "node_type": ntype,
+            "count_in_workflow": tr["count_in_workflow"],
+            "registered": "yes" if is_registered else "no",
+            "verification_note": (
+                "registered on target" if is_registered
+                else "NOT registered on target"
+            ),
+        })
+    registered_count = sum(1 for r in rows if r["registered"] == "yes")
+    missing_count = sum(1 for r in rows if r["registered"] == "no")
+    summary_list = [
+        {"metric": "total_workflow_node_types", "value": str(len(rows))},
+        {"metric": "registered_on_target", "value": str(registered_count)},
+        {"metric": "missing_on_target", "value": str(missing_count)},
+    ]
+    return rows, summary_list
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--workspace", type=Path, default=WORKSPACE_DEFAULT)
     parser.add_argument("--probe-hardware", action="store_true")
+    parser.add_argument("--target-ssh", type=str, default=None,
+                        help="SSH target for remote node registration verification "
+                             "(e.g. intel@172.16.124.12)")
+    parser.add_argument("--port", type=int, default=8188,
+                        help="ComfyUI API port on the remote host (default: 8188)")
+    parser.add_argument("--workflow", type=Path, default=None,
+                        help="Path to a workflow JSON (for standalone SSH verification "
+                             "without a full workspace)")
     args = parser.parse_args()
+
+    if args.target_ssh and args.workflow:
+        workflow_path = args.workflow.resolve()
+        if not workflow_path.is_file():
+            raise SystemExit(f"workflow file not found: {workflow_path}")
+        object_info_result = fetch_object_info_via_ssh(args.target_ssh, args.port)
+        reg_rows, reg_summary = build_node_registration_table(
+            workflow_path, object_info_result,
+        )
+        # Determine output directory
+        out_dir = workflow_path.parent
+        reg_csv_path = out_dir / "02-node-registration-verification.csv"
+        reg_json_path = out_dir / "02-node-registration-summary.json"
+        write_csv(
+            reg_csv_path, reg_rows,
+            ["node_type", "count_in_workflow", "registered", "verification_note"],
+        )
+        reg_output = {
+            "step": "02",
+            "mode": "target-ssh",
+            "ssh_target": args.target_ssh,
+            "port": args.port,
+            "workflow": str(workflow_path),
+            "generated_utc": utc_now(),
+            "node_registration_summary": reg_summary,
+            "object_info_returncode": object_info_result["returncode"],
+            "object_info_stderr": object_info_result["stderr"],
+        }
+        write_json(reg_json_path, reg_output)
+        reg_csv_path_rel = reg_csv_path.relative_to(Path.cwd())
+        reg_json_path_rel = reg_json_path.relative_to(Path.cwd())
+        for row in reg_rows:
+            mark = "OK" if row["registered"] == "yes" else "MISSING"
+            print(f"  [{mark}] {row['node_type']} (x{row['count_in_workflow']})")
+        print(f"\nRegistration table  : {reg_csv_path_rel}")
+        print(f"Registration summary: {reg_json_path_rel}")
+        return 0
 
     workspace = args.workspace.resolve()
     artifacts = workspace / "artifacts"
@@ -591,6 +724,39 @@ def main() -> int:
         raise SystemExit(f"artifact directory not found: {artifacts}")
 
     summary, node_rows, hardware_probe = build_summary(workspace, args.probe_hardware)
+
+    # If --target-ssh is also given with --workspace, do SSH verification
+    if args.target_ssh:
+        workflow_path = Path(summary["workflow"])
+        if not workflow_path.is_file():
+            workflow_path = Path(summary["source_workflow_copy"])
+        if workflow_path.is_file():
+            object_info_result = fetch_object_info_via_ssh(args.target_ssh, args.port)
+            reg_rows, reg_summary = build_node_registration_table(
+                workflow_path, object_info_result,
+            )
+            reg_csv_path = artifacts / "02-node-registration-verification.csv"
+            reg_json_path = artifacts / "02-node-registration-summary.json"
+            write_csv(
+                reg_csv_path, reg_rows,
+                ["node_type", "count_in_workflow", "registered", "verification_note"],
+            )
+            write_json(reg_json_path, {
+                "step": "02",
+                "mode": "workspace-with-target-ssh",
+                "ssh_target": args.target_ssh,
+                "port": args.port,
+                "workflow": str(workflow_path),
+                "generated_utc": utc_now(),
+                "node_registration_summary": reg_summary,
+                "object_info_returncode": object_info_result["returncode"],
+                "object_info_stderr": object_info_result["stderr"],
+            })
+            summary["node_registration_verification"] = {
+                "ssh_target": args.target_ssh,
+                "port": args.port,
+                "summary": reg_summary,
+            }
 
     hardware_path = artifacts / "02-hardware-probe.json"
     node_path = artifacts / "02-node-feasibility-accounting.csv"
