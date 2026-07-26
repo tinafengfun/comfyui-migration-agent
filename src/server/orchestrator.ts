@@ -1531,10 +1531,26 @@ export class MigrationOrchestrator {
     const task = await this.store.getTask(taskId);
     if (!task) throw new Error(`Task not found: ${taskId}`);
     const step = task.steps.find((item) => item.id === "01");
-    // Fire the deterministic gate for any non-failed Step 01,
-    // not just "waiting_for_human", so that the gate fires even when the Phase 1
-    // agent self-reports Step 01 as "completed" while leaving unresolved gaps.
-    if (!step || step.status === "failed" || step.status === "terminated") return false;
+    // This used to fire regardless of whether Step 01 was already
+    // "completed" (specifically to catch the legacy Phase 1 monolithic
+    // driver self-reporting completion while leaving unresolved gaps -- see
+    // updateStepAndPersist's own comment: that driver mode is unreachable
+    // from the UI today). Real bug this caused: this function is invoked on
+    // every /events, /progress, and -- critically -- every SSE
+    // /events/stream (re)connect (see index.ts), so once Step 01 genuinely
+    // completed through the normal path (which already re-checks gaps via
+    // pauseIfArtifactHumanGate before ever letting "completed" stick), the
+    // very next page load or SSE reconnect would re-read this function's OWN
+    // separate data source (01-acquisition-job.json's own status field,
+    // which nothing clears when the step resolves through a DIFFERENT path)
+    // and re-emit the exact same "still needs exact files" human_question --
+    // confirmed live: a fresh human_question landed 119ms after the
+    // step_completed event for the same task, and the stale question then
+    // rendered as a persistent "Missing Assets" panel all the way into
+    // Step 02, because nothing else about the step's own state ever
+    // resolved it. Since the legacy driver mode this guarded against isn't
+    // reachable from the UI, stop re-litigating a step that's already done.
+    if (!step || step.status === "completed" || step.status === "failed" || step.status === "terminated") return false;
 
     const jobPath = path.join(task.artifactPath, "01-acquisition-job.json");
     let job: Record<string, unknown>;

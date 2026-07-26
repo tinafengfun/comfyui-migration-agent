@@ -2054,4 +2054,78 @@ describe("migration orchestrator", () => {
       expect(entries.length).toBe(1);
     });
   });
+
+  describe("emitStep01AcquisitionGateIfNeeded -- does not re-open an already-completed Step 01", () => {
+    // Regression test for a real, live incident: this check is invoked on
+    // every /events, /progress, and SSE /events/stream (re)connect (see
+    // ensurePhase1HumanGateExposed's call sites in index.ts). Once Step 01
+    // genuinely completed through the normal path, the very next page
+    // load/reconnect re-read 01-acquisition-job.json's own separate,
+    // never-cleared "waiting_for_secure_download" status and re-emitted the
+    // exact same "still needs exact files" human_question -- confirmed live,
+    // a fresh human_question landed 119ms after the real step_completed
+    // event, and the resulting stale "Missing Assets" panel persisted all
+    // the way into Step 02.
+    async function makeTaskWithStaleAcquisitionJob(root: string, step01Status: "completed" | "waiting_for_human") {
+      const config: AppConfig = {
+        port: 0,
+        projectRoot: root,
+        workspaceRoot: path.join(root, "workspaces"),
+        stateRoot: path.join(root, "state"),
+        draftDocRoot: root,
+        comfyuiRoot: path.join(root, "ComfyUI"),
+        modelRoots: ["/home/intel/hf_models"],
+        gpuNodesPath: path.join(root, "gpu-nodes.json"),
+        workflowArchiveRoot: path.join(root, "nfs-workflows"),
+        autoApproveAgentPermissions: false
+      };
+      await ensureDir(config.workspaceRoot);
+      const store = new StateStore(config);
+      await store.initialize();
+      const orchestrator = new MigrationOrchestrator(config, store, [
+        { id: "01", name: "Asset and custom-node resolution", requiredOutput: "01-assets.csv", humanIntervention: "Approve" }
+      ]);
+      const task = await orchestrator.createTask({
+        name: "Stale acquisition job test",
+        workflowFileName: "workflow.json",
+        workflowJson: { nodes: [], links: [] }
+      });
+      await store.updateStep(task.id, "01", step01Status);
+      // The stale file: still claims an unresolved asset needs a secure
+      // download, exactly as it would if a DIFFERENT resolution path (e.g.
+      // the deterministic gate-signal getting resolved and deleted) marked
+      // the step done without this file's own status ever being updated.
+      await fs.writeFile(
+        path.join(task.artifactPath, "01-acquisition-job.json"),
+        JSON.stringify({
+          status: "waiting_for_secure_download",
+          unresolvedItems: [{ assetName: "RunComfy_examples_144.safetensors", kind: "model" }]
+        }),
+        "utf8"
+      );
+      return { store, orchestrator, task };
+    }
+
+    it("does NOT re-emit the acquisition human_question once Step 01 is completed", async () => {
+      const root = path.join(process.cwd(), ".demo-state", "tests", `orchestrator-step01-stale-completed-${Date.now()}`);
+      const { store, orchestrator, task } = await makeTaskWithStaleAcquisitionJob(root, "completed");
+
+      const fired = await orchestrator.ensurePhase1HumanGateExposed(task.id);
+
+      expect(fired).toBe(false);
+      const events = await store.listEvents(task.id);
+      expect(events.some((e) => e.type === "human_question" && e.stepId === "01")).toBe(false);
+    });
+
+    it("still fires the acquisition gate for a genuinely non-terminal Step 01 (waiting_for_human)", async () => {
+      const root = path.join(process.cwd(), ".demo-state", "tests", `orchestrator-step01-stale-waiting-${Date.now()}`);
+      const { store, orchestrator, task } = await makeTaskWithStaleAcquisitionJob(root, "waiting_for_human");
+
+      const fired = await orchestrator.ensurePhase1HumanGateExposed(task.id);
+
+      expect(fired).toBe(true);
+      const events = await store.listEvents(task.id);
+      expect(events.some((e) => e.type === "human_question" && e.stepId === "01")).toBe(true);
+    });
+  });
 });
