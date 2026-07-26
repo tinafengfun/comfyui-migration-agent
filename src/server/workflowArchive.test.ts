@@ -74,18 +74,25 @@ describe("archiveAcceptedWorkflowIfNeeded", () => {
     expect(result.reason).toContain("unset");
   });
 
-  it("suffixes the destination name on collision instead of overwriting", async () => {
+  it("suffixes the destination name on collision between two DIFFERENT tasks sharing a name, instead of overwriting", async () => {
     const root = path.join(process.cwd(), ".demo-state", "tests", `wf-archive-${Date.now()}-collision`);
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-03-01T12:00:00.000Z"));
     try {
       const nfsArchiveRoot = path.join(root, "nfs-workflows");
-      const task = await makeTask(root, { name: "same-name" });
-      await seedDeliveryBundle(task.artifactPath);
-      await writeJson(path.join(task.artifactPath, "12-gui-acceptance-summary.json"), { manual_result: "accepted" });
+      // Two distinct tasks (distinct artifactPath -> distinct marker files)
+      // that happen to share the same sanitized name -- unlike the same
+      // task called twice (see the idempotency test below), both of these
+      // are genuinely new archives and neither should be skipped.
+      const taskA = await makeTask(path.join(root, "task-a"), { id: "task-a", name: "same-name" });
+      const taskB = await makeTask(path.join(root, "task-b"), { id: "task-b", name: "same-name" });
+      for (const task of [taskA, taskB]) {
+        await seedDeliveryBundle(task.artifactPath);
+        await writeJson(path.join(task.artifactPath, "12-gui-acceptance-summary.json"), { manual_result: "accepted" });
+      }
 
-      const first = await archiveAcceptedWorkflowIfNeeded({ task, nfsArchiveRoot });
-      const second = await archiveAcceptedWorkflowIfNeeded({ task, nfsArchiveRoot });
+      const first = await archiveAcceptedWorkflowIfNeeded({ task: taskA, nfsArchiveRoot });
+      const second = await archiveAcceptedWorkflowIfNeeded({ task: taskB, nfsArchiveRoot });
 
       expect(first.archived).toBe(true);
       expect(second.archived).toBe(true);
@@ -94,6 +101,59 @@ describe("archiveAcceptedWorkflowIfNeeded", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("is idempotent: archiving the SAME task twice only copies once (safe to call from two trigger points)", async () => {
+    const root = path.join(process.cwd(), ".demo-state", "tests", `wf-archive-${Date.now()}-idempotent`);
+    const nfsArchiveRoot = path.join(root, "nfs-workflows");
+    const task = await makeTask(root);
+    await seedDeliveryBundle(task.artifactPath);
+    await writeJson(path.join(task.artifactPath, "12-gui-acceptance-summary.json"), { manual_result: "accepted" });
+
+    const first = await archiveAcceptedWorkflowIfNeeded({ task, nfsArchiveRoot });
+    const second = await archiveAcceptedWorkflowIfNeeded({ task, nfsArchiveRoot });
+
+    expect(first.archived).toBe(true);
+    expect(second.archived).toBe(false);
+    expect(second.reason).toContain("already archived");
+    expect(second.reason).toContain(first.destination);
+
+    const entries = await fs.readdir(nfsArchiveRoot);
+    expect(entries).toHaveLength(1);
+  });
+
+  it("copies the actual GUI-tested workflow to <destination>/workflow.json when present", async () => {
+    const root = path.join(process.cwd(), ".demo-state", "tests", `wf-archive-${Date.now()}-gui-workflow`);
+    const nfsArchiveRoot = path.join(root, "nfs-workflows");
+    const task = await makeTask(root);
+    await seedDeliveryBundle(task.artifactPath);
+    await writeJson(path.join(task.artifactPath, "12-gui-acceptance-summary.json"), { manual_result: "accepted" });
+    await ensureDir(path.join(task.artifactPath, "12-gui-acceptance"));
+    await fs.writeFile(
+      path.join(task.artifactPath, "12-gui-acceptance", "12-runtime-policy-gui-workflow.json"),
+      '{"nodes":[],"links":[],"tested":true}\n',
+      "utf8"
+    );
+
+    const result = await archiveAcceptedWorkflowIfNeeded({ task, nfsArchiveRoot });
+
+    expect(result.archived).toBe(true);
+    await expect(fs.readFile(path.join(result.destination!, "workflow.json"), "utf8")).resolves.toBe(
+      '{"nodes":[],"links":[],"tested":true}\n'
+    );
+  });
+
+  it("still archives fine when there's no GUI-tested workflow file (best-effort, not required)", async () => {
+    const root = path.join(process.cwd(), ".demo-state", "tests", `wf-archive-${Date.now()}-no-gui-workflow`);
+    const nfsArchiveRoot = path.join(root, "nfs-workflows");
+    const task = await makeTask(root);
+    await seedDeliveryBundle(task.artifactPath);
+    await writeJson(path.join(task.artifactPath, "12-gui-acceptance-summary.json"), { manual_result: "accepted" });
+
+    const result = await archiveAcceptedWorkflowIfNeeded({ task, nfsArchiveRoot });
+
+    expect(result.archived).toBe(true);
+    await expect(fs.access(path.join(result.destination!, "workflow.json"))).rejects.toThrow();
   });
 
   afterEach(() => {

@@ -256,6 +256,18 @@ export class MigrationOrchestrator {
     if (stepId === "12" && status === "completed") {
       await this.archiveWorkflowIfAccepted(task);
     }
+    // Second, later chance to archive: by Step 13 (the last step)
+    // completing, the whole 00-13 pipeline is known to have finished. This
+    // is a safety net, not the primary trigger -- archiveAcceptedWorkflowIfNeeded's
+    // own marker-file idempotency check makes it a no-op if Step 12's own
+    // trigger above already archived this task. Confirmed live: a real
+    // task's GUI acceptance never made it into manual_result in time (a
+    // since-fixed resumeStep bug), the Step 12 trigger never fired, and by
+    // the time anyone noticed, the task's workspace had already been wiped
+    // by a later task's creation -- this narrows that window.
+    if (stepId === "13" && status === "completed") {
+      await this.archiveWorkflowIfAccepted(task);
+    }
     if (stepId === "12" && status === "waiting_for_human") {
       await this.syncGuiWorkflowForAcceptance(task);
     }

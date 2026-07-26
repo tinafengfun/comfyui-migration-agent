@@ -1986,4 +1986,72 @@ describe("migration orchestrator", () => {
       expect(step12?.summary).toMatch(/completed from existing required artifact/);
     });
   });
+
+  describe("NFS delivery archive -- fires at Step 12 AND Step 13 completion", () => {
+    async function makeOrchestratorForArchiveTest(root: string) {
+      const config: AppConfig = {
+        port: 0,
+        projectRoot: root,
+        workspaceRoot: path.join(root, "workspaces"),
+        stateRoot: path.join(root, "state"),
+        draftDocRoot: root,
+        comfyuiRoot: path.join(root, "ComfyUI"),
+        modelRoots: ["/home/intel/hf_models"],
+        gpuNodesPath: path.join(root, "gpu-nodes.json"),
+        workflowArchiveRoot: path.join(root, "nfs-workflows"),
+        autoApproveAgentPermissions: false
+      };
+      await ensureDir(config.workspaceRoot);
+      const store = new StateStore(config);
+      await store.initialize();
+      const orchestrator = new MigrationOrchestrator(config, store, [
+        { id: "12", name: "GUI acceptance and demo", requiredOutput: "12-gui-acceptance.md", humanIntervention: "Approve" },
+        { id: "13", name: "Agent improvement", requiredOutput: "13-agent-improvement.md", humanIntervention: "Approve" }
+      ]);
+      const task = await orchestrator.createTask({
+        name: "Archive wiring test",
+        workflowFileName: "workflow.json",
+        workflowJson: { nodes: [], links: [] }
+      });
+      const deliveryDir = path.join(task.artifactPath, "11-delivery");
+      await ensureDir(deliveryDir);
+      await fs.writeFile(path.join(deliveryDir, "README.md"), "# delivery\n", "utf8");
+      await fs.writeFile(
+        path.join(task.artifactPath, "12-gui-acceptance-summary.json"),
+        JSON.stringify({ manual_result: "accepted" }),
+        "utf8"
+      );
+      return { config, store, orchestrator, task };
+    }
+
+    it("archives when Step 13 completes, even if Step 12's own trigger never ran for this task", async () => {
+      const root = path.join(process.cwd(), ".demo-state", "tests", `orchestrator-archive-step13-${Date.now()}`);
+      const { config, orchestrator, task } = await makeOrchestratorForArchiveTest(root);
+
+      // Simulate Step 13 completing directly, without ever going through
+      // Step 12's own completion transition (the exact real-world gap this
+      // was built for -- some other path marks Step 12 accepted/complete
+      // without ever calling updateStepAndPersist("12", "completed")).
+      await (orchestrator as unknown as {
+        updateStepAndPersist: (taskId: string, stepId: string, status: string) => Promise<unknown>;
+      }).updateStepAndPersist(task.id, "13", "completed");
+
+      const entries = await fs.readdir(config.workflowArchiveRoot).catch(() => []);
+      expect(entries.length).toBe(1);
+    });
+
+    it("does not double-archive when both Step 12 and Step 13 completion fire for the same task", async () => {
+      const root = path.join(process.cwd(), ".demo-state", "tests", `orchestrator-archive-both-${Date.now()}`);
+      const { config, orchestrator, task } = await makeOrchestratorForArchiveTest(root);
+      const castOrchestrator = orchestrator as unknown as {
+        updateStepAndPersist: (taskId: string, stepId: string, status: string) => Promise<unknown>;
+      };
+
+      await castOrchestrator.updateStepAndPersist(task.id, "12", "completed");
+      await castOrchestrator.updateStepAndPersist(task.id, "13", "completed");
+
+      const entries = await fs.readdir(config.workflowArchiveRoot).catch(() => []);
+      expect(entries.length).toBe(1);
+    });
+  });
 });
