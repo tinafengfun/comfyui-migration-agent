@@ -1795,4 +1795,95 @@ describe("migration orchestrator", () => {
       }
     });
   });
+
+  describe("Step 12 GUI workflow sync wiring", () => {
+    it("pushes the prepared GUI workflow to the node's ComfyUI server as soon as Step 12 pauses for human review", async () => {
+      const root = path.join(process.cwd(), ".demo-state", "tests", `orchestrator-gui-sync-${Date.now()}`);
+      const config: AppConfig = {
+        port: 0,
+        projectRoot: root,
+        workspaceRoot: path.join(root, "workspaces"),
+        stateRoot: path.join(root, "state"),
+        draftDocRoot: root,
+        comfyuiRoot: path.join(root, "ComfyUI"),
+        modelRoots: ["/home/intel/hf_models"],
+        gpuNodesPath: path.join(root, "gpu-nodes.json"),
+        workflowArchiveRoot: path.join(root, "nfs-workflows"),
+        autoApproveAgentPermissions: false
+      };
+      await ensureDir(config.workspaceRoot);
+
+      const receivedRequests: Array<{ url: string; body: string }> = [];
+      const http = await import("node:http");
+      const fakeComfyUI = http.createServer((req, res) => {
+        const chunks: Buffer[] = [];
+        req.on("data", (chunk) => chunks.push(chunk));
+        req.on("end", () => {
+          receivedRequests.push({ url: req.url ?? "", body: Buffer.concat(chunks).toString("utf8") });
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end('""');
+        });
+      });
+      const port: number = await new Promise((resolve, reject) => {
+        fakeComfyUI.listen(0, "127.0.0.1", () => {
+          const addr = fakeComfyUI.address();
+          if (addr && typeof addr !== "string") resolve(addr.port);
+          else reject(new Error("failed to bind fake ComfyUI server"));
+        });
+      });
+
+      try {
+        await fs.writeFile(
+          config.gpuNodesPath,
+          JSON.stringify({
+            default_node: "n",
+            nodes: [
+              {
+                name: "n",
+                kind: "local",
+                comfyui_root: path.join(root, "ComfyUI"),
+                venv_python: "/usr/bin/python3",
+                model_roots: [],
+                api_host: "127.0.0.1",
+                api_port: port
+              }
+            ]
+          })
+        );
+
+        const store = new StateStore(config);
+        await store.initialize();
+        const orchestrator = new MigrationOrchestrator(config, store, [
+          { id: "12", name: "GUI acceptance and demo", requiredOutput: "12-gui-acceptance.md", humanIntervention: "Approve" }
+        ]);
+        const task = await orchestrator.createTask({
+          name: "Smart_Photo_Rewrite",
+          workflowFileName: "workflow.json",
+          workflowJson: { nodes: [], links: [] }
+        });
+
+        await ensureDir(path.join(task.artifactPath, "12-gui-acceptance"));
+        await fs.writeFile(
+          path.join(task.artifactPath, "12-gui-acceptance", "12-runtime-policy-gui-workflow.json"),
+          '{"nodes":[],"links":[]}\n',
+          "utf8"
+        );
+        await fs.writeFile(
+          path.join(task.artifactPath, "12-gui-acceptance-summary.json"),
+          JSON.stringify({ gui_workflow_json: { path: "12-gui-acceptance/12-runtime-policy-gui-workflow.json" } }),
+          "utf8"
+        );
+
+        await (orchestrator as unknown as {
+          updateStepAndPersist: (taskId: string, stepId: string, status: string) => Promise<unknown>;
+        }).updateStepAndPersist(task.id, "12", "waiting_for_human");
+
+        expect(receivedRequests).toHaveLength(1);
+        expect(decodeURIComponent(receivedRequests[0].url)).toMatch(/^\/api\/userdata\/workflows\/.*\.json$/);
+        expect(JSON.parse(receivedRequests[0].body)).toEqual({ nodes: [], links: [] });
+      } finally {
+        await new Promise<void>((resolve) => fakeComfyUI.close(() => resolve()));
+      }
+    });
+  });
 });

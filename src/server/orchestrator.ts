@@ -86,6 +86,7 @@ import {
 } from "./gpuNodes";
 import { extractNodeModelPairs, findMatchingRecipes } from "./recipeInjector";
 import { archiveAcceptedWorkflowIfNeeded } from "./workflowArchive";
+import { syncGuiWorkflowToComfyUIServer } from "./guiWorkflowSync";
 
 type EventListener = (event: AgentEvent) => void;
 type QuestionEventData = Record<string, unknown> & {
@@ -243,7 +244,32 @@ export class MigrationOrchestrator {
     if (stepId === "12" && status === "completed") {
       await this.archiveWorkflowIfAccepted(task);
     }
+    if (stepId === "12" && status === "waiting_for_human") {
+      await this.syncGuiWorkflowForAcceptance(task);
+    }
     return task;
+  }
+
+  /**
+   * Best-effort: as soon as Step 12 pauses for the human GUI-acceptance gate,
+   * push its prepared workflow JSON into the running ComfyUI server's own
+   * Workflows sidebar (see guiWorkflowSync.ts for why this beats a plain
+   * filesystem copy). Never blocks or fails Step 12's own human gate --
+   * a sync failure just means the operator falls back to manual import.
+   */
+  private async syncGuiWorkflowForAcceptance(task: MigrationTask): Promise<void> {
+    const node = this.lookupTaskNode(task);
+    if (!node) return;
+    const result = await syncGuiWorkflowToComfyUIServer({ task, node });
+    await this.emit({
+      taskId: task.id,
+      stepId: "12",
+      type: "progress",
+      message: result.synced
+        ? `Pushed the GUI-acceptance workflow into the running ComfyUI server's Workflows sidebar as "${result.destination}" -- no manual file import needed.`
+        : `Could not auto-push the GUI-acceptance workflow into the ComfyUI server's Workflows sidebar (non-fatal, fall back to manual import): ${result.reason}`,
+      data: result
+    });
   }
 
   /**
