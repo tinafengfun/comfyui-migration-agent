@@ -1,53 +1,8 @@
 {
   "commands": [
     "cd /tmp/cma-staging/.worktrees/imp-s10-coverage-reconciliation-tool-1785042221678 && python3 prompts/migration-workflow-v2/tools/step10_coverage_reconcile.py --inventory /home/intel/tianfeng/comfy/ComfyUI/agent-demo/workspaces/19ddae81-22d5-4c23-a06c-a3fe07c3479c/artifacts/03-inventory.md --full-history /home/intel/tianfeng/comfy/ComfyUI/agent-demo/workspaces/19ddae81-22d5-4c23-a06c-a3fe07c3479c/artifacts/08-full-validation/08-full-run-history.json --smoke-histories /home/intel/tianfeng/comfy/ComfyUI/agent-demo/workspaces/19ddae81-22d5-4c23-a06c-a3fe07c3479c/artifacts/07-branch-smokes/node-72/07-node-72-smoke-history.json /home/intel/tianfeng/comfy/ComfyUI/agent-demo/workspaces/19ddae81-22d5-4c23-a06c-a3fe07c3479c/artifacts/07-branch-smokes/node-68/07-node-68-smoke-history.json --output-dir /tmp/validate-coverage && echo 'EXIT_CODE:'$?",
-    "cd /tmp/cma-staging/.worktrees/imp-s10-coverage-reconciliation-tool-1785042221678 && cat > /tmp/validate-coverage/validate_csv.py << 'PYEOF' && python3 /tmp/validate-coverage/validate_csv.py
-import csv, json
-new_rows = list(csv.DictReader(open('/tmp/validate-coverage/10-node-coverage.csv')))
-ref_rows = list(csv.DictReader(open('/home/intel/tianfeng/comfy/ComfyUI/agent-demo/workspaces/19ddae81-22d5-4c23-a06c-a3fe07c3479c/artifacts/10-node-coverage.csv')))
-new_by_id = {r['node_id']: r for r in new_rows}
-ref_by_id = {r['node_id']: r for r in ref_rows}
-all_ids = set(new_by_id) | set(ref_by_id)
-mismatches = 0
-covered_ids = set()
-ref_covered_ids = set()
-new_excluded = set()
-ref_excluded = set()
-new_uncovered = set()
-ref_uncovered = set()
-covered_prefixes = ('covered_full_run', 'covered_smoke', 'covered_output')
-excluded_prefixes = ('excluded_', 'excluded')
-for nid in all_ids:
-    nr = new_by_id.get(nid)
-    rr = ref_by_id.get(nid)
-    ncov = nr['coverage_status'] if nr else 'MISSING'
-    rcov = rr['status'] if rr else 'MISSING'
-    is_excluded = ncov.startswith(excluded_prefixes) or ncov == 'excluded'
-    ref_is_excluded = rcov.startswith(excluded_prefixes) or rcov == 'excluded'
-    is_covered = ncov.startswith(covered_prefixes)
-    ref_is_covered = rcov.startswith(covered_prefixes)
-    if is_covered:
-        covered_ids.add(nid)
-    if ref_is_covered:
-        ref_covered_ids.add(nid)
-    if is_excluded:
-        new_excluded.add(nid)
-    if ref_is_excluded:
-        ref_excluded.add(nid)
-    if ncov == 'uncovered_executable':
-        new_uncovered.add(nid)
-    if rcov == 'uncovered_executable':
-        ref_uncovered.add(nid)
-    if (is_covered != ref_is_covered) or (is_excluded != ref_is_excluded):
-        mismatches += 1
-        print(f'MISMATCH {nid}: new={ncov} ref={rcov}')
-print(f'Covered: new={sorted(covered_ids)} ref={sorted(ref_covered_ids)}')
-print(f'Excluded: new={sorted(new_excluded)} ref={sorted(ref_excluded)}')
-print(f'Uncovered: new={sorted(new_uncovered)} ref={sorted(ref_uncovered)}')
-print(f'Total mismatches: {mismatches}')
-print('PASS' if mismatches == 0 else 'FAIL')
-PYEOF",
-    "cd /tmp/cma-staging/.worktrees/imp-s10-coverage-reconciliation-tool-1785042221678 && python3 -c \"import json; new = json.load(open('/tmp/validate-coverage/10-coverage-summary.json')); print(f'Node count: {new[\\\"source_node_count\\\"]}'); print(f'Uncovered: {new[\\\"uncovered_executable_node_ids\\\"]}'); print(f'All classified: {new[\\\"all_executable_nodes_classified\\\"]}'); print(f'Executed: {new[\\\"full_run_nodes_executed\\\"]}'); print(f'Cached: {new[\\\"full_run_nodes_cached\\\"]}'); print(f'Output evidence: {new[\\\"output_evidence_count\\\"]}'); print(f'Decision: {new[\\\"completion_decision\\\"][\\\"status\\\"]}'); assert new[\\\"source_node_count\\\"] == 17; assert new[\\\"uncovered_executable_node_ids\\\"] == []; assert new[\\\"full_run_nodes_executed\\\"] == 15; assert new[\\\"full_run_nodes_cached\\\"] == 0; assert new[\\\"output_evidence_count\\\"] == 2; print('PASS')\"",
-    "cd /tmp/cma-staging/.worktrees/imp-s10-coverage-reconciliation-tool-1785042221678 && python3 -c \"import json; json.dump({json.load(open('/home/intel/tianfeng/comfy/ComfyUI/agent-demo/workspaces/19ddae81-22d5-4c23-a06c-a3fe07c3479c/artifacts/08-full-validation/08-full-run-history.json'))['prompt'][1]: json.load(open('/home/intel/tianfeng/comfy/ComfyUI/agent-demo/workspaces/19ddae81-22d5-4c23-a06c-a3fe07c3479c/artifacts/08-full-validation/08-full-run-history.json'))}, open('/tmp/test-keyed-wrapper.json', 'w'))\" && python3 prompts/migration-workflow-v2/tools/step10_coverage_reconcile.py --inventory /home/intel/tianfeng/comfy/ComfyUI/agent-demo/workspaces/19ddae81-22d5-4c23-a06c-a3fe07c3479c/artifacts/03-inventory.md --full-history /tmp/test-keyed-wrapper.json --smoke-histories /home/intel/tianfeng/comfy/ComfyUI/agent-demo/workspaces/19ddae81-22d5-4c23-a06c-a3fe07c3479c/artifacts/07-branch-smokes/node-72/07-node-72-smoke-history.json /home/intel/tianfeng/comfy/ComfyUI/agent-demo/workspaces/19ddae81-22d5-4c23-a06c-a3fe07c3479c/artifacts/07-branch-smokes/node-68/07-node-68-smoke-history.json --output-dir /tmp/validate-keyed && python3 -c \"import csv; krows = {r['node_id']: r['coverage_status'] for r in csv.DictReader(open('/tmp/validate-keyed/10-node-coverage.csv'))}; frows = {r['node_id']: r['coverage_status'] for r in csv.DictReader(open('/tmp/validate-coverage/10-node-coverage.csv'))}; match = all(krows.get(k) == frows.get(k) for k in krows); print(f'prompt_id-keyed matches flat-dict: {match}'); assert match; print('PASS')\""
+    "cd /tmp/cma-staging/.worktrees/imp-s10-coverage-reconciliation-tool-1785042221678 && .agent-improvement-validate-helpers/check_csv.py",
+    "cd /tmp/cma-staging/.worktrees/imp-s10-coverage-reconciliation-tool-1785042221678 && .agent-improvement-validate-helpers/check_summary.py",
+    "cd /tmp/cma-staging/.worktrees/imp-s10-coverage-reconciliation-tool-1785042221678 && bash .agent-improvement-validate-helpers/check_keyed_format.sh"
   ]
 }
