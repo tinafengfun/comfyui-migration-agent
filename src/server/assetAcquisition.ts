@@ -1235,7 +1235,7 @@ export function generateAssetQueryVariants(name: string): string[] {
   return variants.slice(0, 5);
 }
 
-function primaryModelRoot(modelRoots: string[], comfyuiRoot: string): string {
+export function primaryModelRoot(modelRoots: string[], comfyuiRoot: string): string {
   // Real incident: `resolveModelRoots(task)` (orchestrator.ts) always merges in
   // `demoModelRoot` alongside the task's actual GPU node's own `model_roots`
   // (config.ts unconditionally prepends it), so the old `.includes(demoModelRoot)`

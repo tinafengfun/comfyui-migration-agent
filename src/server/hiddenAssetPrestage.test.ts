@@ -3,6 +3,7 @@ import http from "node:http";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { MigrationTask } from "../shared/types";
+import { demoModelRoot } from "./config";
 import { ensureDir } from "./fsUtils";
 import {
   checkHiddenAssetPrestageStatus,
@@ -84,6 +85,53 @@ describe("hidden asset prestage", () => {
   });
 
   describe("startHiddenAssetPrestage + checkHiddenAssetPrestageStatus", () => {
+    it("downloads to the task's node-specific model root, not demoModelRoot, when both are configured (real bug confirmed live: a real prestage download landed at /home/intel/hf_models/... invisible to the task's actual target node)", async () => {
+      process.env.ASSET_ACQUISITION_ENABLE_DOWNLOAD = "1";
+      const server = http.createServer((req, res) => {
+        res.writeHead(200, { "Content-Type": "application/octet-stream", "Content-Length": "9" });
+        res.end("modelbyte");
+      });
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      try {
+        const address = server.address();
+        if (!address || typeof address === "string") throw new Error("Unexpected test server address");
+        process.env.HF_ENDPOINT = `http://127.0.0.1:${address.port}`;
+
+        const root = path.join(process.cwd(), ".demo-state", "tests", `hidden-asset-node-root-${Date.now()}`);
+        const artifactPath = path.join(root, "artifacts");
+        await ensureDir(artifactPath);
+        const nodeSpecificRoot = path.join(root, "nfs-share");
+        await ensureDir(nodeSpecificRoot);
+        await fs.writeFile(
+          path.join(artifactPath, "02-hidden-runtime-assets.json"),
+          JSON.stringify({
+            items: [
+              {
+                name: "IndexTTS-2 model suite",
+                kind: "huggingface_repo",
+                repo: "IndexTeam/IndexTTS-2-mock",
+                files: ["ok.pth"],
+                targetRelativePath: "TTS/IndexTTS-2",
+                humanApproved: true
+              }
+            ]
+          }),
+          "utf8"
+        );
+        const task = makeTask(root, artifactPath);
+
+        // demoModelRoot listed first, exactly like resolveModelRoots' merge order.
+        startHiddenAssetPrestage(task, [demoModelRoot, nodeSpecificRoot], path.join(root, "ComfyUI"));
+
+        const summaries = await waitForStatusCount(task, 1);
+        expect(summaries.find((s) => s.file === "ok.pth")?.status).toBe("complete");
+        const downloaded = await fs.readFile(path.join(nodeSpecificRoot, "TTS", "IndexTTS-2", "ok.pth"), "utf8");
+        expect(downloaded).toBe("modelbyte");
+      } finally {
+        server.close();
+      }
+    });
+
     it("is a no-op when downloads are not enabled (safety gate, same as subJobs.ts)", async () => {
       delete process.env.ASSET_ACQUISITION_ENABLE_DOWNLOAD;
       const root = path.join(process.cwd(), ".demo-state", "tests", `hidden-asset-gated-${Date.now()}`);
@@ -99,7 +147,7 @@ describe("hidden asset prestage", () => {
       const task = makeTask(root, artifactPath);
       const modelRoot = path.join(root, "models");
       await ensureDir(modelRoot);
-      startHiddenAssetPrestage(task, [modelRoot]);
+      startHiddenAssetPrestage(task, [modelRoot], root);
       await new Promise((resolve) => setTimeout(resolve, 200));
       expect(await checkHiddenAssetPrestageStatus(task)).toEqual([]);
     });
@@ -145,7 +193,7 @@ describe("hidden asset prestage", () => {
         const task = makeTask(root, artifactPath);
 
         // Fire-and-forget: does not return a promise the caller awaits.
-        startHiddenAssetPrestage(task, [modelRoot]);
+        startHiddenAssetPrestage(task, [modelRoot], root);
 
         const summaries = await waitForStatusCount(task, 2);
         const ok = summaries.find((s) => s.file === "ok.pth");
@@ -199,7 +247,7 @@ describe("hidden asset prestage", () => {
         );
         const task = makeTask(root, artifactPath);
 
-        startHiddenAssetPrestage(task, [modelRoot]);
+        startHiddenAssetPrestage(task, [modelRoot], root);
         await new Promise((resolve) => setTimeout(resolve, 300));
 
         expect(requestCount).toBe(0);

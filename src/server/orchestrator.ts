@@ -1064,7 +1064,7 @@ export class MigrationOrchestrator {
       // Step05 (see its preamble below) falls back to downloading it itself if
       // this never happened.
       if (stepId === "02") {
-        startHiddenAssetPrestage(task, this.resolveModelRoots(task));
+        startHiddenAssetPrestage(task, this.resolveModelRoots(task), this.resolveComfyuiRoot(task));
       }
       await this.emit({
         taskId,

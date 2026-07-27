@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { MigrationTask } from "../shared/types";
+import { primaryModelRoot } from "./assetAcquisition";
 import {
   buildSourceProviderConfig,
   executeCandidateDownload,
@@ -108,7 +109,7 @@ function downloadUrlForFile(item: HiddenRuntimeAssetItem, file: string, huggingF
  * (no-op) and safe to call more than once for the same task (re-download of an
  * already-complete file is skipped).
  */
-export function startHiddenAssetPrestage(task: MigrationTask, modelRoots: string[]): void {
+export function startHiddenAssetPrestage(task: MigrationTask, modelRoots: string[], comfyuiRoot: string): void {
   // Same safety gate as subJobs.ts's human-triggered downloads (isAssetDownloadEnabled) --
   // this is an automatic download path, so it must never fire in an environment
   // where downloads haven't been explicitly enabled (ASSET_ACQUISITION_ENABLE_DOWNLOAD=1
@@ -117,7 +118,14 @@ export function startHiddenAssetPrestage(task: MigrationTask, modelRoots: string
   readHiddenRuntimeAssets(task)
     .then(async (items) => {
       if (!items || items.length === 0) return;
-      const primaryRoot = modelRoots[0];
+      // Real bug this closes: modelRoots[0] is ALWAYS demoModelRoot (a
+      // local-disk-only path) -- resolveModelRoots() unconditionally merges
+      // it in first, the exact same trap primaryModelRoot() in
+      // assetAcquisition.ts was already fixed for. Confirmed live: a real
+      // prestage download landed at /home/intel/hf_models/... on the agent
+      // host, invisible to the task's actual target node (remote-124-12),
+      // completely defeating the point of pre-staging. Reuse the same fix.
+      const primaryRoot = primaryModelRoot(modelRoots, comfyuiRoot);
       if (!primaryRoot) return;
       const config = buildSourceProviderConfig();
       for (const item of items) {
