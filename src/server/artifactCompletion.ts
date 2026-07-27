@@ -86,9 +86,20 @@ export function expectedArtifactGroups(step: MigrationStepDefinition): string[][
     case "05":
       return [["05-environment.md"]];
     case "06":
+      // Real incident: the skill doc only ever describes these as conceptual
+      // fields ("converted prompt JSON", generate `06-prompt-validation-summary.json`
+      // in prose), never a pinned filename list -- confirmed live, the SDK
+      // wrote the validation-results file as `06-prompt-validation.json`
+      // (dropping "-summary") while still correctly naming the actual
+      // converted-prompt file `06-source-preserving-prompt.json`. Both files'
+      // content matched their expected role exactly; only the one filename
+      // was off by a suffix. Added as a third accepted group rather than
+      // rejecting a real, complete, correctly-shaped result over a naming
+      // variant Step 06 already produces in practice.
       return stepMentionsOnlyOneRequiredArtifact(step, ["06-prompt-validation.json", "06-prompt.json"]) ?? [
         ["06-prompt-validation.json", "06-prompt.json"],
-        ["06-prompt-validation-summary.json", "06-source-preserving-prompt.json"]
+        ["06-prompt-validation-summary.json", "06-source-preserving-prompt.json"],
+        ["06-prompt-validation.json", "06-source-preserving-prompt.json"]
       ];
     case "07":
       return [["07-first-stage-smoke.md"], ["07-branch-1-smoke.md"], ["07-branch-smoke.md"], ["07-branch-smoke-summary.json"]];

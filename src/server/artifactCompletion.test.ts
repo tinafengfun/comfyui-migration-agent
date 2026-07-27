@@ -87,6 +87,34 @@ describe("artifact completion", () => {
     });
   });
 
+  it("accepts 06-prompt-validation.json + 06-source-preserving-prompt.json as a real, complete result (real incident: the SDK named the validation-results file 06-prompt-validation.json, dropping the '-summary' suffix the skill doc describes only in prose -- content was correct, filename was off by one word)", async () => {
+    const root = path.join(process.cwd(), ".demo-state", "tests", `artifact-06-real-shape-${Date.now()}`);
+    const artifactPath = path.join(root, "artifacts");
+    await ensureDir(artifactPath);
+    const task: MigrationTask = {
+      id: "task",
+      name: "Task",
+      status: "running",
+      workflowPath: path.join(root, "workflow.json"),
+      workspacePath: root,
+      artifactPath,
+      createdAt: "now",
+      updatedAt: "now",
+      steps: [{ id: "06", status: "running" }]
+    };
+    const step = {
+      id: "06",
+      name: "Prompt conversion validation",
+      requiredOutput: "",
+      humanIntervention: ""
+    };
+
+    await fs.writeFile(path.join(artifactPath, "06-prompt-validation.json"), "{}\n", "utf8");
+    await fs.writeFile(path.join(artifactPath, "06-source-preserving-prompt.json"), "{}\n", "utf8");
+
+    await expect(checkRequiredArtifactCompletion(task, step)).resolves.toMatchObject({ complete: true });
+  });
+
   it("does not treat an in-progress scaffold as a completed artifact", async () => {
     const root = path.join(process.cwd(), ".demo-state", "tests", `artifact-scaffold-${Date.now()}`);
     const artifactPath = path.join(root, "artifacts");

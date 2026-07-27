@@ -56,6 +56,10 @@ Use the Step 06 tool when available:
 
 It converts the source workflow, runs offline `execution.validate_prompt()` without queueing execution, creates a runtime-policy variant when required, writes a node prompt map, emits branch prompts for Step 07, and generates `06-prompt-validation-summary.json` plus `06-output-manifest.json`.
 
+**Required filenames (deterministic backend code checks for these exact names, not just their content):**
+- `06-prompt-validation-summary.json` — the validation results (the fields listed under "Output schema" below). **Not** `06-prompt-validation.json` — a real run once dropped the `-summary` suffix; the content was correct but the step still failed its own completion check over the filename alone.
+- `06-source-preserving-prompt.json` — the converted API-format prompt itself (source-preserving, i.e. before any runtime-policy variant).
+
 ## Common failure signatures
 
 - Image Comparer (rgthree) temp session image references in `widgets_values` produce empty arrays instead of omitted inputs
