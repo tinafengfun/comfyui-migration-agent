@@ -86,6 +86,7 @@ import { recordRecipeOutcome } from "./analyticsDb";
 import { ensureWorkflowInventory } from "./workflowInventory";
 import { normalizeWorkflowForApi } from "./workflowNormalize";
 import {
+  checkComfyUiCoreDrift,
   checkOmniXpuAcceleration,
   checkPortOccupant,
   checkRecipeEnvironmentDrift,
@@ -100,6 +101,7 @@ import {
 import { extractNodeModelPairs, findMatchingRecipes } from "./recipeInjector";
 import { archiveAcceptedWorkflowIfNeeded } from "./workflowArchive";
 import { syncGuiWorkflowToComfyUIServer } from "./guiWorkflowSync";
+import { checkHiddenAssetPrestageStatus, startHiddenAssetPrestage } from "./hiddenAssetPrestage";
 
 // Real incident: "Could not connect to provider at <url>" (a raw connection
 // failure, distinct from SdkStepTimeoutError's no-progress watchdog) used to
@@ -325,6 +327,16 @@ export class MigrationOrchestrator {
       task,
       nfsArchiveRoot: this.config.workflowArchiveRoot
     });
+    // Real incident this closes: the non-archived branches (manual_result not
+    // "accepted", missing summary/delivery bundle, already-archived) used to
+    // be completely silent -- no event at all. A real task's manual_result
+    // never matched the expected "accepted" string (the skill doc mentioned
+    // the field name but not its exact enum), the archive silently no-opped
+    // every time it was called, and nobody noticed until the task's whole
+    // workspace had already been wiped by a later task's creation. Always
+    // emit now, even for the routine "already archived" case, so a genuine
+    // mismatch is visible in the task's own event log while there's still
+    // time to fix it -- not discovered only in hindsight.
     if (result.archived) {
       await this.emit({
         taskId: task.id,
@@ -333,12 +345,12 @@ export class MigrationOrchestrator {
         message: `Archived accepted delivery bundle to shared NFS: ${result.destination}`,
         data: { destination: result.destination }
       });
-    } else if (result.reason?.startsWith("archive failed:")) {
+    } else {
       await this.emit({
         taskId: task.id,
         stepId: "12",
         type: "progress",
-        message: `Could not archive delivery bundle to shared NFS (non-fatal): ${result.reason}`,
+        message: `Delivery bundle not archived to shared NFS: ${result.reason}`,
         data: { reason: result.reason }
       });
     }
@@ -810,6 +822,58 @@ export class MigrationOrchestrator {
             data: assessment
           });
         }
+
+        // Detection only, same pattern as the three checks above -- report
+        // whether Step02 already kicked off background downloads for hidden
+        // runtime model deps, so Step05's own SDK agent can skip re-fetching
+        // an in-flight or already-complete multi-GB download. Never blocks:
+        // absent status (Step02 never wrote 02-hidden-runtime-assets.json, or
+        // ASSET_ACQUISITION_ENABLE_DOWNLOAD wasn't set) just means Step05 falls
+        // back to exactly today's behavior.
+        const prestageStatus = await checkHiddenAssetPrestageStatus(task).catch(() => []);
+        if (prestageStatus.length > 0) {
+          await this.emit({
+            taskId,
+            stepId,
+            type: "progress",
+            message: `Hidden runtime asset pre-stage status before Step 05: ${prestageStatus
+              .map((s) => `${s.itemName}/${s.file}: ${s.status}`)
+              .join(", ")}`,
+            data: { prestageStatus }
+          });
+        }
+
+        // Detection only, same pattern as the three checks above -- unlike
+        // ensureDockerImageSynced, deliberately does NOT auto-sync on drift
+        // (see checkComfyUiCoreDrift's own doc comment: a docker image tag
+        // only changes via deliberate republish, but ComfyUI core is a live
+        // codebase -- silently rewriting it between task runs would make a
+        // regression hard to bisect). Written as a durable JSON artifact, not
+        // just a progress event, so which core commit a task actually ran
+        // against is real, deterministic evidence -- previously only
+        // SDK-authored prose in 05-environment.md ever mentioned a commit SHA.
+        const coreDrift = await checkComfyUiCoreDrift(node).catch((err) => ({
+          inSync: true,
+          detail: `comfyui-core drift check failed: ${err instanceof Error ? err.message : String(err)}`
+        }));
+        const coreDriftPath = path.join(task.artifactPath, "05-comfyui-core-status.json");
+        await fs.writeFile(coreDriftPath, `${JSON.stringify(coreDrift, null, 2)}\n`, "utf8");
+        await this.store.appendArtifact({
+          taskId,
+          stepId,
+          path: coreDriftPath,
+          relativePath: path.relative(task.workspacePath, coreDriftPath),
+          kind: "json"
+        });
+        if (!coreDrift.inSync) {
+          await this.emit({
+            taskId,
+            stepId,
+            type: "progress",
+            message: `ComfyUI core drift before Step 05: ${coreDrift.detail}`,
+            data: coreDrift
+          });
+        }
       }
     }
 
@@ -986,6 +1050,22 @@ export class MigrationOrchestrator {
       await this.updateStepAndPersist(taskId, stepId, "completed", { summary });
       // §H: record recipe outcome for analytics (fire-and-forget).
       recordRecipeOutcome(taskId, stepId, "success");
+      // Real incident: hidden runtime model deps (e.g. IndexTTS2Run's ~14GB
+      // suite, loaded dynamically from Python code, invisible to Step00/01's
+      // static workflow-JSON scan) used to sit undownloaded until Step05's own
+      // SDK session fetched them live, inline -- that's what made Step05 slow
+      // enough to risk an SDK-session timeout. Step02 is where this class of
+      // dependency actually gets discovered (its SDK agent can read custom-node
+      // source); if it wrote a human-approved 02-hidden-runtime-assets.json,
+      // kick the download off now, in the background, so it's already done (or
+      // well underway) by the time Step05 runs. Deliberately not awaited --
+      // must never delay Step02's own completion or count against its session
+      // budget. Best-effort: absent/malformed file is a silent no-op, and
+      // Step05 (see its preamble below) falls back to downloading it itself if
+      // this never happened.
+      if (stepId === "02") {
+        startHiddenAssetPrestage(task, this.resolveModelRoots(task));
+      }
       await this.emit({
         taskId,
         stepId,

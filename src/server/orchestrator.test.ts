@@ -1,11 +1,14 @@
+import { execFileSync } from "node:child_process";
 import fs from "node:fs/promises";
+import http from "node:http";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import type { AppConfig } from "./config";
 import { ensureDir } from "./fsUtils";
 import { MigrationOrchestrator, sanitizeSessionIdSegment } from "./orchestrator";
 import { SdkStepTimeoutError } from "./copilotSdkRunner";
 import { StateStore } from "./state";
+import { checkHiddenAssetPrestageStatus } from "./hiddenAssetPrestage";
 
 describe("sanitizeSessionIdSegment", () => {
   // Regression test for a real bug: the Copilot SDK's session.create rejects
@@ -2260,5 +2263,342 @@ describe("SDK connection-error retry (real incident: NO_PROXY misrouted an inter
       if (originalBackoff === undefined) delete process.env.MIGRATION_AGENT_SDK_RETRY_BACKOFF_MS;
       else process.env.MIGRATION_AGENT_SDK_RETRY_BACKOFF_MS = originalBackoff;
     }
+  });
+});
+
+describe("hidden runtime asset prestage integration (real incident: IndexTTS2Run's ~14GB model suite -- loaded dynamically from Python code, invisible to Step00/01's static scan -- sat undownloaded until Step05's own SDK session fetched it live, inline, risking an SDK-session timeout)", () => {
+  const originalDownloadFlag = process.env.ASSET_ACQUISITION_ENABLE_DOWNLOAD;
+  const originalHfEndpoint = process.env.HF_ENDPOINT;
+
+  afterEach(() => {
+    if (originalDownloadFlag === undefined) delete process.env.ASSET_ACQUISITION_ENABLE_DOWNLOAD;
+    else process.env.ASSET_ACQUISITION_ENABLE_DOWNLOAD = originalDownloadFlag;
+    if (originalHfEndpoint === undefined) delete process.env.HF_ENDPOINT;
+    else process.env.HF_ENDPOINT = originalHfEndpoint;
+  });
+
+  it("Step02 completion kicks off a background prestage download for a human-approved hidden asset, without Step02 waiting for it", async () => {
+    process.env.ASSET_ACQUISITION_ENABLE_DOWNLOAD = "1";
+    const server = http.createServer((req, res) => {
+      if (req.url === "/Foo/Bar-mock/resolve/main/ok.pth") {
+        res.writeHead(200, { "Content-Type": "application/octet-stream", "Content-Length": "9" });
+        res.end("modelbyte");
+        return;
+      }
+      res.writeHead(404, { "Content-Type": "text/plain" });
+      res.end("missing");
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("Unexpected test server address");
+      process.env.HF_ENDPOINT = `http://127.0.0.1:${address.port}`;
+
+      const root = path.join(process.cwd(), ".demo-state", "tests", `orchestrator-hidden-asset-step02-${Date.now()}`);
+      const modelRoot = path.join(root, "models");
+      const config: AppConfig = {
+        port: 0,
+        projectRoot: root,
+        workspaceRoot: path.join(root, "workspaces"),
+        stateRoot: path.join(root, "state"),
+        draftDocRoot: root,
+        comfyuiRoot: path.join(root, "ComfyUI"),
+        modelRoots: [modelRoot],
+        gpuNodesPath: path.join(root, "gpu-nodes.json"),
+        workflowArchiveRoot: path.join(root, "nfs-workflows"),
+        autoApproveAgentPermissions: false
+      };
+      await ensureDir(config.workspaceRoot);
+      await ensureDir(modelRoot);
+      const store = new StateStore(config);
+      await store.initialize();
+      const orchestrator = new MigrationOrchestrator(
+        config,
+        store,
+        [{ id: "02", name: "Feasibility", requiredOutput: "02-feasibility.md", humanIntervention: "n/a" }],
+        {
+          async runStep() {
+            // Simulates the SDK agent discovering a hidden runtime asset (by
+            // reading custom-node source) and getting human sign-off to defer
+            // acquisition -- it writes the structured contract file. The
+            // deterministic Step02 pre-pass already wrote 02-feasibility.md
+            // (the step's own requiredOutput) before this stub runs.
+            await fs.writeFile(
+              path.join(task.artifactPath, "02-hidden-runtime-assets.json"),
+              JSON.stringify({
+                items: [
+                  {
+                    name: "IndexTTS-2 model suite",
+                    kind: "huggingface_repo",
+                    repo: "Foo/Bar-mock",
+                    files: ["ok.pth"],
+                    targetRelativePath: "TTS/IndexTTS-2",
+                    humanApproved: true
+                  }
+                ]
+              }),
+              "utf8"
+            );
+            return { sessionId: "fake-session", summary: "Feasibility complete; hidden asset deferred with sign-off." };
+          }
+        }
+      );
+      const task = await orchestrator.createTask({
+        name: "Hidden asset Step02 kickoff",
+        workflowFileName: "workflow.json",
+        workflowJson: { nodes: [], links: [] }
+      });
+
+      await orchestrator.runStep(task.id, "02");
+
+      const updated = await store.getTask(task.id);
+      expect(updated?.steps.find((s) => s.id === "02")?.status).toBe("completed");
+
+      const deadline = Date.now() + 8000;
+      let summaries = await checkHiddenAssetPrestageStatus(task);
+      while (!summaries.some((s) => s.status === "complete") && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        summaries = await checkHiddenAssetPrestageStatus(task);
+      }
+      expect(summaries.find((s) => s.file === "ok.pth")?.status).toBe("complete");
+      const downloaded = await fs.readFile(path.join(modelRoot, "TTS", "IndexTTS-2", "ok.pth"), "utf8");
+      expect(downloaded).toBe("modelbyte");
+    } finally {
+      server.close();
+    }
+  });
+
+  it("Step05 preamble reports pre-stage status without blocking, when Step02 already staged (or attempted to stage) a hidden asset", async () => {
+    const root = path.join(process.cwd(), ".demo-state", "tests", `orchestrator-hidden-asset-step05-${Date.now()}`);
+    const modelRoot = path.join(root, "models");
+    const stagedDir = path.join(modelRoot, "TTS", "IndexTTS-2");
+    const config: AppConfig = {
+      port: 0,
+      projectRoot: root,
+      workspaceRoot: path.join(root, "workspaces"),
+      stateRoot: path.join(root, "state"),
+      draftDocRoot: root,
+      comfyuiRoot: path.join(root, "ComfyUI"),
+      modelRoots: [modelRoot],
+      gpuNodesPath: path.join(root, "gpu-nodes.json"),
+      workflowArchiveRoot: path.join(root, "nfs-workflows"),
+      autoApproveAgentPermissions: false
+    };
+    await ensureDir(config.workspaceRoot);
+    await ensureDir(path.join(config.comfyuiRoot, "custom_nodes"));
+    await ensureDir(stagedDir);
+    await fs.writeFile(path.join(stagedDir, "ok.pth"), "modelbyte", "utf8");
+    await fs.writeFile(
+      config.gpuNodesPath,
+      JSON.stringify({
+        default_node: "local-test",
+        nodes: [
+          {
+            name: "local-test",
+            kind: "local",
+            comfyui_root: config.comfyuiRoot,
+            venv_python: "/usr/bin/python3",
+            model_roots: [modelRoot],
+            api_host: "127.0.0.1",
+            api_port: 8188
+          }
+        ]
+      }),
+      "utf8"
+    );
+    const store = new StateStore(config);
+    await store.initialize();
+    const orchestrator = new MigrationOrchestrator(
+      config,
+      store,
+      [{ id: "05", name: "Environment deployment", requiredOutput: "05-environment.md", humanIntervention: "n/a" }],
+      {
+        async runStep() {
+          await fs.writeFile(path.join(task.artifactPath, "05-environment.md"), "ok", "utf8");
+          return { sessionId: "fake-session", summary: "Environment deployed." };
+        }
+      }
+    );
+    const task = await orchestrator.createTask({
+      name: "Hidden asset Step05 status",
+      workflowFileName: "workflow.json",
+      workflowJson: { nodes: [], links: [] }
+    });
+    // Simulates Step02 having already kicked off (and completed) a prestage
+    // download for this task, in an earlier backend process lifetime.
+    await fs.mkdir(path.join(task.artifactPath, "hidden-asset-downloads"), { recursive: true });
+    await fs.writeFile(
+      path.join(task.artifactPath, "hidden-asset-downloads", "IndexTTS-2-model-suite__ok.pth.status.json"),
+      JSON.stringify({
+        itemName: "IndexTTS-2 model suite",
+        file: "ok.pth",
+        targetPath: path.join(stagedDir, "ok.pth"),
+        status: "complete",
+        startedAt: new Date().toISOString(),
+        completedAt: new Date().toISOString()
+      }),
+      "utf8"
+    );
+
+    await orchestrator.runStep(task.id, "05");
+
+    const updated = await store.getTask(task.id);
+    expect(updated?.steps.find((s) => s.id === "05")?.status).toBe("completed");
+    const events = await store.listEvents(task.id);
+    expect(
+      events.some(
+        (e) =>
+          e.type === "progress" &&
+          e.message.includes("Hidden runtime asset pre-stage status before Step 05") &&
+          e.message.includes("ok.pth: complete")
+      )
+    ).toBe(true);
+  });
+
+  it("Step05 preamble reports ComfyUI-core drift as a durable artifact + progress event, without blocking (real gap: only SDK-authored prose ever recorded a core commit before)", async () => {
+    const root = path.join(process.cwd(), ".demo-state", "tests", `orchestrator-core-drift-step05-${Date.now()}`);
+    const modelRoot = path.join(root, "models");
+    const comfyuiRoot = path.join(root, "ComfyUI");
+    const nfsShareRoot = path.join(root, "nfs-share");
+    const canonicalPath = path.join(nfsShareRoot, "comfyui-core");
+    const config: AppConfig = {
+      port: 0,
+      projectRoot: root,
+      workspaceRoot: path.join(root, "workspaces"),
+      stateRoot: path.join(root, "state"),
+      draftDocRoot: root,
+      comfyuiRoot,
+      modelRoots: [modelRoot],
+      gpuNodesPath: path.join(root, "gpu-nodes.json"),
+      workflowArchiveRoot: path.join(root, "nfs-workflows"),
+      autoApproveAgentPermissions: false
+    };
+    await ensureDir(config.workspaceRoot);
+
+    // Canonical repo, then clone it as this node's comfyui_root, then advance
+    // canonical one commit further -- simulates a node that hasn't synced yet.
+    await ensureDir(canonicalPath);
+    const git = (cwd: string, args: string[]) => execFileSync("git", args, { cwd });
+    git(canonicalPath, ["init", "-q"]);
+    git(canonicalPath, ["config", "user.email", "test@example.com"]);
+    git(canonicalPath, ["config", "user.name", "Test"]);
+    await fs.writeFile(path.join(canonicalPath, "main.py"), "# comfyui\n", "utf8");
+    git(canonicalPath, ["add", "-A"]);
+    git(canonicalPath, ["commit", "-q", "-m", "initial"]);
+    execFileSync("git", ["clone", "-q", canonicalPath, comfyuiRoot]);
+    await ensureDir(path.join(comfyuiRoot, "custom_nodes"));
+    await fs.writeFile(path.join(canonicalPath, "comfy_ops_patch.py"), "# xpu patch\n", "utf8");
+    git(canonicalPath, ["add", "-A"]);
+    git(canonicalPath, ["commit", "-q", "-m", "xpu: patch"]);
+
+    await fs.writeFile(
+      config.gpuNodesPath,
+      JSON.stringify({
+        default_node: "local-test",
+        nodes: [
+          {
+            name: "local-test",
+            kind: "local",
+            comfyui_root: comfyuiRoot,
+            venv_python: "/usr/bin/python3",
+            model_roots: [modelRoot],
+            api_host: "127.0.0.1",
+            api_port: 8188,
+            nfs_share_root: nfsShareRoot
+          }
+        ]
+      }),
+      "utf8"
+    );
+    const store = new StateStore(config);
+    await store.initialize();
+    const orchestrator = new MigrationOrchestrator(
+      config,
+      store,
+      [{ id: "05", name: "Environment deployment", requiredOutput: "05-environment.md", humanIntervention: "n/a" }],
+      {
+        async runStep() {
+          await fs.writeFile(path.join(task.artifactPath, "05-environment.md"), "ok", "utf8");
+          return { sessionId: "fake-session", summary: "Environment deployed." };
+        }
+      }
+    );
+    const task = await orchestrator.createTask({
+      name: "Core drift Step05",
+      workflowFileName: "workflow.json",
+      workflowJson: { nodes: [], links: [] }
+    });
+
+    await orchestrator.runStep(task.id, "05");
+
+    const updated = await store.getTask(task.id);
+    expect(updated?.steps.find((s) => s.id === "05")?.status).toBe("completed");
+
+    const statusArtifact = JSON.parse(
+      await fs.readFile(path.join(task.artifactPath, "05-comfyui-core-status.json"), "utf8")
+    ) as { inSync: boolean; localCommit?: string; canonicalCommit?: string; detail: string };
+    expect(statusArtifact.inSync).toBe(false);
+    expect(statusArtifact.localCommit).not.toBe(statusArtifact.canonicalCommit);
+
+    const events = await store.listEvents(task.id);
+    expect(
+      events.some((e) => e.type === "progress" && e.message.includes("ComfyUI core drift before Step 05"))
+    ).toBe(true);
+  });
+});
+
+describe("Step 12 completion always reports archive status (real incident: a non-accepted/mismatched manual_result silently no-opped the NFS archive with zero trace in the event log, and nobody noticed until the task's workspace was already wiped by a later task's creation)", () => {
+  it("emits a progress event explaining why the delivery bundle was NOT archived, instead of staying silent", async () => {
+    const root = path.join(process.cwd(), ".demo-state", "tests", `orchestrator-archive-visibility-${Date.now()}`);
+    const config: AppConfig = {
+      port: 0,
+      projectRoot: root,
+      workspaceRoot: path.join(root, "workspaces"),
+      stateRoot: path.join(root, "state"),
+      draftDocRoot: root,
+      comfyuiRoot: path.join(root, "ComfyUI"),
+      modelRoots: [path.join(root, "models")],
+      gpuNodesPath: path.join(root, "gpu-nodes.json"),
+      workflowArchiveRoot: path.join(root, "nfs-workflows"),
+      autoApproveAgentPermissions: false
+    };
+    await ensureDir(config.workspaceRoot);
+    const store = new StateStore(config);
+    await store.initialize();
+    const orchestrator = new MigrationOrchestrator(
+      config,
+      store,
+      [{ id: "12", name: "GUI acceptance", requiredOutput: "12-gui-acceptance.md", humanIntervention: "n/a" }],
+      {
+        async runStep() {
+          await fs.writeFile(path.join(task.artifactPath, "12-gui-acceptance.md"), "ok", "utf8");
+          // A real-world mismatch: not one of the four exact contract strings
+          // ("accepted"/"rejected"/"blocked"/"pending_human_run").
+          await fs.writeFile(
+            path.join(task.artifactPath, "12-gui-acceptance-summary.json"),
+            JSON.stringify({ manual_result: "approved" }),
+            "utf8"
+          );
+          return { sessionId: "fake-session", summary: "Step 12 complete." };
+        }
+      }
+    );
+    const task = await orchestrator.createTask({
+      name: "Archive visibility",
+      workflowFileName: "workflow.json",
+      workflowJson: { nodes: [], links: [] }
+    });
+
+    await orchestrator.runStep(task.id, "12");
+
+    const events = await store.listEvents(task.id);
+    expect(
+      events.some(
+        (e) =>
+          e.type === "progress" &&
+          e.message.includes("Delivery bundle not archived to shared NFS") &&
+          e.message.includes("manual_result is approved")
+      )
+    ).toBe(true);
   });
 });
