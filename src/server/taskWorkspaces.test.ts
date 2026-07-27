@@ -34,7 +34,7 @@ describe("task workspace layout", () => {
     expect(manifest.layout.sourceWorkflow).toBe("source/unsafe_workflow.json");
     expect(manifest.layout.bundle).toBe("package/migration-bundle.zip");
     expect(manifest.packagingPolicy.includeLargeModels).toBe(false);
-    expect(manifest.packagingPolicy.modelStorageRoot).toBe("/home/intel/hf_models");
+    expect(manifest.packagingPolicy.modelStorageRoot).toBe("/nfs_share");
   });
 
   it("reconstructs layout from a persisted task and refuses deletion outside the workspace root", async () => {

@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import {
@@ -163,7 +163,11 @@ function parseArgs(args: string[]): CliOptions {
   const assets: string[] = [];
   let modelRepoPath = path.resolve(process.cwd(), "../model_repo");
   const sourceContextPaths: string[] = [];
-  let targetRoot = demoModelRoot;
+  // Prefer the shared NFS model root over the local-disk-only demo default --
+  // a download this CLI runs should land somewhere every GPU node can see
+  // (matching primaryModelRoot's fix in assetAcquisition.ts), not a path only
+  // the machine running this CLI can read. Explicit --target-root still wins.
+  let targetRoot = existsSync("/nfs_share") ? "/nfs_share" : demoModelRoot;
   let verifySha = false;
   let providerSearch = true;
 
@@ -276,7 +280,7 @@ function usage(): never {
       "  npm run asset:sources -- download --asset <filename> [--verify-sha]",
       "Options:",
       "  --model-repo <path>   default: ../model_repo",
-      "  --target-root <path>  default: /home/intel/hf_models",
+      "  --target-root <path>  default: /nfs_share if present, else /home/intel/hf_models",
       "  --source-context <path> extra source notes, one option per file",
       "  --asset-file <path>   newline-separated filenames",
       "  --no-provider-search  only search local roots and SSH remotes",

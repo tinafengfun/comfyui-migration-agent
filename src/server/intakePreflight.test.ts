@@ -110,4 +110,57 @@ describe("intake preflight custom-node detection", () => {
     expect(result.customNodeRows.find((r) => r.nodeType === "TextEncodeBooguEdit")).toBeUndefined();
     expect(result.hardStops.some((s) => s.includes("TextEncodeBooguEdit"))).toBe(false);
   });
+
+  it("recognizes a custom node whose custom_nodes/<name> is a SYMLINK (the /nfs_share shared-tree convention), not a real directory (real bug: fs.readdir's Dirent.isDirectory() does not follow symlinks, so a migrated shared node was silently treated as absent)", async () => {
+    resetBuiltinNodeCache();
+    const root = path.join(process.cwd(), ".demo-state", "tests", `intake-preflight-symlink-node-${Date.now()}`);
+    const artifactPath = path.join(root, "artifacts");
+    const comfyuiRoot = path.join(root, "ComfyUI");
+    await ensureDir(artifactPath);
+    await writeComfyuiFixture(comfyuiRoot);
+
+    // Simulate the /nfs_share/custom_nodes/<name> shared tree: a real package
+    // directory living OUTSIDE comfyui_root, symlinked in from custom_nodes/.
+    const sharedTreeDir = path.join(root, "nfs-share-custom-nodes", "ComfyUI-KJNodes");
+    await ensureDir(sharedTreeDir);
+    await fs.writeFile(path.join(sharedTreeDir, "__init__.py"), "NODE_CLASS_MAPPINGS = {}\n", "utf8");
+    await ensureDir(path.join(comfyuiRoot, "custom_nodes"));
+    await fs.symlink(sharedTreeDir, path.join(comfyuiRoot, "custom_nodes", "ComfyUI-KJNodes"), "dir");
+
+    const workflowPath = path.join(root, "workflow.json");
+    await fs.writeFile(
+      workflowPath,
+      JSON.stringify({
+        nodes: [
+          {
+            id: 1,
+            type: "SomeKJNode",
+            properties: { cnr_id: "comfyui-kjnodes" },
+            inputs: [],
+            outputs: [],
+            widgets_values: []
+          }
+        ],
+        links: []
+      }),
+      "utf8"
+    );
+    const task: MigrationTask = {
+      id: "task-intake-symlink-node",
+      name: "Intake symlink node",
+      status: "pending",
+      workflowPath,
+      workspacePath: root,
+      artifactPath,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      steps: [{ id: "00", status: "pending" }]
+    };
+
+    const result = await ensureIntakePreflight({ task, modelRoots: [path.join(root, "models")], comfyuiRoot });
+
+    const row = result.customNodeRows.find((r) => r.nodeType === "SomeKJNode");
+    expect(row?.state).toBe("source known");
+    expect(row?.evidence).toContain("custom_nodes/ComfyUI-KJNodes");
+  });
 });

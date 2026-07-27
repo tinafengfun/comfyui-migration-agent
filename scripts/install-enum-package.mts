@@ -89,10 +89,28 @@ async function fetchObjectInfo(apiUrl: string): Promise<ObjectInfo | undefined> 
 }
 
 /** Build the shell snippet that clones + pip-installs a package on the target. */
-function installScript(node: GpuNode, repo: string, lockScriptPath: string): string {
+function installScript(node: GpuNode, repo: string, lockScriptPath: string, nfsShareRoot: string | undefined): string {
   const dir = repoDirName(repo);
   const cn = `${node.comfyui_root}/custom_nodes`;
   const py = node.venv_python;
+  // Real gap this closes: a brand-new custom node used to be git-cloned
+  // directly into <comfyui_root>/custom_nodes/<dir> as an independent real
+  // directory -- bypassing the documented /nfs_share/custom_nodes shared-tree
+  // convention (docs/gpu-node-setup.md) entirely, so every node this script
+  // installed silently un-did the shared convention for future tasks/nodes.
+  // When the target has a shared NFS tree (nfsShareRoot set -- true for both
+  // configured nodes today, both runtime=docker), clone into the SHARED path
+  // instead and symlink it in locally, matching the manual convention.
+  const nfsCustomNodes = nfsShareRoot ? `${nfsShareRoot}/custom_nodes` : undefined;
+  const cloneStep = nfsCustomNodes
+    ? [
+        `if [ -d '${nfsCustomNodes}/${dir}' ]; then echo 'ALREADY_ON_SHARED_TREE'; else git clone --depth 1 '${repo}' '${nfsCustomNodes}/${dir}'; fi`,
+        // Only ever create the local symlink if nothing is there yet -- never
+        // clobber a real (non-symlink) directory that might carry local edits
+        // (see the KJNodes near-miss in docs/gpu-node-setup.md).
+        `if [ -e '${cn}/${dir}' ]; then echo 'LOCAL_ENTRY_ALREADY_EXISTS'; else ln -s '${nfsCustomNodes}/${dir}' '${cn}/${dir}'; fi`
+      ].join(" && ")
+    : `if [ -d '${cn}/${dir}' ]; then echo 'ALREADY_CLONED'; else git clone --depth 1 '${repo}' '${cn}/${dir}'; fi`;
   // Idempotent: skip clone if dir exists; install reqs if present. Proxy-aware.
   // pip install goes through the shared-venv lock wrapper, not pip directly —
   // /nfs_share/venv-container-xpu has no cross-invocation lock of its own and
@@ -100,9 +118,8 @@ function installScript(node: GpuNode, repo: string, lockScriptPath: string): str
   // this is a routine risk, not an edge case — see scripts/with-shared-venv-lock.sh).
   return [
     node.kind === "ssh" ? "[ -f ~/.proxyrc ] && . ~/.proxyrc 2>/dev/null || true" : "true",
-    `cd '${cn}'`,
-    `if [ -d '${dir}' ]; then echo 'ALREADY_CLONED'; else git clone --depth 1 '${repo}' '${dir}'; fi`,
-    `if [ -f '${dir}/requirements.txt' ]; then bash '${lockScriptPath}' '${py}' install -r '${dir}/requirements.txt'; fi`,
+    cloneStep,
+    `if [ -f '${cn}/${dir}/requirements.txt' ]; then bash '${lockScriptPath}' '${py}' install -r '${cn}/${dir}/requirements.txt'; fi`,
     `cd '${cn}/${dir}' && git rev-parse --short HEAD 2>/dev/null || echo nocommit`
   ].join(" && ");
 }
@@ -113,8 +130,9 @@ async function runInstall(
   dryRun: boolean,
   config: AppConfig
 ): Promise<{ ok: boolean; detail: string; commit?: string }> {
-  const lockScriptPath = ensureSharedVenvLockScriptDeployed(config, resolveNfsShareRoot(node) ?? "/nfs_share");
-  const script = installScript(node, repo, lockScriptPath);
+  const nfsShareRoot = resolveNfsShareRoot(node);
+  const lockScriptPath = ensureSharedVenvLockScriptDeployed(config, nfsShareRoot ?? "/nfs_share");
+  const script = installScript(node, repo, lockScriptPath, nfsShareRoot);
   if (dryRun) return { ok: true, detail: `[dry-run] ${node.kind}: ${script}` };
   try {
     if (node.kind === "ssh") {

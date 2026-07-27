@@ -289,7 +289,26 @@ async function buildCustomNodeRows(
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
     throw error;
   });
-  const dirNames = dirs.filter((entry) => entry.isDirectory()).map((entry) => entry.name);
+  // Real bug this closes: Dirent.isDirectory() reflects the directory ENTRY's
+  // own type (like lstat), not the symlink target -- so a custom node shared
+  // via the documented NFS convention (custom_nodes/<name> symlinked into
+  // /nfs_share/custom_nodes/<name>) was silently excluded here, reported as
+  // "no matching local directory evidence" / source unknown, and could even
+  // trigger a false hard-stop for a node that is actually present. Resolve
+  // symlinks with fs.stat (follows links) before deciding.
+  const dirNames = (
+    await Promise.all(
+      dirs.map(async (entry) => {
+        if (entry.isDirectory()) return entry.name;
+        if (!entry.isSymbolicLink()) return undefined;
+        const isDir = await fs
+          .stat(path.join(customNodeRoot, entry.name))
+          .then((stat) => stat.isDirectory())
+          .catch(() => false);
+        return isDir ? entry.name : undefined;
+      })
+    )
+  ).filter((name): name is string => name !== undefined);
   const builtinTypes = loadBuiltinNodeTypes(comfyuiRoot);
   const custom = new Map<string, { type: string; packageHint: string; critical: boolean }>();
   for (const node of nodes) {

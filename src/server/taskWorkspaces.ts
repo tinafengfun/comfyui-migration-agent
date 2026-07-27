@@ -163,7 +163,7 @@ async function writePackageManifest(layout: TaskWorkspaceLayout): Promise<void> 
     },
     packagingPolicy: {
       includeLargeModels: false,
-      modelStorageRoot: "/home/intel/hf_models",
+      modelStorageRoot: "/nfs_share",
       note: "Bundle task evidence and reports only; reference large model files by path and digest instead of copying them."
     }
   };
