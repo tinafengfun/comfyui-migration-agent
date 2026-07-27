@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import type { MigrationTask } from "../shared/types";
 import { ensureAssetAcquisitionJob, generateAssetQueryVariants } from "./assetAcquisition";
 import { ensureDir } from "./fsUtils";
+import { demoModelRoot } from "./config";
 
 describe("generateAssetQueryVariants", () => {
   it("strips a parenthetical strength-range hint and CJK descriptive words to find the real repo name (Klein LoRA)", () => {
@@ -148,6 +149,81 @@ describe("asset acquisition job", () => {
     const report = await fs.readFile(result.reportPath, "utf8");
     expect(report).toContain("Provider/remote search found 1 candidate");
     expect(report).toContain("ComfyUI/models/diffusion_models/definitely_missing_asset_for_test.safetensors");
+  });
+
+  it("downloads to the task's node-specific model root, not the demo model root, when both are configured (real bug: demoModelRoot was unconditionally preferred whenever present, and resolveModelRoots always includes it, so every download was invisible to the actual target GPU node's own NFS-shared model root)", async () => {
+    const root = path.join(process.cwd(), ".demo-state", "tests", `asset-acquisition-model-root-${Date.now()}`);
+    const artifactPath = path.join(root, "artifacts");
+    const nodeSpecificRoot = path.join(root, "nfs-share");
+    await ensureDir(artifactPath);
+    await ensureDir(nodeSpecificRoot);
+    const task: MigrationTask = {
+      id: "task-asset-acquisition-model-root",
+      name: "Asset acquisition model root",
+      status: "waiting_for_human",
+      workflowPath: path.join(root, "workflow.json"),
+      workspacePath: root,
+      artifactPath,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      steps: [{ id: "01", status: "waiting_for_human" }]
+    };
+    await fs.writeFile(
+      path.join(artifactPath, "01-assets.csv"),
+      [
+        "asset_name,requested_name,resolved_path,source,state,staged_path,custom_node_repo,custom_node_cache_path,wrapper_source_evidence,commit,install_status,acquisition_status,mirror_used,credential_recorded,gap",
+        // Empty staged_path -- no "ComfyUI/"-prefixed expectedTargetPath, so
+        // targetPathForRow falls through to primaryModelRoot(modelRoots, ...).
+        '"model_root_test.safetensors","model_root_test.safetensors","","not found","source unknown","","","","1:UNETLoader","","missing","requires human approval/source","none","false","source-identical asset not staged"',
+        ""
+      ].join("\n"),
+      "utf8"
+    );
+
+    const result = await ensureAssetAcquisitionJob({
+      task,
+      // demoModelRoot listed first, exactly like resolveModelRoots' merge order
+      // (config.ts's globalRoots always prepends demoModelRoot; the node's own
+      // model_roots are appended after).
+      modelRoots: [demoModelRoot, nodeSpecificRoot],
+      comfyuiRoot: path.join(root, "ComfyUI"),
+      humanContext: "",
+      redactedHumanContext: "",
+      sourceSearch: async () => ({
+        config: {
+          profileName: "test",
+          enableNetworkSearch: false,
+          allowInsecureTls: false,
+          requestTimeoutSeconds: 1,
+          maxResultsPerProvider: 1,
+          huggingFaceEndpoint: "https://huggingface.co",
+          modelScopeEndpoint: "https://modelscope.cn",
+          hasHuggingFaceToken: false,
+          hasCivitaiToken: false,
+          hasGitHubToken: false,
+          proxyConfigured: false,
+          enableDownload: false,
+          explicitHuggingFaceFiles: [],
+          huggingFaceFallbackEndpoints: ["https://hf-mirror.com"],
+          tokenEnvNames: {
+            huggingface: ["HF_TOKEN"],
+            civitai: ["CIVITAI_TOKEN"],
+            github: ["GITHUB_TOKEN"]
+          },
+          proxyEnvNames: ["ASSET_DOWNLOAD_PROXY"]
+        },
+        issues: [],
+        candidates: []
+      })
+    });
+
+    const job = JSON.parse(await fs.readFile(result.jobPath, "utf8")) as {
+      items: Array<{ assetName: string; targetPath: string }>;
+    };
+    const item = job.items.find((i) => i.assetName === "model_root_test.safetensors");
+    expect(item?.targetPath).toBeDefined();
+    expect(path.resolve(item!.targetPath).startsWith(path.resolve(nodeSpecificRoot))).toBe(true);
+    expect(path.resolve(item!.targetPath).startsWith(path.resolve(demoModelRoot))).toBe(false);
   });
 
   it("adds local model_repo roots and SSH remote exact-file candidates without persisting secrets", async () => {

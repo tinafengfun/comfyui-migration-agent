@@ -34,7 +34,7 @@ Use as Step 02 after Step 00 intake and Step 01 asset/custom-node resolution to 
 12. Write all-node feasibility accounting with one row per source node whenever the route depends on node scope.
 13. **Interactive risk review** — If risks, human interventions, or unverified assumptions exist, engage the human operator via `ask_user` for discussion and decision collection (see protocol below).
 14. Write `02-feasibility.md` with a terminal state: `complete` or `hard_stop`.
-15. If human decisions were collected, write `02-decisions.json`.
+15. If human decisions were collected, write `02-decisions.json`. If any human-approved decision defers acquisition of a hidden runtime asset, also write `02-hidden-runtime-assets.json` (see contract below).
 16. Include a `completion_decision` block and a Toolization block before closing Step 02.
 
 ## Interactive risk review protocol
@@ -117,6 +117,32 @@ custom_nodes_xpu_unknown:
 ```
 
 Prefer Step 01's current ledger over Step 00's preflight summary. A deterministic precheck that reads only Step 00 is not enough; Zimage showed that it can pause at the correct gate while dropping the actual Step 01 gap list from the report.
+
+## Hidden runtime asset pre-stage contract
+
+Some custom nodes (e.g. IndexTTS2Run) load their model suite dynamically from their own Python code (hardcoded `os.path.join(model_dir, ...)` calls), not through a ComfyUI model-loader widget — Step 00/01's static workflow-JSON scan cannot see these. When you identify one of these AND get explicit human sign-off during interactive risk review to defer its acquisition (not "acquire it now yourself" — Step 02 must not provider-search/download/clone), write a sibling file `02-hidden-runtime-assets.json` next to `02-feasibility.md` so deterministic backend code can start downloading it in the background immediately, instead of leaving the entire multi-GB fetch to happen live inside Step 05's own session (this is exactly what made a real Step 05 run slow enough to risk a session timeout):
+
+```json
+{
+  "items": [
+    {
+      "name": "IndexTTS-2 model suite",
+      "kind": "huggingface_repo",
+      "repo": "IndexTeam/IndexTTS-2",
+      "files": ["s2mel.pth", "gpt.pth", "bpe.model", "config.yaml"],
+      "targetRelativePath": "TTS/IndexTTS-2",
+      "humanApproved": true
+    }
+  ]
+}
+```
+
+Rules:
+- `humanApproved` must be `true` for every item — only write an entry after the human has actually signed off on deferred acquisition for that specific asset (a D4-style decision in the tracker). Never write an item the human hasn't approved.
+- `kind: "huggingface_repo"` downloads each listed file from `{repo}/resolve/main/{file}`; `kind: "file_url"` (with a `url` field instead of `repo`/`files`) downloads one arbitrary direct URL.
+- `targetRelativePath` is relative to the target GPU node's model root (e.g. a value of `"TTS/IndexTTS-2"` lands at `<node_model_root>/TTS/IndexTTS-2/<file>`) — use the same path a ComfyUI model-loader node would expect, matching what you record in `hidden_runtime_asset_status` below.
+- This file is best-effort only — if you don't write it (e.g. no hidden runtime assets this run, or acquisition wasn't deferred), nothing breaks; Step 05 falls back to acquiring the asset itself as before.
+- This is independent of, and does not replace, documenting the same information in prose under `hidden_runtime_asset_status` for human readability.
 
 ## VRAM estimate template
 

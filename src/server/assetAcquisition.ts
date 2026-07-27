@@ -1236,7 +1236,18 @@ export function generateAssetQueryVariants(name: string): string[] {
 }
 
 function primaryModelRoot(modelRoots: string[], comfyuiRoot: string): string {
-  if (modelRoots.map((root) => path.resolve(root)).includes(path.resolve(demoModelRoot))) return demoModelRoot;
+  // Real incident: `resolveModelRoots(task)` (orchestrator.ts) always merges in
+  // `demoModelRoot` alongside the task's actual GPU node's own `model_roots`
+  // (config.ts unconditionally prepends it), so the old `.includes(demoModelRoot)`
+  // check below was ALWAYS true -- every download landed in `demoModelRoot`
+  // (a local-disk-only demo path), never in the node-specific root (e.g. the
+  // NFS-shared `/nfs_share` a real remote GPU node actually reads from). Prefer
+  // any node-specific root first; only fall back to demoModelRoot when the task
+  // has no node-specific root at all (e.g. no GPU node configured).
+  const demoRootResolved = path.resolve(demoModelRoot);
+  const nodeSpecificRoot = modelRoots.find((root) => path.resolve(root) !== demoRootResolved);
+  if (nodeSpecificRoot) return nodeSpecificRoot;
+  if (modelRoots.map((root) => path.resolve(root)).includes(demoRootResolved)) return demoModelRoot;
   return modelRoots[0] ?? path.join(comfyuiRoot, "models");
 }
 

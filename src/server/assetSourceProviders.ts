@@ -641,7 +641,7 @@ async function curlJson(url: string, provider: SourceProvider, config: SourcePro
   return JSON.parse(stdout) as unknown;
 }
 
-function withDownloadCommand(
+export function withDownloadCommand(
   candidate: AssetSourceCandidate,
   input: SearchInput,
   config: SourceProviderConfig

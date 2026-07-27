@@ -288,6 +288,27 @@ When human decisions were collected, write `02-decisions.json`:
 }
 ```
 
+### 02-hidden-runtime-assets.json schema (only when applicable)
+
+When you identify a hidden runtime asset (a custom node's model suite loaded dynamically from its own Python code, invisible to Step 00/01's static workflow-JSON scan) and the human has explicitly approved deferring its acquisition, write `02-hidden-runtime-assets.json` so the backend can start downloading it in the background right away instead of leaving the whole fetch to happen live inside Step 05:
+
+```json
+{
+  "items": [
+    {
+      "name": "human-readable name, e.g. IndexTTS-2 model suite",
+      "kind": "huggingface_repo",
+      "repo": "org/repo-id",
+      "files": ["file1.pth", "file2.safetensors"],
+      "targetRelativePath": "TTS/IndexTTS-2",
+      "humanApproved": true
+    }
+  ]
+}
+```
+
+Use `"kind": "file_url"` with a `"url"` field (instead of `repo`/`files`) for a single arbitrary direct-download URL. `humanApproved` must be `true` for every item you write — only include an asset the human has actually signed off on deferring, matching a decision already in `02-decisions.json`'s `risk_acceptance`. This file is optional and best-effort: skip it entirely when there's no hidden runtime asset this run, or when acquisition wasn't deferred.
+
 ## Success criteria
 
 Step 02 is successful only when one of these terminal states is reached:

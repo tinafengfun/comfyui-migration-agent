@@ -247,10 +247,21 @@ Only block Step 05 deployment when:
 
 If Step 01 or Step 04 reports a custom-node package as "environment gap" (directory exists but is empty or missing Python files), Step 05 must attempt to install it:
 
-1. Clone the public GitHub repository into the custom-node directory
-2. Install declared pip dependencies (portable only, skip CUDA-only)
-3. Verify registration via `/object_info` after server restart
-4. If clone or install fails, document it as a gap — do not hard-stop unless the node is on the critical execution path AND no workaround exists
+1. **Check `/nfs_share/custom_nodes/<name>` first** (or whatever `nfs_share_root` the node config declares). If the target node has a shared NFS tree (both currently-configured nodes do, since `runtime: docker` implies it — see `docs/gpu-node-setup.md`'s "Shared custom_nodes/ convention"), clone the package there instead of directly into the node's own `custom_nodes/`, then symlink `<comfyui_root>/custom_nodes/<name>` to it. This is what `scripts/install-enum-package.mts` now does automatically — reuse it, or replicate the same clone-into-shared-tree-then-symlink pattern for any other custom-node install. Cloning straight into `<comfyui_root>/custom_nodes/<name>` as an independent directory silently un-does the shared convention for every other node/person using this environment.
+2. If the node has no shared NFS tree, clone the public GitHub repository directly into the custom-node directory (today's plain behavior).
+3. Install declared pip dependencies (portable only, skip CUDA-only)
+4. Verify registration via `/object_info` after server restart
+5. If clone or install fails, document it as a gap — do not hard-stop unless the node is on the critical execution path AND no workaround exists
+
+### Hidden runtime asset pre-stage check (do this BEFORE downloading anything Step 02 flagged)
+
+If Step 02 identified a hidden runtime asset (a custom node's model suite loaded dynamically from its own code — e.g. IndexTTS2's ~14GB model suite) and got human sign-off to defer acquisition, the backend may have already started downloading it in the background as soon as Step 02 finished, specifically so Step 05 doesn't have to fetch a multi-GB model suite live inside its own session. Before you acquire any such asset yourself:
+
+1. Check whether `<artifact_folder>/02-hidden-runtime-assets.json` exists — it lists exactly what was flagged (`repo`/`files`/`targetRelativePath`).
+2. Check `<artifact_folder>/hidden-asset-downloads/*.status.json` for each listed item/file — each record has `status: "downloading" | "complete" | "failed"` and a `targetPath`. Also check whether `targetPath` already exists and is non-empty on disk (the real ground truth — a status file can be stale after a backend restart).
+3. If a file is already present at its `targetPath`: it's done, don't re-download it — just reference it in your `model_paths`/readiness reporting.
+4. If a file's status is `"downloading"`: wait for it (poll every ~30s, this is a background OS process, not something you started) rather than starting a redundant second download of the same multi-GB file.
+5. If a file's status is `"failed"`, or no `02-hidden-runtime-assets.json`/status file exists at all: fall back to acquiring it yourself exactly as before (this pre-stage mechanism is best-effort; its absence or failure must never block Step 05).
 
 ## Output schema
 
