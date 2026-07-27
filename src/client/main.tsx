@@ -692,6 +692,20 @@ function GpuNodeManager({ api, onClose, onChanged }: {
     }
   }
 
+  async function handleSyncComfyUiCore(name: string): Promise<void> {
+    const key = `${name}-core-sync`;
+    setVerifyResults((cur) => ({ ...cur, [key]: "pending" }));
+    try {
+      const result = await api.syncGpuNodeComfyUiCore(name);
+      setVerifyResults((cur) => ({ ...cur, [key]: result }));
+    } catch (err) {
+      setVerifyResults((cur) => ({
+        ...cur,
+        [key]: { ok: false, detail: err instanceof Error ? err.message : String(err) }
+      }));
+    }
+  }
+
   async function handleVerifyForm(form: GpuNodeFormState): Promise<void> {
     // Verify-before-save: serialize the form the same way handleSave does.
     const model_roots = form.model_roots.split(",").map((s) => s.trim()).filter(Boolean);
@@ -786,6 +800,14 @@ function GpuNodeManager({ api, onClose, onChanged }: {
                         </div>
                       ) : sr === "pending" ? <div className="muted">Syncing image from NFS…</div> : null;
                     })()}
+                    {(() => {
+                      const csr = verifyResults[`${n.name}-core-sync`];
+                      return csr && csr !== "pending" ? (
+                        <div className={`gpu-node-verify ${csr.ok ? "ok" : "fail"}`}>
+                          {csr.ok ? "✓ " : "✗ "}{csr.detail}
+                        </div>
+                      ) : csr === "pending" ? <div className="muted">Syncing ComfyUI core from NFS…</div> : null;
+                    })()}
                     <div className="gpu-node-card-actions">
                       <button className="btn btn-sm" onClick={() => void handleVerify(n.name)} disabled={vr === "pending"}>Test</button>
                       {n.runtime === "docker" && (
@@ -797,6 +819,13 @@ function GpuNodeManager({ api, onClose, onChanged }: {
                           Sync Docker Image from NFS
                         </button>
                       )}
+                      <button
+                        className="btn btn-sm"
+                        onClick={() => void handleSyncComfyUiCore(n.name)}
+                        disabled={verifyResults[`${n.name}-core-sync`] === "pending"}
+                      >
+                        Sync ComfyUI Core from NFS
+                      </button>
                       <button className="btn btn-sm" onClick={() => { setEditing(formFromNode(n)); setEditingOriginalName(n.name); }}>Edit</button>
                       <button className="btn btn-sm btn-danger" onClick={() => void handleDelete(n.name)}>Delete</button>
                     </div>

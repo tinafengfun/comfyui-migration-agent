@@ -1,4 +1,6 @@
+import { execFileSync } from "node:child_process";
 import fs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import type { AppConfig } from "./config";
@@ -16,6 +18,8 @@ import {
   resolveNfsShareRoot,
   syncDockerImageFromNfs,
   ensureDockerImageSynced,
+  checkComfyUiCoreDrift,
+  syncComfyUiCoreFromNfs,
   checkRecipeEnvironmentDrift,
   checkPortOccupant,
   checkOmniXpuAcceleration,
@@ -26,6 +30,14 @@ import {
   mergeModelRoots,
   type GpuNode
 } from "./gpuNodes";
+
+function initGitRepo(root: string): void {
+  execFileSync("git", ["init", "-q"], { cwd: root });
+  execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: root });
+  execFileSync("git", ["config", "user.name", "Test"], { cwd: root });
+  execFileSync("git", ["add", "-A"], { cwd: root });
+  execFileSync("git", ["commit", "-q", "-m", "initial", "--allow-empty"], { cwd: root });
+}
 
 function makeConfig(root: string, gpuNodesPath?: string): AppConfig {
   return {
@@ -498,6 +510,124 @@ describe("gpuNodes", () => {
       expect(result.synced).toBe(true);
       expect(result.detail).toContain("not present locally");
       expect(result.detail).toContain("synced-ok");
+    });
+  });
+
+  describe("checkComfyUiCoreDrift", () => {
+    it("reports in-sync when no canonical repo exists at <nfs_share_root>/comfyui-core (nothing to compare)", async () => {
+      const root = path.join(process.cwd(), ".demo-state", "tests", `gn-core-drift-no-canonical-${Date.now()}`);
+      await fs.mkdir(root, { recursive: true });
+      const node: GpuNode = {
+        name: "d", kind: "local", comfyui_root: path.join(root, "comfyui"), venv_python: "/x/.venv/bin/python3",
+        model_roots: ["/m"], api_host: "127.0.0.1", api_port: 8188,
+        runtime: "docker", nfs_share_root: path.join(root, "nfs-share")
+      };
+      const result = await checkComfyUiCoreDrift(node);
+      expect(result.inSync).toBe(true);
+      expect(result.detail).toContain("nothing to compare");
+    });
+
+    it("reports in-sync when comfyui_root is not a git checkout (nothing to compare)", async () => {
+      const root = path.join(process.cwd(), ".demo-state", "tests", `gn-core-drift-not-git-${Date.now()}`);
+      const nfsRoot = path.join(root, "nfs-share");
+      const canonicalPath = path.join(nfsRoot, "comfyui-core");
+      await fs.mkdir(canonicalPath, { recursive: true });
+      initGitRepo(canonicalPath);
+      // Deliberately OUTSIDE this project's own git repo (unlike `root` above,
+      // nested under /tmp/cma-staging) -- otherwise `git -C comfyuiRoot` walks
+      // up and finds THIS repo's own .git, returning ITS HEAD instead of
+      // correctly failing (confirmed live: git does exactly this).
+      const comfyuiRoot = path.join(os.tmpdir(), `gn-core-drift-not-git-comfyui-${Date.now()}`);
+      await fs.mkdir(comfyuiRoot, { recursive: true });
+      try {
+        const node: GpuNode = {
+          name: "d", kind: "local", comfyui_root: comfyuiRoot, venv_python: "/x/.venv/bin/python3",
+          model_roots: ["/m"], api_host: "127.0.0.1", api_port: 8188,
+          runtime: "docker", nfs_share_root: nfsRoot
+        };
+        const result = await checkComfyUiCoreDrift(node);
+        expect(result.inSync).toBe(true);
+        expect(result.canonicalCommit).toBeDefined();
+        expect(result.detail).toContain("not a git checkout");
+      } finally {
+        await fs.rm(comfyuiRoot, { recursive: true, force: true });
+      }
+    });
+
+    it("reports in-sync when comfyui_root's commit matches the canonical repo's HEAD", async () => {
+      const root = path.join(process.cwd(), ".demo-state", "tests", `gn-core-drift-match-${Date.now()}`);
+      const nfsRoot = path.join(root, "nfs-share");
+      const canonicalPath = path.join(nfsRoot, "comfyui-core");
+      await fs.mkdir(canonicalPath, { recursive: true });
+      initGitRepo(canonicalPath);
+      const comfyuiRoot = path.join(root, "comfyui");
+      execFileSync("git", ["clone", "-q", canonicalPath, comfyuiRoot]);
+      const node: GpuNode = {
+        name: "d", kind: "local", comfyui_root: comfyuiRoot, venv_python: "/x/.venv/bin/python3",
+        model_roots: ["/m"], api_host: "127.0.0.1", api_port: 8188,
+        runtime: "docker", nfs_share_root: nfsRoot
+      };
+      const result = await checkComfyUiCoreDrift(node);
+      expect(result.inSync).toBe(true);
+      expect(result.localCommit).toBe(result.canonicalCommit);
+      expect(result.detail).toContain("already matches canonical");
+    });
+
+    it("reports drift when comfyui_root's commit is behind the canonical repo's HEAD", async () => {
+      const root = path.join(process.cwd(), ".demo-state", "tests", `gn-core-drift-behind-${Date.now()}`);
+      const nfsRoot = path.join(root, "nfs-share");
+      const canonicalPath = path.join(nfsRoot, "comfyui-core");
+      await fs.mkdir(canonicalPath, { recursive: true });
+      initGitRepo(canonicalPath);
+      const comfyuiRoot = path.join(root, "comfyui");
+      execFileSync("git", ["clone", "-q", canonicalPath, comfyuiRoot]);
+      // Advance canonical past the node's cloned commit -- a real XPU patch commit.
+      await fs.mkdir(path.join(canonicalPath, "comfy"), { recursive: true });
+      await fs.writeFile(path.join(canonicalPath, "comfy", "ops.py"), "# xpu patch\n");
+      execFileSync("git", ["add", "-A"], { cwd: canonicalPath });
+      execFileSync("git", ["commit", "-q", "-m", "xpu: patch ops.py"], { cwd: canonicalPath });
+      const node: GpuNode = {
+        name: "d", kind: "local", comfyui_root: comfyuiRoot, venv_python: "/x/.venv/bin/python3",
+        model_roots: ["/m"], api_host: "127.0.0.1", api_port: 8188,
+        runtime: "docker", nfs_share_root: nfsRoot
+      };
+      const result = await checkComfyUiCoreDrift(node);
+      expect(result.inSync).toBe(false);
+      expect(result.localCommit).not.toBe(result.canonicalCommit);
+      expect(result.detail).toContain("sync-comfyui-core-from-nfs.sh");
+    });
+  });
+
+  describe("syncComfyUiCoreFromNfs", () => {
+    it("runs the local canonical script and returns its trailing output", async () => {
+      const root = path.join(process.cwd(), ".demo-state", "tests", `gn-core-sync-ok-${Date.now()}`);
+      await fs.mkdir(path.join(root, "scripts"), { recursive: true });
+      await fs.writeFile(
+        path.join(root, "scripts", "sync-comfyui-core-from-nfs.sh"),
+        "#!/usr/bin/env bash\necho \"NFS_COMFYUI_CORE_ROOT=$NFS_COMFYUI_CORE_ROOT\"\necho \"arg1=$1\"\necho done\n",
+        { mode: 0o755 }
+      );
+      const node: GpuNode = {
+        name: "d", kind: "local", comfyui_root: "/x/comfyui", venv_python: "/x/.venv/bin/python3",
+        model_roots: ["/m"], api_host: "127.0.0.1", api_port: 8188,
+        runtime: "docker", nfs_share_root: "/custom-share"
+      };
+      const result = await syncComfyUiCoreFromNfs(node, { projectRoot: root });
+      expect(result.ok).toBe(true);
+      expect(result.detail).toContain("NFS_COMFYUI_CORE_ROOT=/custom-share/comfyui-core");
+      expect(result.detail).toContain("arg1=/x/comfyui");
+      expect(result.detail).toContain("done");
+    });
+
+    it("returns ok:false when the canonical script isn't present", async () => {
+      const root = path.join(process.cwd(), ".demo-state", "tests", `gn-core-sync-missing-${Date.now()}`);
+      const node: GpuNode = {
+        name: "d", kind: "local", comfyui_root: "/x/comfyui", venv_python: "/x/.venv/bin/python3",
+        model_roots: ["/m"], api_host: "127.0.0.1", api_port: 8188
+      };
+      const result = await syncComfyUiCoreFromNfs(node, { projectRoot: root });
+      expect(result.ok).toBe(false);
+      expect(result.detail).toContain("sync script not found");
     });
   });
 

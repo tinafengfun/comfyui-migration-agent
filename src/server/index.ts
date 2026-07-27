@@ -27,6 +27,7 @@ import {
   pickNode,
   removeNode,
   saveGpuNodes,
+  syncComfyUiCoreFromNfs,
   syncDockerImageFromNfs,
   upsertNode,
   verifyNode
@@ -226,6 +227,22 @@ app.post("/api/gpu-nodes/:name/sync-docker-image", async (req, res, next) => {
       return;
     }
     const result = await syncDockerImageFromNfs(node, config);
+    res.json(result);
+  } catch (error) {
+    next(error);
+  }
+});
+
+// No runtime==="docker" gate here -- ComfyUI-core sync applies to bare nodes too.
+app.post("/api/gpu-nodes/:name/sync-comfyui-core", async (req, res, next) => {
+  try {
+    const registry = loadGpuNodes(config);
+    const node = registry.nodes.find((n) => n.name === req.params.name);
+    if (!node) {
+      res.status(404).json({ error: `Node "${req.params.name}" not found` });
+      return;
+    }
+    const result = await syncComfyUiCoreFromNfs(node, config);
     res.json(result);
   } catch (error) {
     next(error);

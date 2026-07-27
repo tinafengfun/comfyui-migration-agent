@@ -180,6 +180,50 @@ The per-node Python venv still needs the package's own `pip install -r requireme
 
 **Model-root path changes also require updating each node's `extra_model_paths.yaml`, independent of `gpu-nodes.json`.** ComfyUI auto-loads `<comfyui_root>/extra_model_paths.yaml` on every startup regardless of the `--extra-model-paths-yaml` CLI flag Step 05 passes — it's a static file per node, not derived from `gpu-nodes.json`'s `model_roots`. Confirmed live during the NFS share migration: updating `model_roots` to `/nfs_share` in `gpu-nodes.json` was not sufficient — both `local-xpu` and `remote-124-12` had their own `extra_model_paths.yaml` still hardcoding `base_path: /home/intel/hf_models` (remote's had 5 separate `base_path` entries, including one referencing a since-flattened `zimage_workflow/models/...` subpath). Not fatal on its own (ComfyUI silently skips a missing search path), but it means stale and current paths get merged rather than cleanly cut over — check and update this file by hand on every node whenever `model_roots` changes.
 
+## Shared ComfyUI core convention (NFS)
+
+Unlike `custom_nodes/`, `comfyui_root` itself is **not** symlinked wholesale to NFS — each node keeps its own real checkout. ComfyUI's own `.gitignore` already excludes everything per-node (`user/`, `output/`, `input/`, `temp/`, `models/`, `custom_nodes/`, `venv*/`, `extra_model_paths.yaml`), so a git-based sync of the core checkout only ever touches tracked source files (`comfy/`, `comfy_extras/`, `main.py`, `server.py`, etc.) — exactly the granularity needed, without a symlink risking per-node runtime state getting shared too.
+
+The canonical, patch-reconciled version lives at `/nfs_share/comfyui-core` — a normal (non-bare) git working tree, `origin` = the real upstream `comfyanonymous/ComfyUI`, no team-fork/GitHub-push dependency needed for day-to-day patch work.
+
+**Why a fresh canonical repo, not either node's existing checkout:** as of this writing, `local-xpu` and `remote-124-12` had run on two **completely disconnected** ComfyUI git histories — `local-xpu` on a team fork (`tinafengfun/ComfyUI@v2-agent`) whose ~70 "unique" commits turned out to be ~95% unrelated migration-agent-PROJECT history (docs, prompts, agent-demo app code) rather than ComfyUI changes, dangerously conflating two unrelated projects in one repo; `remote-124-12` on a plain, unmodified `comfyanonymous/ComfyUI@master` checkout with one real but only `git add`-staged (never committed) XPU patch, one accidental `git checkout --`/disk issue away from being lost. `/nfs_share/comfyui-core` starts clean from a recent upstream commit with only the real, known XPU patches committed on top — currently:
+- `comfy/model_management.py` + `comfy/pinned_memory.py` — XPU `cudaHostRegister` guard / vendor-agnostic device context.
+- `server.py` + `app/frontend_management.py` — robust startup import for the repo's own `utils` package (avoids shadowing by an unrelated top-level `utils` module).
+- `comfy/ops.py` — dequantize FP8-quantized tensors to bf16 before `Module.to("xpu")` (avoids a `comfy_kitchen` `QTensor.clone()` segfault on XPU — see the Step02 feasibility skill's FP8-on-XPU decision gate).
+
+**Syncing a node down to the latest canonical version:**
+
+```bash
+scripts/sync-comfyui-core-from-nfs.sh <comfyui_root>
+```
+
+Refuses if the node has uncommitted changes to tracked core files (run `publish-comfyui-core-patch.sh` first if that's a real local fix worth keeping) — a real `git merge`, so a genuine conflict with the canonical repo surfaces normally, not silently overwritten. Restart ComfyUI on that node afterward to pick up the change.
+
+**Publishing a genuine local core patch (e.g. a new XPU compatibility fix):**
+
+```bash
+# 1. Commit your fix locally first, with a clear message explaining WHY
+#    (which crash/bug it avoids) -- same discipline as the shared
+#    custom_nodes/ convention.
+git -C <comfyui_root> commit -am "xpu: ..."
+
+# 2. Publish -- a real merge of your commit(s) into the canonical repo.
+scripts/publish-comfyui-core-patch.sh <comfyui_root>
+```
+
+A genuine conflict (someone else patched the same lines) surfaces as a normal git merge conflict inside `/nfs_share/comfyui-core`, resolved directly there — same spirit as `publish-shared-node.sh` for `custom_nodes/`.
+
+**As of this writing, neither node has actually been switched over to `/nfs_share/comfyui-core` yet** — it exists as the reconciled, patch-complete canonical reference, ready for whenever a deliberate cutover is decided. `local-xpu`'s situation is more involved than `remote-124-12`'s: its `comfyui_root` has the migration-agent app (`agent-demo/`) nested inside the same git checkout (a historical entanglement, unrelated to this convention) — untangling that is a separate, higher-risk follow-up, not a blocker for using the canonical repo as a reference or for `remote-124-12`, which has no such entanglement.
+
+### Agent integration: detection-only, never auto-syncs
+
+Step 05 now runs a drift check automatically at the start of every task (best-effort, never blocks): it compares the node's `comfyui_root` git commit against `/nfs_share/comfyui-core`'s current HEAD and records the result as a durable `05-comfyui-core-status.json` artifact (`{inSync, localCommit, canonicalCommit, detail}`), plus a `progress` event when drifted. This is the same "detection only" pattern already used for the Docker-image and recipe-version drift checks in Step 05 — **it never auto-pulls**. Unlike a docker image tag (which only ever changes via a deliberate republish), ComfyUI core is a live, actively-run codebase; silently rewriting it between task runs would make a regression hard to bisect. Actually syncing is still a deliberate, human-triggered action:
+
+- **Web UI**: GPU Nodes Manager → a node's card → **Sync ComfyUI Core from NFS** button (mirrors the existing "Sync Docker Image from NFS" button, calls `POST /api/gpu-nodes/:name/sync-comfyui-core`).
+- **CLI**: `scripts/sync-comfyui-core-from-nfs.sh <comfyui_root>` directly, as documented above.
+
+Publishing a local patch (`scripts/publish-comfyui-core-patch.sh`) stays CLI-only — not exposed via the UI — since pushing a change into the shared canonical repo that every node/person will eventually pull is a higher-stakes, deliberate action.
+
 ## Docker runtime (Intel XPU bundle)
 
 For nodes with `runtime: "docker"`, onboarding is fully integrated end-to-end (mount the shared NFS tree → load+verify the image → symlink `custom_nodes/` → register) via `scripts/bootstrap-gpu-node.mts --runtime docker` or the Web UI form — see [Docker-runtime onboarding](#docker-runtime-onboarding-fully-integrated). The rest of this section covers what happens at *task run time* once a node is registered.

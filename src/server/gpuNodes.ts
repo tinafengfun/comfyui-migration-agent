@@ -17,6 +17,7 @@ import path from "node:path";
 import type { AppConfig } from "./config";
 import type { GpuNodeVerifyResult } from "../shared/types";
 import type { Recipe } from "./recipeLibrary";
+import { localCoreCommit } from "./coreNodeRecipeDiscovery";
 
 const execFileAsync = promisify(execFileCb);
 
@@ -475,6 +476,88 @@ export async function ensureDockerImageSynced(
     synced: result.ok,
     detail: `${reason} -- ${result.ok ? "synced from NFS" : "sync attempt failed"}: ${result.detail}`
   };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ComfyUI-core NFS drift detection + sync
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface ComfyUiCoreDriftResult {
+  inSync: boolean;
+  localCommit?: string;
+  canonicalCommit?: string;
+  detail: string;
+}
+
+/**
+ * Compares this node's comfyui_root git commit against the canonical
+ * /nfs_share/comfyui-core repo's HEAD. Detection only -- deliberately does
+ * NOT auto-sync on drift, unlike ensureDockerImageSynced above. A docker
+ * image tag only ever changes via a deliberate republish, so auto-loading a
+ * matching one is safe; ComfyUI core is a live, actively-run codebase, and
+ * silently rewriting it between task runs would make a regression hard to
+ * bisect (which task run first saw the changed code?). Surfacing drift as
+ * durable evidence and leaving the actual sync to a human (the "Sync from
+ * NFS" button, or scripts/sync-comfyui-core-from-nfs.sh) is the deliberate
+ * choice here -- see docs/gpu-node-setup.md's "Shared ComfyUI core
+ * convention" section.
+ *
+ * Missing canonical repo, or comfyui_root not a git checkout, is reported as
+ * in-sync (nothing to compare against) rather than drifted -- a node that
+ * was never meant to track the canonical repo shouldn't get flagged.
+ */
+export async function checkComfyUiCoreDrift(node: GpuNode): Promise<ComfyUiCoreDriftResult> {
+  const nfsRoot = resolveNfsShareRoot(node) ?? "/nfs_share";
+  const canonicalPath = path.join(nfsRoot, "comfyui-core");
+  if (!fs.existsSync(path.join(canonicalPath, ".git"))) {
+    return { inSync: true, detail: `no canonical repo at ${canonicalPath} -- nothing to compare` };
+  }
+  const canonicalCommit = await localCoreCommit(canonicalPath);
+  if (!canonicalCommit) {
+    return { inSync: true, detail: `could not read canonical repo HEAD at ${canonicalPath}` };
+  }
+  const localCommit = await localCoreCommit(node.comfyui_root);
+  if (!localCommit) {
+    return {
+      inSync: true,
+      canonicalCommit,
+      detail: `${node.comfyui_root} is not a git checkout (or git is unavailable) -- nothing to compare`
+    };
+  }
+  if (localCommit === canonicalCommit) {
+    return { inSync: true, localCommit, canonicalCommit, detail: `comfyui_root already matches canonical (${canonicalCommit})` };
+  }
+  return {
+    inSync: false,
+    localCommit,
+    canonicalCommit,
+    detail: `comfyui_root is at ${localCommit}, canonical /nfs_share/comfyui-core is at ${canonicalCommit} -- run scripts/sync-comfyui-core-from-nfs.sh (or the GPU Nodes Manager "Sync ComfyUI Core" button) to update, or scripts/publish-comfyui-core-patch.sh if this node has a local core fix to preserve`
+  };
+}
+
+/**
+ * Sync this node's comfyui_root to the canonical /nfs_share/comfyui-core
+ * repo -- a real `git merge` (via scripts/sync-comfyui-core-from-nfs.sh),
+ * refuses if the node has uncommitted core changes. Manual/human-triggered
+ * only (the GPU Nodes Manager button, or run directly) -- see
+ * checkComfyUiCoreDrift's doc comment for why this is never auto-invoked.
+ */
+export async function syncComfyUiCoreFromNfs(
+  node: GpuNode,
+  config: Pick<AppConfig, "projectRoot">
+): Promise<{ ok: boolean; detail: string }> {
+  const localScriptPath = path.join(config.projectRoot, "scripts", "sync-comfyui-core-from-nfs.sh");
+  if (!fs.existsSync(localScriptPath)) {
+    return { ok: false, detail: `sync script not found at ${localScriptPath}` };
+  }
+  const nfsRoot = resolveNfsShareRoot(node) ?? "/nfs_share";
+  return runScriptOnNode(node, localScriptPath, {
+    remoteScriptName: "sync-comfyui-core-from-nfs.sh",
+    scriptArgs: [node.comfyui_root],
+    env: { NFS_COMFYUI_CORE_ROOT: `${nfsRoot}/comfyui-core` },
+    timeoutMs: 5 * 60_000,
+    actionLabel: "ComfyUI core sync"
+  });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

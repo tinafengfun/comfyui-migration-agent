@@ -4,7 +4,15 @@ Single manifest for every custom-node package touched while adopting Intel's `ll
 
 All packages below live at `/nfs_share/custom_nodes/<name>` (canonical source, NFS-shared) and are symlinked into `custom_nodes/` on both `local-xpu` and `remote-124-12`. See `docs/gpu-node-setup.md` for the sharing convention and the `runtime=docker` execution model.
 
-ComfyUI core itself is **unpatched upstream** (`comfyanonymous/ComfyUI`) on both this environment and Intel's own bundle — there is no parallel/duplicate core to reconcile, only the custom-node layer below.
+**Update:** ComfyUI core is no longer bare-unpatched-upstream — see `docs/gpu-node-setup.md`'s "Shared ComfyUI core convention" section. The canonical, patch-reconciled core lives at `/nfs_share/comfyui-core`, with 5 real XPU patches committed on top of a recent `comfyanonymous/ComfyUI` base (discovered when reconciling `local-xpu`'s and `remote-124-12`'s previously-disconnected core checkouts):
+
+| File(s) | Fix |
+|---|---|
+| `comfy/model_management.py`, `comfy/pinned_memory.py` | Skip `cudaHostRegister` on non-CUDA backends; vendor-agnostic `cuda_device_context` (xpu/npu/mlu, not just cuda). |
+| `server.py`, `app/frontend_management.py` | Robust startup import for the repo's own `utils` package — avoids shadowing by an unrelated top-level `utils` module on `sys.path`. |
+| `comfy/ops.py` | Dequantize FP8-quantized tensors to bf16 before `Module.to("xpu")` — avoids a `comfy_kitchen` `QTensor.clone()` segfault on XPU (see the Step02 feasibility skill's FP8-on-XPU decision gate). |
+
+As of this writing, neither node has been switched over to the canonical repo yet (a deliberate decision, not an oversight) — it exists as the reconciled reference for whenever a cutover happens.
 
 ## Already patched here before this pass (reconciled against Intel's bundle)
 

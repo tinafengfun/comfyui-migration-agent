@@ -327,12 +327,18 @@ export function useApi() {
     return res.json();
   }, []);
 
+  const syncGpuNodeComfyUiCore = useCallback(async (name: string): Promise<GpuNodeVerifyResult> => {
+    const res = await fetch(`/api/gpu-nodes/${encodeURIComponent(name)}/sync-comfyui-core`, { method: "POST" });
+    if (!res.ok) throw new Error(await res.text());
+    return res.json();
+  }, []);
+
   return {
     fetchSteps, fetchTasks, createTask, deleteTask,
     runUntilGate, runStep, resumeStep, rerunStep, hardStop,
     answerQuestion, uploadMedia, fetchArtifacts, fetchArtifactContent,
     fetchDecisions, fetchSubJobs, startSubJob, downloadSuggestedSource, adoptCoreNodeRecipeDraft, fetchProgressNarrative,
     fetchHealth, runPreflight, generateRunReport, fetchGateSignal, fetchGpuNodes,
-    createGpuNode, updateGpuNode, deleteGpuNode, verifyGpuNode, syncGpuNodeDockerImage
+    createGpuNode, updateGpuNode, deleteGpuNode, verifyGpuNode, syncGpuNodeDockerImage, syncGpuNodeComfyUiCore
   };
 }
