@@ -107,6 +107,17 @@ If the environment is ready but the operator has not run the workflow, document 
 
 `gui_workflow_json`, `model_path_config`, `prepare_script`, `launch_command`, `service_url`, `pid_and_log`, `manual_checklist`, `run_record_template`, `expected_outputs`, `known_boundaries`, `human_signoff_state`, `manual_result`.
 
+**`manual_result` in `12-gui-acceptance-summary.json` MUST be exactly one of these four literal strings — nothing else.** This field is read by deterministic backend code (not just for human readability) to decide whether to archive the accepted delivery bundle to the shared NFS store; a value outside this exact set is silently treated as "not accepted" and the archive never happens, which has caused a real, unrecoverable loss of a fully-accepted task's delivery once already:
+
+```json
+"manual_result": "accepted"
+```
+
+- `"accepted"` — the human operator ran the workflow in the GUI and confirmed it works. Use this and only this string when signoff is positive, even if your own prose elsewhere says "approved"/"passed"/"looks good".
+- `"rejected"` — the human operator ran it and it did not work / did not meet expectations.
+- `"blocked"` — the human could not complete the test (environment issue, missing input, etc.), not a judgment on the workflow itself.
+- `"pending_human_run"` — preparation is done but no human has run it yet (this is the value at the point Step 12 pauses for the human gate, before any answer comes back).
+
 Required Step 12 preparation artifacts:
 
 - `12-gui-acceptance/12-runtime-policy-gui-workflow.json`

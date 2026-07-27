@@ -4,8 +4,41 @@ import type { MigrationTask } from "../shared/types";
 import { readJson } from "./fsUtils";
 import { nodeApiUrl, type GpuNode } from "./gpuNodes";
 
+// Real incident this closes: the Step 12 skill's own "Output" list just names
+// the field `gui_workflow_json` without pinning down its exact JSON shape or
+// nesting -- a real run wrote it as `artifacts.gui_workflow_json` (a plain
+// relative-path string), not the `gui_workflow_json.path` object this code
+// originally only checked for. Auto-push silently fell back to manual import
+// every time as a result. Same defensive-parsing philosophy used elsewhere
+// for SDK-authored JSON (never assume the SDK's shape matches exactly) --
+// try every plausible location/shape, then fall back to the one thing that
+// IS a fixed, documented convention regardless of summary-JSON shape: the
+// skill's own required evidence filename,
+// `12-gui-acceptance/12-runtime-policy-gui-workflow.json`.
 interface Step12AcceptanceSummary {
-  gui_workflow_json?: { path?: string };
+  gui_workflow_json?: string | { path?: string };
+  artifacts?: { gui_workflow_json?: string | { path?: string } };
+}
+
+const DEFAULT_GUI_WORKFLOW_RELATIVE_PATH = "12-gui-acceptance/12-runtime-policy-gui-workflow.json";
+
+function extractPath(value: string | { path?: string } | undefined): string | undefined {
+  if (typeof value === "string") return value || undefined;
+  return value?.path || undefined;
+}
+
+async function resolveGuiWorkflowRelativePath(
+  summary: Step12AcceptanceSummary,
+  taskArtifactPath: string
+): Promise<string | undefined> {
+  const candidate =
+    extractPath(summary.gui_workflow_json) ?? extractPath(summary.artifacts?.gui_workflow_json);
+  if (candidate) return candidate;
+  const exists = await fs
+    .stat(path.join(taskArtifactPath, DEFAULT_GUI_WORKFLOW_RELATIVE_PATH))
+    .then((stat) => stat.isFile())
+    .catch(() => false);
+  return exists ? DEFAULT_GUI_WORKFLOW_RELATIVE_PATH : undefined;
 }
 
 export interface GuiWorkflowSyncResult {
@@ -39,9 +72,14 @@ export async function syncGuiWorkflowToComfyUIServer(input: {
   try {
     const summaryPath = path.join(task.artifactPath, "12-gui-acceptance-summary.json");
     const summary = await readJson<Step12AcceptanceSummary>(summaryPath, {});
-    const relativeWorkflowPath = summary.gui_workflow_json?.path;
+    const relativeWorkflowPath = await resolveGuiWorkflowRelativePath(summary, task.artifactPath);
     if (!relativeWorkflowPath) {
-      return { synced: false, reason: "12-gui-acceptance-summary.json has no gui_workflow_json.path" };
+      return {
+        synced: false,
+        reason:
+          "12-gui-acceptance-summary.json has no usable gui_workflow_json pointer, and the default " +
+          `${DEFAULT_GUI_WORKFLOW_RELATIVE_PATH} is missing`
+      };
     }
 
     const localWorkflowPath = path.join(task.artifactPath, relativeWorkflowPath);

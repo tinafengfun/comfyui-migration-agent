@@ -147,7 +147,81 @@ describe("syncGuiWorkflowToComfyUIServer", () => {
 
     const result = await syncGuiWorkflowToComfyUIServer({ task, node });
     expect(result.synced).toBe(false);
-    expect(result.reason).toMatch(/no gui_workflow_json/);
+    expect(result.reason).toMatch(/no usable gui_workflow_json pointer/);
+  });
+
+  it("resolves gui_workflow_json when written as a plain string at the top level (real incident: SDK wrote it this way instead of {path})", async () => {
+    const root = path.join(process.cwd(), ".demo-state", "tests", `gui-sync-string-toplevel-${Date.now()}`);
+    const task = await makeTask(root);
+    await ensureDir(path.join(task.artifactPath, "12-gui-acceptance"));
+    await fs.writeFile(
+      path.join(task.artifactPath, "12-gui-acceptance", "12-runtime-policy-gui-workflow.json"),
+      '{"nodes":[],"links":[]}\n',
+      "utf8"
+    );
+    await writeJson(path.join(task.artifactPath, "12-gui-acceptance-summary.json"), {
+      gui_workflow_json: "12-gui-acceptance/12-runtime-policy-gui-workflow.json"
+    });
+
+    const fake = await startFakeComfyUIServer();
+    cleanup = fake.close;
+    const [host, port] = fake.url.replace("http://", "").split(":");
+    const node: GpuNode = {
+      name: "n", kind: "local", comfyui_root: "/irrelevant", venv_python: "/usr/bin/python3",
+      model_roots: [], api_host: host, api_port: Number(port)
+    };
+
+    const result = await syncGuiWorkflowToComfyUIServer({ task, node });
+    expect(result.synced).toBe(true);
+  });
+
+  it("resolves gui_workflow_json when nested under artifacts as a plain string (real incident, confirmed live in a real task run)", async () => {
+    const root = path.join(process.cwd(), ".demo-state", "tests", `gui-sync-string-nested-${Date.now()}`);
+    const task = await makeTask(root);
+    await ensureDir(path.join(task.artifactPath, "12-gui-acceptance"));
+    await fs.writeFile(
+      path.join(task.artifactPath, "12-gui-acceptance", "12-runtime-policy-gui-workflow.json"),
+      '{"nodes":[],"links":[]}\n',
+      "utf8"
+    );
+    await writeJson(path.join(task.artifactPath, "12-gui-acceptance-summary.json"), {
+      artifacts: { gui_workflow_json: "12-gui-acceptance/12-runtime-policy-gui-workflow.json" }
+    });
+
+    const fake = await startFakeComfyUIServer();
+    cleanup = fake.close;
+    const [host, port] = fake.url.replace("http://", "").split(":");
+    const node: GpuNode = {
+      name: "n", kind: "local", comfyui_root: "/irrelevant", venv_python: "/usr/bin/python3",
+      model_roots: [], api_host: host, api_port: Number(port)
+    };
+
+    const result = await syncGuiWorkflowToComfyUIServer({ task, node });
+    expect(result.synced).toBe(true);
+  });
+
+  it("falls back to the documented default filename when the summary JSON has no usable pointer at all", async () => {
+    const root = path.join(process.cwd(), ".demo-state", "tests", `gui-sync-fallback-default-${Date.now()}`);
+    const task = await makeTask(root);
+    await ensureDir(path.join(task.artifactPath, "12-gui-acceptance"));
+    await fs.writeFile(
+      path.join(task.artifactPath, "12-gui-acceptance", "12-runtime-policy-gui-workflow.json"),
+      '{"nodes":[],"links":[]}\n',
+      "utf8"
+    );
+    // No gui_workflow_json pointer anywhere in the summary.
+    await writeJson(path.join(task.artifactPath, "12-gui-acceptance-summary.json"), { status: "prepared_for_gui_acceptance" });
+
+    const fake = await startFakeComfyUIServer();
+    cleanup = fake.close;
+    const [host, port] = fake.url.replace("http://", "").split(":");
+    const node: GpuNode = {
+      name: "n", kind: "local", comfyui_root: "/irrelevant", venv_python: "/usr/bin/python3",
+      model_roots: [], api_host: host, api_port: Number(port)
+    };
+
+    const result = await syncGuiWorkflowToComfyUIServer({ task, node });
+    expect(result.synced).toBe(true);
   });
 
   it("returns synced:false without throwing when the server is unreachable", async () => {

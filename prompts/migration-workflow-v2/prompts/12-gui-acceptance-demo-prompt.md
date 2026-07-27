@@ -62,7 +62,7 @@ Create GUI acceptance artifacts with:
 - `demo_output_expectations`
 - `service_url`
 - `pid_and_log`
-- `manual_result`
+- `manual_result` — in `12-gui-acceptance-summary.json`, must be exactly `"accepted"`, `"rejected"`, `"blocked"`, or `"pending_human_run"` (see the Step 12 skill's "Output schema" section) — deterministic code archives the delivery bundle on this exact string, not on your prose.
 - `completion_decision`
 - `human_gate_prompt` when signoff is pending
 
