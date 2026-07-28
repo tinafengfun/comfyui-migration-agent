@@ -5,8 +5,9 @@ import { describe, expect, it } from "vitest";
 import type { AppConfig } from "./config";
 import { ensureDir } from "./fsUtils";
 import { MigrationOrchestrator } from "./orchestrator";
-import { preparePhase1Driver } from "./phase1Agent";
+import { preparePhase1Driver, readPhase1TaskState } from "./phase1Agent";
 import { StateStore } from "./state";
+import { getLayoutForTask } from "./taskWorkspaces";
 import { loadStepDefinitions } from "./workflowLoader";
 
 function testConfig(root: string): AppConfig {
@@ -102,6 +103,37 @@ describe("Phase 1 monolithic agent", () => {
     expect(prompt).toContain("compact ledger");
     expect(prompt).not.toContain("## Automatic compaction protocol");
     expect(await fs.readFile(prepared.phase3ExtractionPath, "utf8")).toContain("candidates");
+  });
+
+  it("rejects a modern per-step (taskStateLedger.ts) task-state.json with 'Invalid ... agent/mode', never 'was not found' (real bug: every current task's task-state.json is written by taskStateLedger.ts, which has no agent/mode fields; GET /api/tasks/:taskId/progress's readPhase1TaskStateIfPresent wrapper in index.ts only swallowed the 'was not found' message, so this exact error re-threw as an HTTP 500 for every task, always)", async () => {
+    const root = path.join(process.cwd(), ".demo-state", "tests", `phase1-modern-schema-${Date.now()}`);
+    const config = testConfig(root);
+    await ensureDir(config.workspaceRoot);
+    const store = new StateStore(config);
+    await store.initialize();
+    const steps = await loadStepDefinitions(config);
+    const orchestrator = new MigrationOrchestrator(config, store, steps);
+    const task = await orchestrator.createTask({
+      name: "Modern ledger task",
+      workflowFileName: "workflow.json",
+      workflowJson: { nodes: [], links: [] }
+    });
+
+    const taskStatePath = getLayoutForTask(task).taskStatePath;
+    await fs.writeFile(
+      taskStatePath,
+      JSON.stringify({
+        schema_version: 2,
+        generated_by: "taskStateLedger.ts",
+        task_id: task.id,
+        status: "running",
+        current_step_id: "13",
+        steps: []
+      }),
+      "utf8"
+    );
+
+    await expect(readPhase1TaskState(task)).rejects.toThrow("Invalid Phase 1 task-state.json agent/mode");
   });
 
   it("runs the Phase 1 backend runner and syncs task-state step statuses", async () => {

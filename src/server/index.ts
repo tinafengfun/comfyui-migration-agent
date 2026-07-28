@@ -843,7 +843,21 @@ async function readPhase1TaskStateIfPresent(task: MigrationTask) {
     return await readPhase1TaskState(task);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    if (message.includes("task-state.json was not found")) return undefined;
+    // Real, universally-reproducible bug this closes: every current task's
+    // task-state.json is written by taskStateLedger.ts (the per-step v2
+    // flow's own backend-owned writer -- schema_version/generated_by/steps/
+    // human_decisions), never by phase1Agent.ts's monolithic-driver mode
+    // (explicitly documented there as "separate, unreachable" from the UI).
+    // readPhase1TaskState's agent/mode validation therefore NEVER matches a
+    // real task's file -- it always throws "Invalid Phase 1 task-state.json
+    // agent/mode", which this catch previously did not recognize (it only
+    // swallowed the "not found" case), so it re-threw and every single call
+    // to GET /api/tasks/:taskId/progress 500'd, for every task, always.
+    // phase1State being absent is the CORRECT outcome for a non-Phase1 task
+    // -- same as "not found" -- so treat both the same way here.
+    if (message.includes("task-state.json was not found") || message.includes("Invalid Phase 1 task-state.json agent/mode")) {
+      return undefined;
+    }
     throw error;
   }
 }
