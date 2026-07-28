@@ -172,6 +172,87 @@ export async function verifyUrlReachable(
   });
 }
 
+// Matches both a bare HF repo URL (https://huggingface.co/owner/repo) and a
+// file-level URL (.../blob|resolve/<revision>/<path>) -- the whole point is
+// to also catch the broken case where suggestedUrl is just the repo's own
+// landing page, which a plain HTTP-status check can't distinguish from a
+// real file link (both return 200).
+const HF_URL_PATTERN =
+  /^https:\/\/(?:huggingface\.co|hf-mirror\.com)\/([^/\s]+\/[^/\s]+?)(?:\/(?:tree|blob|resolve)\/([^/\s]+)(?:\/(.+))?)?\/?(?:[?#].*)?$/;
+
+/**
+ * Confirms the requested filename actually appears in the target HF repo's
+ * own file manifest (via the /api/models/<repo> `siblings` list), instead of
+ * only checking that some URL under that repo returns HTTP 200. Real
+ * incident this closes: a suggestedUrl was just a repo's landing page
+ * (https://huggingface.co/meituan-longcat/LongCat-Video-Avatar-1.5) -- that
+ * page is a real, reachable, HTTP-200 URL, so the old HTTP-only check passed
+ * it as "✓ verified reachable" even though the repo does not contain a file
+ * named LongCat-Avatar-15_bf16.safetensors at all (only differently-shaped
+ * sharded files). The download later failed once approved, but only after a
+ * human had already trusted a misleading "verified" badge.
+ *
+ * Returns `fileConfirmed: undefined` (not false) whenever the check itself
+ * couldn't run (non-HF URL, network/API failure) -- never treat "couldn't
+ * check" as "confirmed absent."
+ */
+export async function verifyFilenameInHfManifest(
+  url: string,
+  requestedName: string,
+  env: NodeJS.ProcessEnv = process.env,
+  /** Test seam only: override where the /api/models/<repo> lookup itself is sent, independent of the huggingface.co/hf-mirror.com host the URL must still match. */
+  apiOriginOverride?: string
+): Promise<{ fileConfirmed: boolean | undefined; detail: string }> {
+  const match = HF_URL_PATTERN.exec(url.trim());
+  if (!match) return { fileConfirmed: undefined, detail: "not a recognized HuggingFace URL -- manifest check skipped" };
+  const repoId = match[1];
+  const endpoint = apiOriginOverride ?? (url.includes("hf-mirror.com") ? "https://hf-mirror.com" : "https://huggingface.co");
+
+  return new Promise((resolve) => {
+    const proc = spawn(
+      "curl",
+      ["-L", "--fail", "--silent", "--max-time", "15", "-H", "Accept: application/json", `${endpoint}/api/models/${repoId}`],
+      { env, stdio: ["ignore", "pipe", "ignore"] }
+    );
+    let output = "";
+    proc.stdout.on("data", (chunk: Buffer) => {
+      output += chunk.toString("utf8");
+    });
+    proc.on("error", (error) => {
+      resolve({ fileConfirmed: undefined, detail: `manifest lookup failed to start: ${error.message}` });
+    });
+    proc.on("close", (code) => {
+      if (code !== 0 || !output) {
+        resolve({ fileConfirmed: undefined, detail: `manifest lookup failed (curl exited ${code})` });
+        return;
+      }
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(output);
+      } catch {
+        resolve({ fileConfirmed: undefined, detail: "manifest lookup returned non-JSON response" });
+        return;
+      }
+      const siblings = (parsed as { siblings?: unknown[] })?.siblings;
+      if (!Array.isArray(siblings)) {
+        resolve({ fileConfirmed: undefined, detail: "manifest response had no siblings list" });
+        return;
+      }
+      const basename = requestedName.split("/").pop() ?? requestedName;
+      const found = siblings.some((entry) => {
+        const rfilename = (entry as { rfilename?: unknown })?.rfilename;
+        return typeof rfilename === "string" && (rfilename === requestedName || rfilename.split("/").pop() === basename);
+      });
+      resolve({
+        fileConfirmed: found,
+        detail: found
+          ? `confirmed in ${repoId}'s file manifest`
+          : `NOT found in ${repoId}'s file manifest (${siblings.length} file(s) listed)`
+      });
+    });
+  });
+}
+
 /**
  * Only worth calling for the genuinely ambiguous case: structured search
  * found something but not an exact filename match. Callers should skip this
@@ -186,6 +267,8 @@ export async function judgeFuzzyMatch(input: {
   sessionId: string;
   timeoutMs?: number;
   env?: NodeJS.ProcessEnv;
+  /** Test seam only -- see verifyFilenameInHfManifest's apiOriginOverride. */
+  hfApiOriginOverride?: string;
 }): Promise<FuzzyJudgment | undefined> {
   const prompt = buildFuzzyJudgmentPrompt({ requestedName: input.requestedName, candidates: input.candidates });
   const result = await input.runner.runFreeformSession({
@@ -197,8 +280,23 @@ export async function judgeFuzzyMatch(input: {
   if (!result.summary) return undefined;
   const judgment = parseFuzzyJudgmentResponse(result.summary, input.candidates.length);
   if (!judgment?.suggestedUrl) return judgment;
+  const env = input.env ?? process.env;
   try {
-    const { reachable, detail } = await verifyUrlReachable(judgment.suggestedUrl, input.env ?? process.env);
+    const { reachable, detail } = await verifyUrlReachable(judgment.suggestedUrl, env);
+    // The manifest check is strictly stronger evidence than raw HTTP
+    // reachability -- when it actually ran (fileConfirmed !== undefined), it
+    // decides urlVerified outright, overriding a merely-reachable page that
+    // isn't the real file. When it couldn't run (non-HF source, API
+    // hiccup), fall back to the reachability result exactly as before.
+    const manifestResult = await verifyFilenameInHfManifest(
+      judgment.suggestedUrl,
+      input.requestedName,
+      env,
+      input.hfApiOriginOverride
+    );
+    if (manifestResult.fileConfirmed !== undefined) {
+      return { ...judgment, urlVerified: manifestResult.fileConfirmed, urlVerifiedDetail: manifestResult.detail };
+    }
     return { ...judgment, urlVerified: reachable, urlVerifiedDetail: detail };
   } catch (error) {
     // Never let a flaky verification check fail the whole judgment.

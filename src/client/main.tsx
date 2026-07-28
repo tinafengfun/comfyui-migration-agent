@@ -1482,13 +1482,13 @@ function AssetUploadPanel({ event, taskId, api, onAnswer, onResolved }: {
                     {suggestion.suggestedUrl}
                   </a>
                   {suggestion.urlVerified === true && (
-                    <span className="asset-url-verified ok">✓ verified reachable ({suggestion.urlVerifiedDetail})</span>
+                    <span className="asset-url-verified ok">✓ {suggestion.urlVerifiedDetail}</span>
                   )}
                   {suggestion.urlVerified === false && (
-                    <span className="asset-url-verified fail">✗ could not verify ({suggestion.urlVerifiedDetail}) — treat with caution</span>
+                    <span className="asset-url-verified fail">✗ {suggestion.urlVerifiedDetail} — treat with caution</span>
                   )}
                   {suggestion.urlVerified === undefined && (
-                    <span className="asset-url-verified unknown">not checked for reachability</span>
+                    <span className="asset-url-verified unknown">not verified{suggestion.urlVerifiedDetail ? ` (${suggestion.urlVerifiedDetail})` : ""}</span>
                   )}
                   <button className="btn btn-sm btn-primary" onClick={() => void useSuggestedSource(item.name, suggestion.suggestedUrl!)}>
                     Use this source

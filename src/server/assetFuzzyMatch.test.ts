@@ -5,6 +5,7 @@ import {
   buildFuzzyJudgmentPrompt,
   judgeFuzzyMatch,
   parseFuzzyJudgmentResponse,
+  verifyFilenameInHfManifest,
   verifyUrlReachable,
   type FreeformSessionRunner
 } from "./assetFuzzyMatch";
@@ -222,6 +223,143 @@ describe("judgeFuzzyMatch", () => {
         expect(result?.urlVerifiedDetail).toBe("HTTP 404");
       }
     );
+  });
+
+  it("real incident: a bare HF repo landing page returns HTTP 200 (genuinely reachable) but the manifest check overrides urlVerified to false because the requested file isn't actually in that repo (meituan-longcat/LongCat-Video-Avatar-1.5 does not contain LongCat-Avatar-15_bf16.safetensors, only differently-named sharded files)", async () => {
+    await withTestServer(
+      (req, res) => {
+        if (req.url?.startsWith("/api/models/")) {
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ siblings: [{ rfilename: "base_model/diffusion_pytorch_model-00001-of-00006.safetensors" }] }));
+          return;
+        }
+        // The repo's own landing page: a real, reachable HTML page, HTTP 200.
+        res.writeHead(200, { "Content-Type": "text/html" });
+        res.end("<!doctype html><html>repo page</html>");
+      },
+      async (baseUrl) => {
+        const stubRunner: FreeformSessionRunner = {
+          async runFreeformSession(input) {
+            return {
+              sessionId: input.sessionId,
+              summary: `{"matchedCandidateIndex": null, "confidence": "medium", "reason": "name prefix match", "suggestedUrl": "https://huggingface.co/meituan-longcat/LongCat-Video-Avatar-1.5"}`
+            };
+          }
+        };
+        const result = await judgeFuzzyMatch({
+          requestedName: "LongCat-Avatar-15_bf16.safetensors",
+          candidates: [],
+          runner: stubRunner,
+          cwd: "/tmp",
+          sessionId: "s",
+          hfApiOriginOverride: baseUrl
+        });
+        expect(result?.urlVerified).toBe(false);
+        expect(result?.urlVerifiedDetail).toContain("NOT found");
+      }
+    );
+  });
+
+  it("confirms urlVerified:true via the manifest when the file genuinely is listed in the repo", async () => {
+    await withTestServer(
+      (req, res) => {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ siblings: [{ rfilename: "LongCat/LongCat-Avatar-15_bf16.safetensors" }] }));
+      },
+      async (baseUrl) => {
+        const stubRunner: FreeformSessionRunner = {
+          async runFreeformSession(input) {
+            return {
+              sessionId: input.sessionId,
+              summary: `{"matchedCandidateIndex": null, "confidence": "high", "reason": "exact filename match", "suggestedUrl": "https://huggingface.co/Kijai/WanVideo_comfy/resolve/main/LongCat/LongCat-Avatar-15_bf16.safetensors"}`
+            };
+          }
+        };
+        const result = await judgeFuzzyMatch({
+          requestedName: "LongCat-Avatar-15_bf16.safetensors",
+          candidates: [],
+          runner: stubRunner,
+          cwd: "/tmp",
+          sessionId: "s",
+          hfApiOriginOverride: baseUrl
+        });
+        expect(result?.urlVerified).toBe(true);
+        expect(result?.urlVerifiedDetail).toContain("confirmed in");
+      }
+    );
+  });
+});
+
+describe("verifyFilenameInHfManifest", () => {
+  it("returns fileConfirmed:true when the exact filename appears in the repo's siblings list", async () => {
+    await withTestServer(
+      (req, res) => {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ siblings: [{ rfilename: "model.safetensors" }, { rfilename: "README.md" }] }));
+      },
+      async (baseUrl) => {
+        const result = await verifyFilenameInHfManifest(
+          "https://huggingface.co/owner/repo",
+          "model.safetensors",
+          process.env,
+          baseUrl
+        );
+        expect(result.fileConfirmed).toBe(true);
+        expect(result.detail).toContain("confirmed in owner/repo");
+      }
+    );
+  });
+
+  it("returns fileConfirmed:false when the requested filename is absent from the manifest", async () => {
+    await withTestServer(
+      (req, res) => {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ siblings: [{ rfilename: "base_model/diffusion_pytorch_model-00001-of-00006.safetensors" }] }));
+      },
+      async (baseUrl) => {
+        const result = await verifyFilenameInHfManifest(
+          "https://huggingface.co/owner/repo",
+          "LongCat-Avatar-15_bf16.safetensors",
+          process.env,
+          baseUrl
+        );
+        expect(result.fileConfirmed).toBe(false);
+        expect(result.detail).toContain("NOT found");
+      }
+    );
+  });
+
+  it("matches by basename when the sibling entry has a subdirectory prefix the requested name doesn't include", async () => {
+    await withTestServer(
+      (req, res) => {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ siblings: [{ rfilename: "LongCat/LongCat-Avatar-15_bf16.safetensors" }] }));
+      },
+      async (baseUrl) => {
+        const result = await verifyFilenameInHfManifest(
+          "https://huggingface.co/owner/repo",
+          "LongCat-Avatar-15_bf16.safetensors",
+          process.env,
+          baseUrl
+        );
+        expect(result.fileConfirmed).toBe(true);
+      }
+    );
+  });
+
+  it("returns fileConfirmed:undefined (not false) for a non-HuggingFace URL -- never treat 'could not check' as 'confirmed absent'", async () => {
+    const result = await verifyFilenameInHfManifest("https://civitai.com/models/12345", "model.safetensors");
+    expect(result.fileConfirmed).toBeUndefined();
+  });
+
+  it("returns fileConfirmed:undefined when the manifest lookup itself fails (network error)", async () => {
+    const result = await verifyFilenameInHfManifest(
+      "https://huggingface.co/owner/repo",
+      "model.safetensors",
+      process.env,
+      "http://127.0.0.1:1" // nothing listens here
+    );
+    expect(result.fileConfirmed).toBeUndefined();
   });
 });
 
