@@ -1645,6 +1645,41 @@ function HumanInteraction({ questions, drafts, onDraftChange, onAnswer, onOpenAr
   const [uploadEventId, setUploadEventId] = useState<string>("");
   const chatEndRef = useRef<HTMLDivElement>(null);
 
+  // Guards against submitting the same human_question more than once. Real
+  // incident: a single Send click on the push/deploy gate (freeform textarea
+  // had no disabled state and never cleared after submit) landed 5 identical
+  // POSTs, which spun up 5 concurrent backend git-merge/deploy pipelines
+  // racing on the same repo. Once a given event.id starts submitting, every
+  // control tied to it is frozen until the backend either answers with a new
+  // question (a different event.id) or the submission itself fails.
+  const [submittingIds, setSubmittingIds] = useState<Record<string, boolean>>({});
+  const [submitErrors, setSubmitErrors] = useState<Record<string, string>>({});
+
+  const handleAnswer = useCallback(
+    (event: AgentEvent, answer: string, freeform: boolean) => {
+      if (submittingIds[event.id]) return;
+      setSubmittingIds((prev) => ({ ...prev, [event.id]: true }));
+      setSubmitErrors((prev) => {
+        if (!(event.id in prev)) return prev;
+        const next = { ...prev };
+        delete next[event.id];
+        return next;
+      });
+      void Promise.resolve(onAnswer(event, answer, freeform)).catch((err) => {
+        // Only a failed submission re-opens the controls -- a successful one
+        // stays frozen for this event.id permanently; the next round arrives
+        // as a brand-new question with its own id.
+        setSubmittingIds((prev) => {
+          const next = { ...prev };
+          delete next[event.id];
+          return next;
+        });
+        setSubmitErrors((prev) => ({ ...prev, [event.id]: err instanceof Error ? err.message : String(err) }));
+      });
+    },
+    [onAnswer, submittingIds]
+  );
+
   const handleFileSelect = (eventId: string) => {
     setUploadEventId(eventId);
     fileInputRef.current?.click();
@@ -1676,6 +1711,9 @@ function HumanInteraction({ questions, drafts, onDraftChange, onAnswer, onOpenAr
         const hasMissingMedia = question?.blockingReason === "missing_asset";
         const stepId = event.stepId ?? "?";
 
+        const isSubmitted = submittingIds[event.id] === true;
+        const submitError = submitErrors[event.id];
+
         // Dedicated multi-file upload panel for missing_asset gates
         if (hasMissingMedia && taskId) {
           return (
@@ -1684,7 +1722,7 @@ function HumanInteraction({ questions, drafts, onDraftChange, onAnswer, onOpenAr
               event={event}
               taskId={taskId}
               api={api}
-              onAnswer={onAnswer}
+              onAnswer={handleAnswer}
             />
           );
         }
@@ -1703,11 +1741,13 @@ function HumanInteraction({ questions, drafts, onDraftChange, onAnswer, onOpenAr
               allEvents={allEvents}
               draft={drafts[chatDraftKey] ?? ""}
               onDraftChange={(val) => onDraftChange(chatDraftKey, val)}
-              onAnswer={(answer) => onAnswer(event, answer, true)}
+              onAnswer={(answer) => handleAnswer(event, answer, true)}
               onUploadMedia={() => handleFileSelect(event.id)}
               uploadProgress={uploadProgress}
               hasMissingMedia={hasMissingMedia}
               chatEndRef={chatEndRef}
+              submitted={isSubmitted}
+              submitError={submitError}
             />
           );
         }
@@ -1739,31 +1779,48 @@ function HumanInteraction({ questions, drafts, onDraftChange, onAnswer, onOpenAr
                 Open artifact: {relPath.split("/").pop()}
               </button>
             )}
-            <div className="question-actions">
-              {(question?.choices ?? ["Approve and continue"]).map((choice) => (
-                <button key={choice} className="btn btn-primary" onClick={() => onAnswer(event, choice, false)}>
-                  {choice}
-                </button>
-              ))}
-              {hasMissingMedia && (
-                <button className="btn" onClick={() => handleFileSelect(event.id)}>
-                  Upload missing file
-                </button>
-              )}
-              {question?.allowFreeform !== false && (
-                <div className="freeform-row">
-                  <textarea
-                    rows={2}
-                    placeholder="Or type a custom answer..."
-                    value={drafts[event.id] ?? ""}
-                    onChange={(e) => onDraftChange(event.id, e.currentTarget.value)}
-                  />
-                  <button className="btn" onClick={() => onAnswer(event, drafts[event.id] ?? "", true)}>
-                    Send
+            {isSubmitted ? (
+              <p className="muted question-submitted-note">✓ Sent — waiting for the agent…</p>
+            ) : (
+              <div className="question-actions">
+                {(question?.choices ?? ["Approve and continue"]).map((choice) => (
+                  <button
+                    key={choice}
+                    className="btn btn-primary"
+                    disabled={isSubmitted}
+                    onClick={() => handleAnswer(event, choice, false)}
+                  >
+                    {choice}
                   </button>
-                </div>
-              )}
-            </div>
+                ))}
+                {hasMissingMedia && (
+                  <button className="btn" disabled={isSubmitted} onClick={() => handleFileSelect(event.id)}>
+                    Upload missing file
+                  </button>
+                )}
+                {question?.allowFreeform !== false && (
+                  <div className="freeform-row">
+                    <textarea
+                      rows={2}
+                      placeholder="Or type a custom answer..."
+                      value={drafts[event.id] ?? ""}
+                      disabled={isSubmitted}
+                      onChange={(e) => onDraftChange(event.id, e.currentTarget.value)}
+                    />
+                    <button
+                      className="btn"
+                      disabled={isSubmitted}
+                      onClick={() => handleAnswer(event, drafts[event.id] ?? "", true)}
+                    >
+                      Send
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+            {submitError && (
+              <p className="error-text question-submit-error">Failed to send: {submitError} — you can try again.</p>
+            )}
           </div>
         );
       })}
@@ -1772,7 +1829,7 @@ function HumanInteraction({ questions, drafts, onDraftChange, onAnswer, onOpenAr
 }
 
 /* ── Interactive Chat for SDK agent questions ── */
-function InteractiveChat({ event, stepId, decisions, allEvents, draft, onDraftChange, onAnswer, onUploadMedia, uploadProgress, hasMissingMedia, chatEndRef }: {
+function InteractiveChat({ event, stepId, decisions, allEvents, draft, onDraftChange, onAnswer, onUploadMedia, uploadProgress, hasMissingMedia, chatEndRef, submitted, submitError }: {
   event: AgentEvent;
   stepId: string;
   decisions: HumanDecision[];
@@ -1784,6 +1841,8 @@ function InteractiveChat({ event, stepId, decisions, allEvents, draft, onDraftCh
   uploadProgress?: number;
   hasMissingMedia: boolean;
   chatEndRef: React.RefObject<HTMLDivElement | null>;
+  submitted: boolean;
+  submitError?: string;
 }) {
   // Build multi-round conversation history from all questions + decisions for this step
   const messages = useMemo(() => {
@@ -1837,6 +1896,7 @@ function InteractiveChat({ event, stepId, decisions, allEvents, draft, onDraftCh
   }, [messages.length]);
 
   const handleSend = () => {
+    if (submitted) return;
     const text = draft.trim();
     if (!text) return;
     onAnswer(text);
@@ -1866,7 +1926,7 @@ function InteractiveChat({ event, stepId, decisions, allEvents, draft, onDraftCh
             <div className="chat-msg-time">{msg.time.slice(11, 19)}</div>
           </div>
         ))}
-        {waitingForAgent && (
+        {(waitingForAgent || submitted) && (
           <div className="chat-msg agent chat-msg-pending">
             <div className="chat-msg-role">Agent</div>
             <div className="chat-msg-text muted">Thinking… (feasibility analysis can take a minute or two)</div>
@@ -1874,12 +1934,13 @@ function InteractiveChat({ event, stepId, decisions, allEvents, draft, onDraftCh
         )}
         <div ref={chatEndRef} />
       </div>
+      {submitError && <p className="error-text question-submit-error">Failed to send: {submitError} — you can try again.</p>}
       <div className="chat-input-area">
         {hasMissingMedia && (
           <button
             className="btn chat-action-btn"
             onClick={onUploadMedia}
-            disabled={uploadProgress !== undefined}
+            disabled={uploadProgress !== undefined || submitted}
             title="Upload file"
           >
             {uploadProgress !== undefined ? `Uploading… ${uploadProgress}%` : "Attach"}
@@ -1889,12 +1950,13 @@ function InteractiveChat({ event, stepId, decisions, allEvents, draft, onDraftCh
           ref={inputRef}
           rows={2}
           className="chat-input"
-          placeholder="Type your response... (Enter to send, Shift+Enter for new line)"
+          placeholder={submitted ? "Sent — waiting for the agent…" : "Type your response... (Enter to send, Shift+Enter for new line)"}
           value={draft}
+          disabled={submitted}
           onChange={(e) => onDraftChange(e.currentTarget.value)}
           onKeyDown={handleKeyDown}
         />
-        <button className="btn btn-primary chat-send-btn" onClick={handleSend} disabled={!draft.trim()}>
+        <button className="btn btn-primary chat-send-btn" onClick={handleSend} disabled={!draft.trim() || submitted}>
           Send
         </button>
       </div>

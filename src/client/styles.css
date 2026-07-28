@@ -353,6 +353,9 @@ button, input, select, textarea { font: inherit; }
   flex: 1; border: 1px solid #d1d5db; border-radius: 6px; padding: 6px 8px;
   resize: vertical; font-size: 13px;
 }
+.freeform-row textarea:disabled { background: #f3f4f6; cursor: not-allowed; }
+.question-submitted-note { font-weight: 600; color: #059669; }
+.question-submit-error, .error-text { color: #dc2626; font-size: 13px; margin: 6px 0 0; }
 
 /* ── Interactive Chat ── */
 .chat-container {
