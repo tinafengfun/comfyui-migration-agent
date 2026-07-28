@@ -969,4 +969,85 @@ describe("asset acquisition job", () => {
 
     expect(discoverCalls).toBe(0);
   });
+
+  it("places downloaded assets in a category subdirectory instead of scattering them loose at the model root (real incident: LongCat-Avatar-15_bf16.safetensors, umt5-xxl-enc-bf16.safetensors, and whisper_large_v3_encoder_fp16.safetensors all matched no keyword and fell through to targetSubdir's old '' fallback, landing directly at /nfs_share's top level alongside the real checkpoints/loras/vae/etc. subdirectories)", async () => {
+    const root = path.join(process.cwd(), ".demo-state", "tests", `asset-acquisition-subdir-${Date.now()}`);
+    const artifactPath = path.join(root, "artifacts");
+    await ensureDir(artifactPath);
+    const task: MigrationTask = {
+      id: "task-asset-acquisition-subdir",
+      name: "Asset acquisition subdir",
+      status: "waiting_for_human",
+      workflowPath: path.join(root, "workflow.json"),
+      workspacePath: root,
+      artifactPath,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      steps: [{ id: "01", status: "waiting_for_human" }]
+    };
+    await fs.writeFile(
+      path.join(artifactPath, "01-assets.csv"),
+      [
+        "asset_name,requested_name,resolved_path,source,state,staged_path,custom_node_repo,custom_node_cache_path,wrapper_source_evidence,commit,install_status,acquisition_status,mirror_used,credential_recorded,gap",
+        '"LongCat-Avatar-15_bf16.safetensors","LongCat-Avatar-15_bf16.safetensors","","not found","source unknown","","","","8:WanVideoModelLoader","","missing","requires human approval/source","none","false","source-identical asset not staged"',
+        '"umt5-xxl-enc-bf16.safetensors","umt5-xxl-enc-bf16.safetensors","","not found","source unknown","","","","3:WanVideoTextEncode","","missing","requires human approval/source","none","false","source-identical asset not staged"',
+        '"whisper_large_v3_encoder_fp16.safetensors","whisper_large_v3_encoder_fp16.safetensors","","not found","source unknown","","","","9:WhisperModelLoader","","missing","requires human approval/source","none","false","source-identical asset not staged"',
+        ""
+      ].join("\n"),
+      "utf8"
+    );
+
+    const result = await ensureAssetAcquisitionJob({
+      task,
+      modelRoots: [path.join(root, "models")],
+      comfyuiRoot: path.join(root, "ComfyUI"),
+      humanContext: "",
+      redactedHumanContext: "",
+      sourceSearch: async () => ({
+        config: {
+          profileName: "test",
+          enableNetworkSearch: false,
+          allowInsecureTls: false,
+          requestTimeoutSeconds: 1,
+          maxResultsPerProvider: 1,
+          huggingFaceEndpoint: "https://huggingface.co",
+          modelScopeEndpoint: "https://modelscope.cn",
+          hasHuggingFaceToken: false,
+          hasCivitaiToken: false,
+          hasGitHubToken: false,
+          proxyConfigured: false,
+          enableDownload: false,
+          explicitHuggingFaceFiles: [],
+          huggingFaceFallbackEndpoints: [],
+          tokenEnvNames: { huggingface: [], civitai: [], github: [] },
+          proxyEnvNames: [],
+          hfCliAvailable: false
+        },
+        issues: [],
+        candidates: []
+      })
+    });
+
+    const job = JSON.parse(await fs.readFile(result.jobPath, "utf8")) as {
+      items: Array<{ assetName: string; targetPath: string }>;
+    };
+    const targetPathFor = (assetName: string) => {
+      const item = job.items.find((i) => i.assetName === assetName);
+      expect(item?.targetPath).toBeDefined();
+      return item!.targetPath;
+    };
+    // WanVideoModelLoader doesn't match any specific keyword -- falls back to
+    // diffusion_models rather than the model root's top level.
+    expect(targetPathFor("LongCat-Avatar-15_bf16.safetensors")).toBe(
+      path.join(root, "models", "diffusion_models", "LongCat-Avatar-15_bf16.safetensors")
+    );
+    // No evidence/name keyword matches except the new "umt5" name check -> text_encoders.
+    expect(targetPathFor("umt5-xxl-enc-bf16.safetensors")).toBe(
+      path.join(root, "models", "text_encoders", "umt5-xxl-enc-bf16.safetensors")
+    );
+    // No keyword in the evidence, but the filename itself contains "encoder".
+    expect(targetPathFor("whisper_large_v3_encoder_fp16.safetensors")).toBe(
+      path.join(root, "models", "text_encoders", "whisper_large_v3_encoder_fp16.safetensors")
+    );
+  });
 });

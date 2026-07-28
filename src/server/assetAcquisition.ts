@@ -1296,10 +1296,18 @@ function targetSubdir(row: AssetRow): string {
   if (evidence.includes("upscalemodelloader") || name.includes("ultrasharp")) return "upscale_models";
   if (evidence.includes("lora") || name.includes("lora")) return "loras";
   if (evidence.includes("vae") || name.includes("vae") || name === "ae.safetensors") return "vae";
-  if (evidence.includes("clip") || name.includes("qwen")) return "text_encoders";
+  if (evidence.includes("clip") || name.includes("qwen") || name.includes("umt5") || name.includes("encoder")) return "text_encoders";
   if (evidence.includes("seedvr2") || name.includes("seedvr2")) return "SEEDVR2";
   if (evidence.includes("unet") || name.includes("z_image")) return "diffusion_models";
-  return "";
+  // Real incident: LongCat-Avatar-15_bf16.safetensors, umt5-xxl-enc-bf16.safetensors,
+  // and whisper_large_v3_encoder_fp16.safetensors all matched none of the keywords
+  // above and fell through to "" -- path.join(modelRoot, "", filename) then places
+  // the file directly at the model root's top level instead of any category
+  // folder, scattering downloaded assets loose alongside the real checkpoints/,
+  // loras/, vae/, etc. subdirectories. Default to diffusion_models (matching
+  // assetSourceRegistry.ts's own fallback for the same "unknown model kind" case)
+  // instead of no subdirectory at all.
+  return "diffusion_models";
 }
 
 async function indexFilesByBasename(roots: string[]): Promise<Map<string, string[]>> {
