@@ -5,7 +5,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import type { SubJob, SubJobProgress, SubJobStatus } from "../shared/types";
 import type { MigrationTask } from "../shared/types";
-import { isAssetDownloadEnabled, sourceProviderEnv } from "./assetSourceProviders";
+import { buildSourceProviderConfig, isAssetDownloadEnabled, sourceProviderEnv, withDownloadCommand, type SourceProvider } from "./assetSourceProviders";
 import { markAssetResolvedAndReevaluateGate } from "./assetReplacement";
 
 interface AcquisitionCandidate {
@@ -150,11 +150,19 @@ export class SubJobManager {
    * provider search — specifically, Step 01's own LLM fuzzy-match judgment
    * (fuzzyJudgment.suggestedUrl in 01-acquisition-job.json), surfaced in the
    * web UI's missing-asset panel and confirmed by a person clicking "Use
-   * this source". Builds one synthetic candidate with the same curl
-   * download-command shape the provider-search path already produces (see
-   * withDownloadCommand in assetSourceProviders.ts) so it runs through the
-   * exact same execution/progress/validation logic as any other sub-job —
-   * no duplicated download machinery, only the URL->candidate wrapping is new.
+   * this source". Builds one synthetic candidate through withDownloadCommand
+   * (assetSourceProviders.ts) so it runs through the exact same
+   * execution/progress/validation logic AND the same hf-cli-vs-curl
+   * selection as the structured provider-search path — no duplicated
+   * download machinery, only the URL->candidate wrapping is new.
+   *
+   * Real incident this closes: a 29.5GB suggested-url download died at 42%
+   * with "HTTP/2 stream 1 was not closed cleanly: CANCEL" after ~20 minutes
+   * on a single long-lived curl connection through this project's corporate
+   * proxy. This path previously always used the bespoke, curl-only
+   * buildSuggestedUrlDownloadCommand regardless of whether the URL was a
+   * HuggingFace file (where `hf download`'s chunked/resumable transfer is
+   * both faster and far less likely to drop a single multi-hour stream).
    */
   async startSubJobForSuggestedUrl(task: MigrationTask, assetName: string, url: string): Promise<SubJob> {
     this.assertDownloadEnabled();
@@ -164,11 +172,31 @@ export class SubJobManager {
     const item = (acquisition.items ?? []).find((entry) => entry.assetName === assetName);
     if (!item) throw new Error(`No acquisition item found for asset: ${assetName}`);
     if (!item.targetPath) throw new Error(`No target path recorded for asset: ${assetName}`);
+    const provider: SourceProvider = /(^|\.)huggingface\.co$|(^|\.)hf-mirror\.com$/i.test(new URL(url).hostname)
+      ? "huggingface"
+      : /(^|\.)civitai\.com$/i.test(new URL(url).hostname)
+        ? "civitai"
+        : "github";
+    const withCommand = withDownloadCommand(
+      {
+        provider,
+        title: `Human-approved suggested source for ${assetName}`,
+        url,
+        downloadUrl: url,
+        score: 0,
+        requiresToken: false,
+        notes: ""
+      },
+      { query: assetName, kind: "model", targetPath: item.targetPath },
+      buildSourceProviderConfig()
+    );
     const candidate: AcquisitionCandidate = {
       provider: "suggested-url",
       title: `Human-approved suggested source for ${assetName}`,
       url,
-      downloadCommand: buildSuggestedUrlDownloadCommand(url, item.targetPath)
+      downloadCommand: withCommand.downloadCommand,
+      postDownloadMoveFrom: withCommand.postDownloadMoveFrom,
+      hfCliScratchDir: withCommand.hfCliScratchDir
     };
     return this.startDownload(task, subJobIdForAsset(assetName), item, [candidate]);
   }
@@ -444,37 +472,6 @@ async function contentLengthFromCurl(args: string[], env: NodeJS.ProcessEnv): Pr
       resolve(last ? Number(last) : undefined);
     });
   });
-}
-
-/**
- * Same curl flag shape as withDownloadCommand in assetSourceProviders.ts
- * (retry/timeout/resume behavior), minus the provider-specific auth headers
- * (a human-approved suggested URL isn't tied to a specific provider search
- * result) and the --proxy/--insecure flags (curl already honors HTTPS_PROXY/
- * HTTP_PROXY from the inherited env without an explicit flag; this deployment
- * doesn't rely on the distinct ASSET_DOWNLOAD_PROXY name that flag exists for).
- */
-function buildSuggestedUrlDownloadCommand(url: string, targetPath: string): string[] {
-  return [
-    "curl",
-    "-L",
-    "--fail",
-    "--retry",
-    "10",
-    "--retry-delay",
-    "10",
-    "--connect-timeout",
-    "30",
-    "--speed-time",
-    "180",
-    "--speed-limit",
-    "1024",
-    "--continue-at",
-    "-",
-    "--output",
-    targetPath,
-    url
-  ];
 }
 
 function substituteEnvPlaceholders(value: string, env: NodeJS.ProcessEnv): string {

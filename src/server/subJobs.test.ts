@@ -560,6 +560,91 @@ describe("sub job manager", () => {
     }
   });
 
+  it("startSubJobForSuggestedUrl uses the hf-cli fast path for a HuggingFace suggested URL, not the bespoke curl-only builder (real incident: a 29.5GB suggested-url download died mid-transfer with a dropped HTTP/2 stream after ~20 minutes on a single curl connection)", async () => {
+    process.env.ASSET_ACQUISITION_ENABLE_DOWNLOAD = "1";
+    process.env.MIGRATION_AGENT_ASSET_DOWNLOAD_HF_CLI = "1";
+    const root = path.join(process.cwd(), ".demo-state", "tests", `subjobs-suggested-hf-cli-${Date.now()}`);
+    const artifactPath = path.join(root, "artifacts");
+    const targetPath = path.join(root, "models", "suggested-hf.safetensors");
+    const scratchMarker = path.join(root, "hf-cli-invoked");
+    await ensureDir(artifactPath);
+
+    // Fake `hf` CLI on PATH -- proves the suggested-url path actually chose
+    // the hf-cli command (not curl) by recording that it ran and placing the
+    // file exactly where withDownloadCommand's postDownloadMoveFrom expects.
+    const fakeBinDir = path.join(root, "fake-bin");
+    await ensureDir(fakeBinDir);
+    await fs.writeFile(
+      path.join(fakeBinDir, "hf"),
+      [
+        "#!/bin/bash",
+        "set -e",
+        `echo invoked > "${scratchMarker}"`,
+        'localdir=""',
+        'args=("$@")',
+        "for ((i=0; i<${#args[@]}; i++)); do",
+        '  if [ "${args[$i]}" = "--local-dir" ]; then localdir="${args[$((i+1))]}"; fi',
+        "done",
+        'filename="${args[2]}"',
+        'mkdir -p "$(dirname "$localdir/$filename")"',
+        'printf "hf-cli-fake-content" > "$localdir/$filename"',
+        "exit 0"
+      ].join("\n"),
+      { mode: 0o755 }
+    );
+    const originalPath = process.env.PATH;
+    process.env.PATH = `${fakeBinDir}:${originalPath}`;
+
+    try {
+      const task: MigrationTask = {
+        id: "task-subjobs-suggested-hf-cli",
+        name: "Subjobs suggested hf-cli",
+        status: "waiting_for_human",
+        workflowPath: path.join(root, "workflow.json"),
+        workspacePath: root,
+        artifactPath,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        steps: [{ id: "01", status: "waiting_for_human" }]
+      };
+      await fs.writeFile(
+        path.join(artifactPath, "01-acquisition-job.json"),
+        JSON.stringify(
+          {
+            status: "waiting_for_secure_download",
+            items: [{ assetName: "suggested-hf.safetensors", status: "pending_secure_download", targetPath }],
+            customNodeItems: []
+          },
+          null,
+          2
+        ),
+        "utf8"
+      );
+      await fs.writeFile(
+        path.join(artifactPath, "01-assets.csv"),
+        "asset_name,requested_name,resolved_path,source,state,staged_path,custom_node_repo,custom_node_cache_path,wrapper_source_evidence,commit,install_status,acquisition_status,mirror_used,credential_recorded,gap\n" +
+          '"suggested-hf.safetensors","suggested-hf.safetensors","","","source unknown","","","","","","missing","unresolved","none","false","not staged"\n',
+        "utf8"
+      );
+
+      const manager = new SubJobManager();
+      const started = await manager.startSubJobForSuggestedUrl(
+        task,
+        "suggested-hf.safetensors",
+        "https://huggingface.co/owner/repo/resolve/main/suggested-hf.safetensors"
+      );
+      expect(started.status).toBe("running");
+
+      const completed = await waitForSubJobStatus(manager, task, started.id, "completed");
+      expect(completed.error).toBeUndefined();
+      expect(await fs.readFile(scratchMarker, "utf8")).toContain("invoked");
+      expect(await fs.readFile(targetPath, "utf8")).toBe("hf-cli-fake-content");
+    } finally {
+      process.env.PATH = originalPath;
+      delete process.env.MIGRATION_AGENT_ASSET_DOWNLOAD_HF_CLI;
+    }
+  });
+
   it("startSubJobForSuggestedUrl rejects a non-http(s) URL without touching the download-enabled gate", async () => {
     process.env.ASSET_ACQUISITION_ENABLE_DOWNLOAD = "1";
     const root = path.join(process.cwd(), ".demo-state", "tests", `subjobs-suggested-bad-url-${Date.now()}`);
