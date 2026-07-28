@@ -172,13 +172,14 @@ export async function verifyUrlReachable(
   });
 }
 
-// Matches both a bare HF repo URL (https://huggingface.co/owner/repo) and a
-// file-level URL (.../blob|resolve/<revision>/<path>) -- the whole point is
-// to also catch the broken case where suggestedUrl is just the repo's own
+// Matches the PATH of both a bare HF repo URL (owner/repo) and a file-level
+// URL (owner/repo/blob|resolve/<revision>/<path>) -- the whole point is to
+// also catch the broken case where suggestedUrl is just the repo's own
 // landing page, which a plain HTTP-status check can't distinguish from a
-// real file link (both return 200).
-const HF_URL_PATTERN =
-  /^https:\/\/(?:huggingface\.co|hf-mirror\.com)\/([^/\s]+\/[^/\s]+?)(?:\/(?:tree|blob|resolve)\/([^/\s]+)(?:\/(.+))?)?\/?(?:[?#].*)?$/;
+// real file link (both return 200). Host is checked separately (see
+// verifyFilenameInHfManifest) so a test can point apiOriginOverride at a
+// local mock server without needing a real huggingface.co URL.
+const HF_PATH_PATTERN = /^([^/\s]+\/[^/\s]+?)(?:\/(?:tree|blob|resolve)\/([^/\s]+)(?:\/(.+))?)?\/?(?:[?#].*)?$/;
 
 /**
  * Confirms the requested filename actually appears in the target HF repo's
@@ -203,10 +204,20 @@ export async function verifyFilenameInHfManifest(
   /** Test seam only: override where the /api/models/<repo> lookup itself is sent, independent of the huggingface.co/hf-mirror.com host the URL must still match. */
   apiOriginOverride?: string
 ): Promise<{ fileConfirmed: boolean | undefined; detail: string }> {
-  const match = HF_URL_PATTERN.exec(url.trim());
+  let parsedUrl: URL;
+  try {
+    parsedUrl = new URL(url.trim());
+  } catch {
+    return { fileConfirmed: undefined, detail: "not a valid URL -- manifest check skipped" };
+  }
+  const isRealHfHost = parsedUrl.hostname === "huggingface.co" || parsedUrl.hostname === "hf-mirror.com";
+  if (!isRealHfHost && !apiOriginOverride) {
+    return { fileConfirmed: undefined, detail: "not a recognized HuggingFace URL -- manifest check skipped" };
+  }
+  const match = HF_PATH_PATTERN.exec(parsedUrl.pathname.replace(/^\//, ""));
   if (!match) return { fileConfirmed: undefined, detail: "not a recognized HuggingFace URL -- manifest check skipped" };
   const repoId = match[1];
-  const endpoint = apiOriginOverride ?? (url.includes("hf-mirror.com") ? "https://hf-mirror.com" : "https://huggingface.co");
+  const endpoint = apiOriginOverride ?? (parsedUrl.hostname === "hf-mirror.com" ? "https://hf-mirror.com" : "https://huggingface.co");
 
   return new Promise((resolve) => {
     const proc = spawn(

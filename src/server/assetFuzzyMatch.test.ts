@@ -242,7 +242,7 @@ describe("judgeFuzzyMatch", () => {
           async runFreeformSession(input) {
             return {
               sessionId: input.sessionId,
-              summary: `{"matchedCandidateIndex": null, "confidence": "medium", "reason": "name prefix match", "suggestedUrl": "https://huggingface.co/meituan-longcat/LongCat-Video-Avatar-1.5"}`
+              summary: `{"matchedCandidateIndex": null, "confidence": "medium", "reason": "name prefix match", "suggestedUrl": "${baseUrl}/meituan-longcat/LongCat-Video-Avatar-1.5"}`
             };
           }
         };
@@ -271,7 +271,7 @@ describe("judgeFuzzyMatch", () => {
           async runFreeformSession(input) {
             return {
               sessionId: input.sessionId,
-              summary: `{"matchedCandidateIndex": null, "confidence": "high", "reason": "exact filename match", "suggestedUrl": "https://huggingface.co/Kijai/WanVideo_comfy/resolve/main/LongCat/LongCat-Avatar-15_bf16.safetensors"}`
+              summary: `{"matchedCandidateIndex": null, "confidence": "high", "reason": "exact filename match", "suggestedUrl": "${baseUrl}/Kijai/WanVideo_comfy/resolve/main/LongCat/LongCat-Avatar-15_bf16.safetensors"}`
             };
           }
         };
