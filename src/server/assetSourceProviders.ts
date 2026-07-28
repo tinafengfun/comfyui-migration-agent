@@ -1,6 +1,8 @@
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import fs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
@@ -62,6 +64,15 @@ export interface AssetSourceCandidate {
   requiresToken: boolean;
   notes: string;
   downloadCommand?: string[];
+  /**
+   * Set only for the `hf download` fast path (see withDownloadCommand):
+   * `hf download <repo> <path-in-repo>` always places the file under
+   * `--local-dir/<path-in-repo>`, never at an exact caller-chosen path, so
+   * the executor (subJobs.ts) must move it from here to the real target
+   * path after a successful run, then remove hfCliScratchDir.
+   */
+  postDownloadMoveFrom?: string;
+  hfCliScratchDir?: string;
 }
 
 export interface ProviderSearchIssue {
@@ -92,6 +103,53 @@ export interface SourceProviderConfig {
     github: string[];
   };
   proxyEnvNames: string[];
+  /** Whether this host has a working `hf` CLI -- see hfCliAvailableSync. */
+  hfCliAvailable: boolean;
+}
+
+let cachedHfCliAvailable: boolean | undefined;
+
+/**
+ * Detects a working `hf` CLI (huggingface_hub's official downloader) once
+ * per process and caches the result -- `execFileSync` is cheap (a few ms)
+ * but there's no reason to re-spawn it on every config build. Measured live:
+ * for a real 1.26 GB HF file through this project's corporate proxy, `hf
+ * download` (Xet/hf_transfer-accelerated) finished in ~46s vs. plain curl
+ * not even finishing the same 90s window (~580MB transferred, ~4x slower)
+ * -- the motivation for preferring it over curl when available.
+ *
+ * `MIGRATION_AGENT_ASSET_DOWNLOAD_HF_CLI` ("0"/"1") forces the answer,
+ * mainly so tests can exercise both the fast-path and curl-fallback logic
+ * deterministically without depending on whether `hf` happens to be
+ * installed wherever tests run.
+ */
+export function hfCliAvailableSync(env: NodeJS.ProcessEnv = process.env): boolean {
+  const override = env.MIGRATION_AGENT_ASSET_DOWNLOAD_HF_CLI;
+  if (override === "0") return false;
+  if (override === "1") return true;
+  if (cachedHfCliAvailable !== undefined) return cachedHfCliAvailable;
+  try {
+    execFileSync("hf", ["version"], { stdio: "ignore", timeout: 5000 });
+    cachedHfCliAvailable = true;
+  } catch {
+    cachedHfCliAvailable = false;
+  }
+  return cachedHfCliAvailable;
+}
+
+/**
+ * Parses a HuggingFace file URL (blob or resolve form) into the pieces `hf
+ * download <repo_id> <filenames...>` needs. Returns undefined for anything
+ * that isn't a concrete file URL (e.g. a bare repo landing page) -- the hf
+ * CLI fast path only applies when we already have an exact file path to ask
+ * for, same precondition the curl path already required via downloadUrl.
+ */
+export function parseHfFileUrl(url: string): { repoId: string; revision: string; pathInRepo: string } | undefined {
+  const match = /^https:\/\/(?:huggingface\.co|hf-mirror\.com)\/([^/\s]+\/[^/\s]+)\/(?:blob|resolve)\/([^/\s]+)\/(.+?)(?:[?#].*)?$/.exec(
+    url.trim()
+  );
+  if (!match) return undefined;
+  return { repoId: match[1], revision: match[2], pathInRepo: decodeURIComponent(match[3]) };
 }
 
 export interface HuggingFaceFileSource {
@@ -152,7 +210,20 @@ export function buildSourceProviderConfig(env: NodeJS.ProcessEnv = process.env):
       civitai: [...civitaiTokenEnvNames],
       github: [...githubTokenEnvNames]
     },
-    proxyEnvNames: [...proxyEnvNames]
+    proxyEnvNames: [...proxyEnvNames],
+    // Same test-safety intent as enableNetworkSearch above: never let a real
+    // subprocess capability probe make test behavior depend on whether `hf`
+    // happens to be installed on whatever machine runs the suite. Checked
+    // against the REAL process env (process.env.VITEST), not the `env`
+    // argument a test passes in -- several existing tests deliberately set
+    // NODE_ENV to something other than "test" in their own literal config
+    // to exercise enableNetworkSearch's production behavior, which must not
+    // also silently opt them into real hf-cli detection.
+    hfCliAvailable:
+      effectiveEnv.MIGRATION_AGENT_ASSET_DOWNLOAD_HF_CLI === "1" ||
+      (effectiveEnv.MIGRATION_AGENT_ASSET_DOWNLOAD_HF_CLI !== "0" &&
+        process.env.VITEST !== "true" &&
+        hfCliAvailableSync(effectiveEnv))
   };
 }
 
@@ -641,7 +712,56 @@ async function curlJson(url: string, provider: SourceProvider, config: SourcePro
   return JSON.parse(stdout) as unknown;
 }
 
+/**
+ * Chooses between the `hf` CLI fast path (Xet/hf_transfer-accelerated,
+ * huggingface_hub's own downloader -- see hfCliAvailableSync's docstring for
+ * the measured ~4x speedup) and the curl path every other provider uses.
+ * Only applies to HuggingFace candidates with a concrete file URL (a bare
+ * repo landing page has nothing for `hf download` to name) on a host where
+ * the CLI is actually available; everything else falls straight back to
+ * curl exactly as before this fast path existed.
+ */
 export function withDownloadCommand(
+  candidate: AssetSourceCandidate,
+  input: SearchInput,
+  config: SourceProviderConfig
+): AssetSourceCandidate {
+  if (!candidate.downloadUrl || !input.targetPath) return candidate;
+  if (candidate.provider === "huggingface" && config.hfCliAvailable) {
+    const parsed = parseHfFileUrl(candidate.downloadUrl);
+    if (parsed) return withHfCliDownloadCommand(candidate, input, config, parsed);
+  }
+  return withCurlDownloadCommand(candidate, input, config);
+}
+
+function withHfCliDownloadCommand(
+  candidate: AssetSourceCandidate,
+  input: SearchInput,
+  config: SourceProviderConfig,
+  parsed: { repoId: string; revision: string; pathInRepo: string }
+): AssetSourceCandidate {
+  const scratchDir = path.join(os.tmpdir(), `asset-dl-${randomUUID()}`);
+  return {
+    ...candidate,
+    downloadCommand: [
+      "hf",
+      "download",
+      parsed.repoId,
+      parsed.pathInRepo,
+      "--revision",
+      parsed.revision,
+      "--local-dir",
+      scratchDir,
+      "--quiet",
+      ...(config.hasHuggingFaceToken ? ["--token", "${HF_TOKEN}"] : [])
+    ],
+    hfCliScratchDir: scratchDir,
+    postDownloadMoveFrom: path.join(scratchDir, parsed.pathInRepo),
+    notes: `${candidate.notes} Uses \`hf download\` (huggingface_hub's own downloader, Xet/hf_transfer-accelerated when available) instead of curl; honors HTTPS_PROXY/HTTP_PROXY like curl does.`
+  };
+}
+
+function withCurlDownloadCommand(
   candidate: AssetSourceCandidate,
   input: SearchInput,
   config: SourceProviderConfig

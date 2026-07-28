@@ -102,7 +102,8 @@ describe("asset acquisition job", () => {
             civitai: ["CIVITAI_TOKEN"],
             github: ["GITHUB_TOKEN"]
           },
-          proxyEnvNames: ["ASSET_DOWNLOAD_PROXY"]
+          proxyEnvNames: ["ASSET_DOWNLOAD_PROXY"],
+          hfCliAvailable: false
         },
         issues: [],
         candidates: [
@@ -210,7 +211,8 @@ describe("asset acquisition job", () => {
             civitai: ["CIVITAI_TOKEN"],
             github: ["GITHUB_TOKEN"]
           },
-          proxyEnvNames: ["ASSET_DOWNLOAD_PROXY"]
+          proxyEnvNames: ["ASSET_DOWNLOAD_PROXY"],
+          hfCliAvailable: false
         },
         issues: [],
         candidates: []
@@ -294,7 +296,8 @@ describe("asset acquisition job", () => {
             civitai: ["CIVITAI_TOKEN"],
             github: ["GITHUB_TOKEN"]
           },
-          proxyEnvNames: ["ASSET_DOWNLOAD_PROXY"]
+          proxyEnvNames: ["ASSET_DOWNLOAD_PROXY"],
+          hfCliAvailable: false
         },
         issues: [],
         candidates: []
@@ -535,7 +538,8 @@ describe("asset acquisition job", () => {
             explicitHuggingFaceFiles: [],
             huggingFaceFallbackEndpoints: [],
             tokenEnvNames: { huggingface: [], civitai: [], github: [] },
-            proxyEnvNames: []
+            proxyEnvNames: [],
+            hfCliAvailable: false
           },
           issues: [],
           candidates: []
@@ -611,7 +615,8 @@ describe("asset acquisition job", () => {
           explicitHuggingFaceFiles: [],
           huggingFaceFallbackEndpoints: [],
           tokenEnvNames: { huggingface: [], civitai: [], github: [] },
-          proxyEnvNames: []
+          proxyEnvNames: [],
+          hfCliAvailable: false
         },
         issues: [],
         candidates: []
@@ -719,7 +724,8 @@ describe("asset acquisition job", () => {
           explicitHuggingFaceFiles: [],
           huggingFaceFallbackEndpoints: [],
           tokenEnvNames: { huggingface: [], civitai: [], github: [] },
-          proxyEnvNames: []
+          proxyEnvNames: [],
+          hfCliAvailable: false
         },
         issues: [],
         candidates: []
@@ -834,7 +840,8 @@ describe("asset acquisition job", () => {
           explicitHuggingFaceFiles: [],
           huggingFaceFallbackEndpoints: [],
           tokenEnvNames: { huggingface: [], civitai: [], github: [] },
-          proxyEnvNames: []
+          proxyEnvNames: [],
+          hfCliAvailable: false
         },
         issues: [],
         candidates: []
@@ -948,7 +955,8 @@ describe("asset acquisition job", () => {
           explicitHuggingFaceFiles: [],
           huggingFaceFallbackEndpoints: [],
           tokenEnvNames: { huggingface: [], civitai: [], github: [] },
-          proxyEnvNames: []
+          proxyEnvNames: [],
+          hfCliAvailable: false
         },
         issues: [],
         candidates: []

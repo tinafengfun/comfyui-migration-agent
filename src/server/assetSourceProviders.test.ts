@@ -6,7 +6,9 @@ import {
   buildSourceProviderConfig,
   executeCandidateDownload,
   extractHuggingFaceFileSources,
+  parseHfFileUrl,
   searchAssetSourceProviders,
+  withDownloadCommand,
   type AssetSourceCandidate,
   type SourceProvider
 } from "./assetSourceProviders";
@@ -281,5 +283,86 @@ describe("asset source providers", () => {
     } finally {
       await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
     }
+  });
+});
+
+describe("parseHfFileUrl", () => {
+  it("extracts repoId, revision, and pathInRepo from a resolve URL", () => {
+    expect(parseHfFileUrl("https://huggingface.co/Kijai/WanVideo_comfy/resolve/main/LongCat/LongCat-Avatar-15_bf16.safetensors")).toEqual({
+      repoId: "Kijai/WanVideo_comfy",
+      revision: "main",
+      pathInRepo: "LongCat/LongCat-Avatar-15_bf16.safetensors"
+    });
+  });
+
+  it("also matches a blob URL and an hf-mirror.com host", () => {
+    expect(parseHfFileUrl("https://hf-mirror.com/owner/repo/blob/v1.0/sub/file.safetensors")).toEqual({
+      repoId: "owner/repo",
+      revision: "v1.0",
+      pathInRepo: "sub/file.safetensors"
+    });
+  });
+
+  it("returns undefined for a bare repo landing page (no file to name -- the exact broken shape from the real incident)", () => {
+    expect(parseHfFileUrl("https://huggingface.co/meituan-longcat/LongCat-Video-Avatar-1.5")).toBeUndefined();
+  });
+});
+
+describe("withDownloadCommand hf-cli fast path", () => {
+  function hfCandidate(overrides: Partial<AssetSourceCandidate> = {}): AssetSourceCandidate {
+    return {
+      provider: "huggingface",
+      title: "Kijai/WanVideo_comfy",
+      url: "https://huggingface.co/Kijai/WanVideo_comfy",
+      downloadUrl: "https://huggingface.co/Kijai/WanVideo_comfy/resolve/main/LongCat/LongCat-Avatar-15_bf16.safetensors",
+      score: 10,
+      requiresToken: false,
+      notes: "",
+      ...overrides
+    };
+  }
+
+  it("builds an `hf download` command with a scratch dir and postDownloadMoveFrom when the CLI is available", () => {
+    const config = { ...buildSourceProviderConfig({}), hfCliAvailable: true, hasHuggingFaceToken: false };
+    const result = withDownloadCommand(hfCandidate(), { query: "x", kind: "model", targetPath: "/models/out.safetensors" }, config);
+
+    expect(result.downloadCommand?.[0]).toBe("hf");
+    expect(result.downloadCommand).toContain("Kijai/WanVideo_comfy");
+    expect(result.downloadCommand).toContain("LongCat/LongCat-Avatar-15_bf16.safetensors");
+    expect(result.hfCliScratchDir).toBeTruthy();
+    expect(result.postDownloadMoveFrom).toBe(`${result.hfCliScratchDir}/LongCat/LongCat-Avatar-15_bf16.safetensors`);
+  });
+
+  it("includes --token when an HF token is configured", () => {
+    const config = { ...buildSourceProviderConfig({}), hfCliAvailable: true, hasHuggingFaceToken: true };
+    const result = withDownloadCommand(hfCandidate(), { query: "x", kind: "model", targetPath: "/models/out.safetensors" }, config);
+    expect(result.downloadCommand).toContain("--token");
+  });
+
+  it("falls back to curl when the CLI is not available, even for a HuggingFace candidate", () => {
+    const config = { ...buildSourceProviderConfig({}), hfCliAvailable: false };
+    const result = withDownloadCommand(hfCandidate(), { query: "x", kind: "model", targetPath: "/models/out.safetensors" }, config);
+    expect(result.downloadCommand?.[0]).toBe("curl");
+    expect(result.hfCliScratchDir).toBeUndefined();
+  });
+
+  it("falls back to curl when the URL is a bare repo landing page, even with the CLI available (nothing for `hf download` to name)", () => {
+    const config = { ...buildSourceProviderConfig({}), hfCliAvailable: true };
+    const result = withDownloadCommand(
+      hfCandidate({ downloadUrl: "https://huggingface.co/meituan-longcat/LongCat-Video-Avatar-1.5" }),
+      { query: "x", kind: "model", targetPath: "/models/out.safetensors" },
+      config
+    );
+    expect(result.downloadCommand?.[0]).toBe("curl");
+  });
+
+  it("never uses the hf-cli fast path for a non-HuggingFace provider", () => {
+    const config = { ...buildSourceProviderConfig({}), hfCliAvailable: true };
+    const result = withDownloadCommand(
+      hfCandidate({ provider: "civitai", downloadUrl: "https://civitai.com/api/download/models/123" }),
+      { query: "x", kind: "model", targetPath: "/models/out.safetensors" },
+      config
+    );
+    expect(result.downloadCommand?.[0]).toBe("curl");
   });
 });

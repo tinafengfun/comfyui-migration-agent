@@ -358,6 +358,116 @@ describe("sub job manager", () => {
     }
   });
 
+  it("accepts an `hf download` candidate, moves the file from its scratch dir into targetPath, and cleans up the scratch dir (hf-cli fast path)", async () => {
+    process.env.ASSET_ACQUISITION_ENABLE_DOWNLOAD = "1";
+    const root = path.join(process.cwd(), ".demo-state", "tests", `subjobs-hf-cli-${Date.now()}`);
+    const artifactPath = path.join(root, "artifacts");
+    const targetPath = path.join(root, "models", "hf-cli-asset.safetensors");
+    const scratchDir = path.join(root, "hf-scratch");
+    await ensureDir(artifactPath);
+
+    // Fake `hf` CLI on PATH: no real network/huggingface_hub involved. Mimics
+    // the one observable side effect subJobs.ts depends on -- placing the
+    // file under --local-dir/<path-in-repo> -- so the move-into-place logic
+    // under test runs against a real child process exit, not a mock.
+    const fakeBinDir = path.join(root, "fake-bin");
+    await ensureDir(fakeBinDir);
+    const fakeHfPath = path.join(fakeBinDir, "hf");
+    await fs.writeFile(
+      fakeHfPath,
+      [
+        "#!/bin/bash",
+        "set -e",
+        "localdir=\"\"",
+        "args=(\"$@\")",
+        "for ((i=0; i<${#args[@]}; i++)); do",
+        '  if [ "${args[$i]}" = "--local-dir" ]; then localdir="${args[$((i+1))]}"; fi',
+        "done",
+        'filename="${args[2]}"',
+        'mkdir -p "$(dirname "$localdir/$filename")"',
+        'printf "hf-cli-fake-content" > "$localdir/$filename"',
+        "exit 0"
+      ].join("\n"),
+      { mode: 0o755 }
+    );
+    const originalPath = process.env.PATH;
+    process.env.PATH = `${fakeBinDir}:${originalPath}`;
+
+    try {
+      const task: MigrationTask = {
+        id: "task-subjobs-hf-cli",
+        name: "Subjobs hf-cli",
+        status: "waiting_for_human",
+        workflowPath: path.join(root, "workflow.json"),
+        workspacePath: root,
+        artifactPath,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        steps: [{ id: "01", status: "waiting_for_human" }]
+      };
+      await fs.writeFile(
+        path.join(artifactPath, "01-acquisition-job.json"),
+        JSON.stringify(
+          {
+            status: "waiting_for_secure_download",
+            providerCandidateCount: 1,
+            items: [
+              {
+                assetName: "hf-cli-asset.safetensors",
+                status: "pending_secure_download",
+                targetPath,
+                candidates: [
+                  {
+                    provider: "huggingface",
+                    title: "hf-cli fast path",
+                    url: "https://huggingface.co/owner/repo/resolve/main/hf-cli-asset.safetensors",
+                    downloadCommand: [
+                      "hf",
+                      "download",
+                      "owner/repo",
+                      "hf-cli-asset.safetensors",
+                      "--revision",
+                      "main",
+                      "--local-dir",
+                      scratchDir,
+                      "--quiet"
+                    ],
+                    postDownloadMoveFrom: path.join(scratchDir, "hf-cli-asset.safetensors"),
+                    hfCliScratchDir: scratchDir
+                  }
+                ]
+              }
+            ],
+            customNodeItems: []
+          },
+          null,
+          2
+        ),
+        "utf8"
+      );
+      await fs.writeFile(
+        path.join(artifactPath, "01-assets.csv"),
+        "asset_name,requested_name,resolved_path,source,state,staged_path,custom_node_repo,custom_node_cache_path,wrapper_source_evidence,commit,install_status,acquisition_status,mirror_used,credential_recorded,gap\n" +
+          '"hf-cli-asset.safetensors","hf-cli-asset.safetensors","","","source unknown","","","","","","missing","unresolved","none","false","not staged"\n',
+        "utf8"
+      );
+
+      const manager = new SubJobManager();
+      const pending = (await manager.listTaskSubJobs(task)).find((job) => job.assetName === "hf-cli-asset.safetensors");
+      expect(pending?.canStart).toBe(true);
+
+      await manager.startSubJob(task, pending!.id);
+      const completed = await waitForSubJobStatus(manager, task, pending!.id, "completed");
+
+      expect(completed.error).toBeUndefined();
+      expect(await fs.readFile(targetPath, "utf8")).toBe("hf-cli-fake-content");
+      // Scratch dir must not survive a successful download.
+      await expect(fs.stat(scratchDir)).rejects.toThrow();
+    } finally {
+      process.env.PATH = originalPath;
+    }
+  });
+
   it("startSubJobForSuggestedUrl downloads a human-approved fuzzyJudgment.suggestedUrl end-to-end", async () => {
     process.env.ASSET_ACQUISITION_ENABLE_DOWNLOAD = "1";
     const server = http.createServer((req, res) => {

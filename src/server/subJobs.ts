@@ -15,6 +15,9 @@ interface AcquisitionCandidate {
   downloadCommand?: string[];
   sizeBytes?: number;
   sha256?: string;
+  /** See AssetSourceCandidate's fields of the same name in assetSourceProviders.ts. */
+  postDownloadMoveFrom?: string;
+  hfCliScratchDir?: string;
 }
 
 interface AcquisitionItem {
@@ -237,7 +240,7 @@ export class SubJobManager {
     active.status = "running";
     active.updatedAt = new Date().toISOString();
     const [command, ...args] = candidate.downloadCommand.map((value) => substituteEnvPlaceholders(value, active.env));
-    if (command !== "curl" && command !== "scp" && command !== "rsync") {
+    if (command !== "curl" && command !== "scp" && command !== "rsync" && command !== "hf") {
       active.attemptErrors.push(`${candidate.provider}:${candidate.title} uses unsupported command ${command}`);
       await this.startCandidate(active, index + 1);
       return;
@@ -253,6 +256,29 @@ export class SubJobManager {
       active.stderr = `${active.stderr}${chunk.toString("utf8")}`.slice(-8192);
     });
     child.on("close", async (code) => {
+      // `hf download` (see withDownloadCommand's hf-cli fast path in
+      // assetSourceProviders.ts) can never write directly to active.targetPath
+      // -- it always places the file under --local-dir/<path-in-repo>. Move it
+      // into place before validating/completing, same contract curl already
+      // satisfies by writing straight to --output targetPath.
+      if (code === 0 && candidate.postDownloadMoveFrom) {
+        try {
+          await fs.rename(candidate.postDownloadMoveFrom, active.targetPath);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === "EXDEV") {
+            await fs.copyFile(candidate.postDownloadMoveFrom, active.targetPath);
+            await fs.rm(candidate.postDownloadMoveFrom, { force: true }).catch(() => undefined);
+          } else {
+            active.attemptErrors.push(
+              `${candidate.provider}:${candidate.title} downloaded but could not be moved into place: ${error instanceof Error ? error.message : error}`
+            );
+            code = 1;
+          }
+        }
+      }
+      if (candidate.hfCliScratchDir) {
+        await fs.rm(candidate.hfCliScratchDir, { recursive: true, force: true }).catch(() => undefined);
+      }
       await this.sampleProgress(active);
       if (code === 0) {
         const validationError = await validateDownloadedFile(active.targetPath, candidate);
@@ -324,7 +350,12 @@ export class SubJobManager {
 
   private async sampleProgress(active: ActiveDownload): Promise<void> {
     const now = Date.now();
-    const bytes = (await fileSize(active.targetPath)) ?? 0;
+    // hf-cli's own `--local-dir` scratch file (see withHfCliDownloadCommand)
+    // is the file actually growing mid-download -- active.targetPath doesn't
+    // exist until the post-close move happens. Prefer whichever exists so
+    // progress isn't stuck at 0% for the whole download.
+    const scratchPath = active.candidates[active.candidateIndex]?.postDownloadMoveFrom;
+    const bytes = (await fileSize(active.targetPath)) ?? (scratchPath ? await fileSize(scratchPath) : undefined) ?? 0;
     const elapsedSeconds = Math.max((now - active.lastSampleAt) / 1000, 0.001);
     const deltaBytes = Math.max(bytes - active.lastSampleBytes, 0);
     active.downloadedBytes = bytes;
