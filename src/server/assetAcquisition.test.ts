@@ -1045,9 +1045,12 @@ describe("asset acquisition job", () => {
     expect(targetPathFor("umt5-xxl-enc-bf16.safetensors")).toBe(
       path.join(root, "models", "text_encoders", "umt5-xxl-enc-bf16.safetensors")
     );
-    // No keyword in the evidence, but the filename itself contains "encoder".
+    // WhisperModelLoader (ComfyUI-WanVideoWrapper's HuMo/nodes.py) reads from
+    // ComfyUI's separate `audio_encoders` folder_paths category, not
+    // text_encoders -- must not fall into the generic "encoder" substring
+    // check below it.
     expect(targetPathFor("whisper_large_v3_encoder_fp16.safetensors")).toBe(
-      path.join(root, "models", "text_encoders", "whisper_large_v3_encoder_fp16.safetensors")
+      path.join(root, "models", "audio_encoders", "whisper_large_v3_encoder_fp16.safetensors")
     );
   });
 });

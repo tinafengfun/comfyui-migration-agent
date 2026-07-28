@@ -1296,6 +1296,13 @@ function targetSubdir(row: AssetRow): string {
   if (evidence.includes("upscalemodelloader") || name.includes("ultrasharp")) return "upscale_models";
   if (evidence.includes("lora") || name.includes("lora")) return "loras";
   if (evidence.includes("vae") || name.includes("vae") || name === "ae.safetensors") return "vae";
+  // whisper_large_v3_encoder_fp16.safetensors is loaded by WhisperModelLoader
+  // (ComfyUI-WanVideoWrapper's HuMo/nodes.py), which reads from ComfyUI's
+  // separate `audio_encoders` folder_paths category, not `text_encoders` --
+  // confirmed by reading that node's source. Must be checked before the
+  // generic "encoder" substring below, or every *_encoder*.safetensors name
+  // (audio or text) gets misrouted to text_encoders.
+  if (evidence.includes("whispermodelloader") || name.includes("whisper")) return "audio_encoders";
   if (evidence.includes("clip") || name.includes("qwen") || name.includes("umt5") || name.includes("encoder")) return "text_encoders";
   if (evidence.includes("seedvr2") || name.includes("seedvr2")) return "SEEDVR2";
   if (evidence.includes("unet") || name.includes("z_image")) return "diffusion_models";
