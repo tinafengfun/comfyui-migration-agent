@@ -442,6 +442,11 @@ app.post("/api/tasks/:taskId/human-decisions", async (req, res, next) => {
     });
     res.status(201).json(result);
   } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (message.includes("already being answered")) {
+      res.status(409).json({ error: message });
+      return;
+    }
     next(error);
   }
 });

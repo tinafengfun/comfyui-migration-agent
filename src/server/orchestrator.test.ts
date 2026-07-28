@@ -1153,6 +1153,86 @@ describe("migration orchestrator", () => {
     expect(step01?.status).not.toBe("completed");
   });
 
+  it("rejects a concurrent duplicate submission for the same questionEventId instead of racing (real incident: a push/deploy answer with no disabled-after-send button landed 5 identical POSTs, which raced 5 concurrent git-merge pipelines against the same repo and applied none of the 8 approved items)", async () => {
+    const root = path.join(process.cwd(), ".demo-state", "tests", `orchestrator-duplicate-decision-${Date.now()}`);
+    const config: AppConfig = {
+      port: 0,
+      projectRoot: root,
+      workspaceRoot: path.join(root, "workspaces"),
+      stateRoot: path.join(root, "state"),
+      draftDocRoot: root,
+      comfyuiRoot: "/tmp/comfy",
+      modelRoots: ["/home/intel/hf_models"],
+      gpuNodesPath: path.join(root, "gpu-nodes.json"),
+      workflowArchiveRoot: path.join(root, "nfs-workflows"),
+      autoApproveAgentPermissions: false
+    };
+    await ensureDir(config.workspaceRoot);
+    const store = new StateStore(config);
+    await store.initialize();
+    const orchestrator = new MigrationOrchestrator(config, store, [
+      {
+        id: "01",
+        name: "Assets",
+        requiredOutput: "01-assets.csv / 01-custom-nodes.md",
+        humanIntervention: "Provide sources"
+      }
+    ]);
+    const task = await orchestrator.createTask({
+      name: "Duplicate decision",
+      workflowFileName: "workflow.json",
+      workflowJson: { nodes: [], links: [] }
+    });
+    await store.updateStep(task.id, "01", "waiting_for_human", { summary: "Paused" });
+    const question = await store.appendEvent({
+      taskId: task.id,
+      stepId: "01",
+      type: "human_question",
+      message: "Pick one.",
+      data: {
+        question: "Pick one.",
+        choices: ["Continue with documented risk/gaps", "Stop at this gate"],
+        allowFreeform: true,
+        blockingReason: "quality_review"
+      }
+    });
+
+    const answerInput = {
+      taskId: task.id,
+      stepId: "01",
+      questionEventId: question.id,
+      answer: "Continue with documented risk/gaps",
+      wasFreeform: false
+    };
+
+    // Fire 5 identical submissions "at once" -- no await between them, matching
+    // how 5 rapid duplicate clicks arrive as 5 concurrent API calls.
+    const attempts = [
+      orchestrator.recordHumanDecision(answerInput),
+      orchestrator.recordHumanDecision(answerInput),
+      orchestrator.recordHumanDecision(answerInput),
+      orchestrator.recordHumanDecision(answerInput),
+      orchestrator.recordHumanDecision(answerInput)
+    ];
+    const settled = await Promise.allSettled(attempts);
+
+    const fulfilled = settled.filter((s) => s.status === "fulfilled");
+    const rejected = settled.filter((s) => s.status === "rejected");
+    expect(fulfilled.length).toBe(1);
+    expect(rejected.length).toBe(4);
+    for (const r of rejected) {
+      if (r.status === "rejected") {
+        expect(String(r.reason)).toContain("already being answered");
+      }
+    }
+
+    // Exactly one decision recorded -- not 5 -- and the step actually completed.
+    const decisions = await store.listDecisions(task.id);
+    expect(decisions.filter((d) => d.questionEventId === question.id).length).toBe(1);
+    const updated = await store.getTask(task.id);
+    expect(updated?.steps.find((step) => step.id === "01")?.status).toBe("completed");
+  });
+
   it("accepts actionable human context for non-Step 01 gates without repeating the question", async () => {
     const root = path.join(process.cwd(), ".demo-state", "tests", `orchestrator-generic-context-${Date.now()}`);
     const config: AppConfig = {

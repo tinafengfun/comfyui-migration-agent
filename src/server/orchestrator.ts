@@ -172,6 +172,20 @@ export class MigrationOrchestrator {
   // wiping its artifacts, wasting ~7 minutes of redundant environment
   // rebuild. This tracks in-flight rerunStep calls specifically.
   private readonly activeRerunRequests = new Set<string>();
+  // Same class of bug as activeRerunRequests above, on a different button:
+  // confirmed live, a Step 13 push/deploy answer with no disabled-after-send
+  // state on its Send button landed 5 identical POSTs to
+  // /api/tasks/:taskId/human-decisions for the same questionEventId. With no
+  // guard here, all 5 raced into applyPushDeployDecision concurrently,
+  // running `git merge`/tsc/vitest against the SAME repoRoot at the same
+  // time -- one call's revert-on-failure `git reset --hard` wiped out
+  // another's in-flight (and even already-successful) work, and the task
+  // finished "completed" having applied none of the 8 approved items. The
+  // client-side fix (freeze the button after send) closes this for the
+  // normal UI path, but this guard is the actual structural fix: it makes
+  // concurrent submissions for the exact same question impossible regardless
+  // of client, retries, multiple tabs, or future bugs upstream of this call.
+  private readonly activeHumanDecisionSubmissions = new Set<string>();
   // Task IDs that have been hard-stopped/terminated. Their lingering run-locks
   // (held while an in-flight SDK call winds down) must not block new work.
   private readonly hardStoppedTaskIds = new Set<string>();
@@ -1561,48 +1575,60 @@ export class MigrationOrchestrator {
     answer: string;
     wasFreeform: boolean;
   }): Promise<{ decision: HumanDecision; resumedLiveSession: boolean }> {
-    const rawDecision: HumanDecision = {
-      ...input,
-      decidedAt: new Date().toISOString()
-    };
-    const decision: HumanDecision = {
-      ...rawDecision,
-      answer: redactSensitiveText(rawDecision.answer)
-    };
-    await this.store.appendDecision(decision);
-    // §G.wire: record non-routine decisions as feedback. Routine approvals
-    // (yes/ok/continue/approve/proceed/1) don't carry useful signal — skip
-    // them to keep the feedback log focused on overrides and corrections.
-    if (!isRoutineApproval(input.answer)) {
-      await this.recordFeedback(input.taskId, {
-        stepId: input.stepId ?? "task",
-        source: "human",
-        type: "user_preference",
-        severity: severityForDecision(input.answer),
-        message: trimMessage(input.answer),
-        stateSnapshot: { extraNotes: `questionEventId=${input.questionEventId}; wasFreeform=${input.wasFreeform}` }
-      });
+    // Check-and-set must happen with no `await` in between -- see
+    // activeRerunRequests' comment above for why (the same race, closed the
+    // same way). Scoped to questionEventId, not taskId/stepId, so unrelated
+    // concurrent decisions elsewhere are never blocked by this.
+    if (this.activeHumanDecisionSubmissions.has(input.questionEventId)) {
+      throw new Error(`This question is already being answered (questionEventId=${input.questionEventId}); ignoring duplicate submission.`);
     }
-    const phase1RunActive = this.activeStepRuns.has(this.stepRunKey(input.taskId, "phase1"));
-    // First, try to deliver the decision to an active SDK session via the broker.
-    // This handles interactive steps (like Step 02) where the SDK agent asked the question.
-    const sdkResumed = this.approvalBroker.resolveDecision(rawDecision);
-    const deterministicGateHandled = !sdkResumed && !phase1RunActive
-      ? await this.applyDeterministicGateDecision(rawDecision)
-      : false;
-    const resumedLiveSession = sdkResumed || deterministicGateHandled;
-    await this.emit({
-      taskId: input.taskId,
-      stepId: input.stepId,
-      type: "progress",
-      message: resumedLiveSession
-        ? deterministicGateHandled
-          ? "Human decision recorded and applied to deterministic gate."
-          : "Human decision recorded and delivered to active SDK session."
-        : "Human decision recorded for next resume.",
-      data: { ...decision, resumedLiveSession }
-    });
-    return { decision, resumedLiveSession: resumedLiveSession };
+    this.activeHumanDecisionSubmissions.add(input.questionEventId);
+    try {
+      const rawDecision: HumanDecision = {
+        ...input,
+        decidedAt: new Date().toISOString()
+      };
+      const decision: HumanDecision = {
+        ...rawDecision,
+        answer: redactSensitiveText(rawDecision.answer)
+      };
+      await this.store.appendDecision(decision);
+      // §G.wire: record non-routine decisions as feedback. Routine approvals
+      // (yes/ok/continue/approve/proceed/1) don't carry useful signal — skip
+      // them to keep the feedback log focused on overrides and corrections.
+      if (!isRoutineApproval(input.answer)) {
+        await this.recordFeedback(input.taskId, {
+          stepId: input.stepId ?? "task",
+          source: "human",
+          type: "user_preference",
+          severity: severityForDecision(input.answer),
+          message: trimMessage(input.answer),
+          stateSnapshot: { extraNotes: `questionEventId=${input.questionEventId}; wasFreeform=${input.wasFreeform}` }
+        });
+      }
+      const phase1RunActive = this.activeStepRuns.has(this.stepRunKey(input.taskId, "phase1"));
+      // First, try to deliver the decision to an active SDK session via the broker.
+      // This handles interactive steps (like Step 02) where the SDK agent asked the question.
+      const sdkResumed = this.approvalBroker.resolveDecision(rawDecision);
+      const deterministicGateHandled = !sdkResumed && !phase1RunActive
+        ? await this.applyDeterministicGateDecision(rawDecision)
+        : false;
+      const resumedLiveSession = sdkResumed || deterministicGateHandled;
+      await this.emit({
+        taskId: input.taskId,
+        stepId: input.stepId,
+        type: "progress",
+        message: resumedLiveSession
+          ? deterministicGateHandled
+            ? "Human decision recorded and applied to deterministic gate."
+            : "Human decision recorded and delivered to active SDK session."
+          : "Human decision recorded for next resume.",
+        data: { ...decision, resumedLiveSession }
+      });
+      return { decision, resumedLiveSession: resumedLiveSession };
+    } finally {
+      this.activeHumanDecisionSubmissions.delete(input.questionEventId);
+    }
   }
 
   private firstPhase1StepToMarkRunning(task: MigrationTask): string | undefined {
