@@ -485,7 +485,28 @@ export async function mergeImprovement(input: {
   log(`\n=== Merging ${item.id} (branch ${branch}) into ${repoRoot} ===`);
   log(`  pre-merge HEAD: ${preMergeSha}`);
 
-  await git(repoRoot, ["merge", "--no-ff", branch, "-m", `Merge agent-improvement/${item.id}`]);
+  try {
+    await git(repoRoot, ["merge", "--no-ff", branch, "-m", `Merge agent-improvement/${item.id}`]);
+  } catch (error) {
+    // Real incident: two items independently patched the same lines of the
+    // same file (IMPROV-01/IMPROV-02 both touched step06_prompt_validation.py's
+    // frontend-only-widget-stripping logic). `git merge` exits non-zero on a
+    // real content conflict, which execFile turns into a rejected promise --
+    // previously uncaught here, so it skipped past the tsc/vitest
+    // revert-on-failure path below and left repoRoot mid-merge (conflict
+    // markers on disk, MERGE_HEAD set), blocking every later git operation in
+    // this same repo until a human ran `git merge --abort` by hand. Treat a
+    // conflicted merge the same as a failed post-merge check: abort/reset
+    // back to preMergeSha and report it as a normal, recoverable "not applied
+    // this round" outcome instead of throwing.
+    const err = error as { stdout?: string; stderr?: string; message?: string };
+    log(`  merge conflict -- aborting and resetting ${repoRoot} back to ${preMergeSha}.`);
+    log((err.stdout ?? "").slice(-4000));
+    log((err.stderr ?? err.message ?? String(error)).slice(-4000));
+    await git(repoRoot, ["merge", "--abort"]).catch(() => {});
+    await git(repoRoot, ["reset", "--hard", preMergeSha]);
+    return { ok: false, reason: "git merge conflict (likely overlaps another item's changes to the same file) -- reverted" };
+  }
   const mergeSha = (await git(repoRoot, ["rev-parse", "HEAD"])).trim();
   log(`  merged locally as ${mergeSha}`);
 
