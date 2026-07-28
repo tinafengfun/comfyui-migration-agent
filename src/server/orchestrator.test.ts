@@ -5,7 +5,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { AppConfig } from "./config";
 import { ensureDir } from "./fsUtils";
-import { MigrationOrchestrator, sanitizeSessionIdSegment } from "./orchestrator";
+import { MigrationOrchestrator, extractHttpUrls, sanitizeSessionIdSegment } from "./orchestrator";
 import { SdkStepTimeoutError } from "./copilotSdkRunner";
 import { StateStore } from "./state";
 import { checkHiddenAssetPrestageStatus } from "./hiddenAssetPrestage";
@@ -39,6 +39,32 @@ describe("sanitizeSessionIdSegment", () => {
 
   it("falls back to a placeholder when nothing valid remains", () => {
     expect(sanitizeSessionIdSegment("（）（）")).toBe("unnamed");
+  });
+});
+
+describe("extractHttpUrls", () => {
+  it("extracts a single URL embedded in surrounding prose", () => {
+    expect(
+      extractHttpUrls("https://huggingface.co/Kijai/WanVideo_comfy/resolve/main/LongCat/LongCat-Avatar-15_bf16.safetensors use this as source")
+    ).toEqual(["https://huggingface.co/Kijai/WanVideo_comfy/resolve/main/LongCat/LongCat-Avatar-15_bf16.safetensors"]);
+  });
+
+  it("strips trailing punctuation a human would naturally type after a URL", () => {
+    expect(extractHttpUrls("从这里下载：https://huggingface.co/owner/repo/resolve/main/f.safetensors。")).toEqual([
+      "https://huggingface.co/owner/repo/resolve/main/f.safetensors"
+    ]);
+  });
+
+  it("returns multiple URLs when more than one is present", () => {
+    expect(extractHttpUrls("try https://a.test/x or https://b.test/y")).toEqual(["https://a.test/x", "https://b.test/y"]);
+  });
+
+  it("returns an empty array when there is no URL", () => {
+    expect(extractHttpUrls("just provide the file locally, no URL here")).toEqual([]);
+  });
+
+  it("dedupes an identical URL mentioned twice", () => {
+    expect(extractHttpUrls("https://a.test/x and again https://a.test/x")).toEqual(["https://a.test/x"]);
   });
 });
 
@@ -1231,6 +1257,194 @@ describe("migration orchestrator", () => {
     expect(decisions.filter((d) => d.questionEventId === question.id).length).toBe(1);
     const updated = await store.getTask(task.id);
     expect(updated?.steps.find((step) => step.id === "01")?.status).toBe("completed");
+  });
+
+  it("auto-triggers a real download when a Step 01 answer names exactly one URL for the one remaining unresolved asset (real incident: submitting a corrected source URL via the freeform textarea only ever wrote instructions + re-ran a local-only search, which never finds a freshly-corrected source, so the same gate re-asked the identical question forever)", async () => {
+    const root = path.join(process.cwd(), ".demo-state", "tests", `orchestrator-auto-download-${Date.now()}`);
+    const config: AppConfig = {
+      port: 0,
+      projectRoot: root,
+      workspaceRoot: path.join(root, "workspaces"),
+      stateRoot: path.join(root, "state"),
+      draftDocRoot: root,
+      comfyuiRoot: path.join(root, "ComfyUI"),
+      modelRoots: [path.join(root, "models")],
+      gpuNodesPath: path.join(root, "gpu-nodes.json"),
+      workflowArchiveRoot: path.join(root, "nfs-workflows"),
+      autoApproveAgentPermissions: false
+    };
+    await ensureDir(config.workspaceRoot);
+    const store = new StateStore(config);
+    await store.initialize();
+    const calls: Array<{ assetName: string; url: string }> = [];
+    const fakeDownloader = {
+      async startSubJobForSuggestedUrl(_task: unknown, assetName: string, url: string) {
+        calls.push({ assetName, url });
+        return {};
+      }
+    };
+    const orchestrator = new MigrationOrchestrator(
+      config,
+      store,
+      [
+        {
+          id: "01",
+          name: "Assets",
+          requiredOutput: "01-assets.csv / 01-custom-nodes.md",
+          humanIntervention: "Provide sources"
+        }
+      ],
+      undefined,
+      fakeDownloader
+    );
+    const task = await orchestrator.createTask({
+      name: "Auto download",
+      workflowFileName: "workflow.json",
+      workflowJson: { nodes: [], links: [] }
+    });
+    await fs.writeFile(
+      path.join(task.artifactPath, "01-assets.csv"),
+      [
+        "asset_name,requested_name,resolved_path,source,state,staged_path,custom_node_repo,custom_node_cache_path,wrapper_source_evidence,commit,install_status,acquisition_status,mirror_used,credential_recorded,gap",
+        '"definitely_missing_asset_for_test.safetensors","definitely_missing_asset_for_test.safetensors","","not found","source unknown","ComfyUI/models/diffusion_models/definitely_missing_asset_for_test.safetensors","","","18:UNETLoader","","missing","requires human approval/source","none","false","source-identical asset not staged"',
+        ""
+      ].join("\n"),
+      "utf8"
+    );
+    await fs.writeFile(
+      path.join(task.artifactPath, "01-custom-nodes.md"),
+      "| Node type | Source package or repo | Installed/source evidence | State | Human action |\n| --- | --- | --- | --- | --- |\n",
+      "utf8"
+    );
+    await fs.writeFile(
+      path.join(task.artifactPath, "01-gate-signal.json"),
+      JSON.stringify({
+        stepId: "01",
+        gated: true,
+        category: "missing_asset",
+        trigger: "deterministic",
+        reason: "Test gate: 1 unresolved asset"
+      }),
+      "utf8"
+    );
+    await store.updateStep(task.id, "01", "waiting_for_human", { summary: "Missing assets" });
+    const question = await store.appendEvent({
+      taskId: task.id,
+      stepId: "01",
+      type: "human_question",
+      message: "Missing assets require human decision.",
+      data: {
+        question: "Missing assets require human decision.",
+        choices: ["Provide exact local staged files for unresolved assets", "Stop migration at Step 01"],
+        allowFreeform: true,
+        blockingReason: "missing_asset"
+      }
+    });
+
+    const correctUrl = "https://huggingface.co/Kijai/WanVideo_comfy/resolve/main/LongCat/LongCat-Avatar-15_bf16.safetensors";
+    await orchestrator.recordHumanDecision({
+      taskId: task.id,
+      stepId: "01",
+      questionEventId: question.id,
+      answer: `${correctUrl} use this as the exact source for definitely_missing_asset_for_test.safetensors`,
+      wasFreeform: true
+    });
+
+    expect(calls).toEqual([{ assetName: "definitely_missing_asset_for_test.safetensors", url: correctUrl }]);
+  });
+
+  it("does NOT auto-trigger a download when more than one asset is still unresolved (ambiguous which URL belongs to which asset -- falls back to the existing write-instructions-and-wait behavior)", async () => {
+    const root = path.join(process.cwd(), ".demo-state", "tests", `orchestrator-auto-download-ambiguous-${Date.now()}`);
+    const config: AppConfig = {
+      port: 0,
+      projectRoot: root,
+      workspaceRoot: path.join(root, "workspaces"),
+      stateRoot: path.join(root, "state"),
+      draftDocRoot: root,
+      comfyuiRoot: path.join(root, "ComfyUI"),
+      modelRoots: [path.join(root, "models")],
+      gpuNodesPath: path.join(root, "gpu-nodes.json"),
+      workflowArchiveRoot: path.join(root, "nfs-workflows"),
+      autoApproveAgentPermissions: false
+    };
+    await ensureDir(config.workspaceRoot);
+    const store = new StateStore(config);
+    await store.initialize();
+    const calls: Array<{ assetName: string; url: string }> = [];
+    const fakeDownloader = {
+      async startSubJobForSuggestedUrl(_task: unknown, assetName: string, url: string) {
+        calls.push({ assetName, url });
+        return {};
+      }
+    };
+    const orchestrator = new MigrationOrchestrator(
+      config,
+      store,
+      [
+        {
+          id: "01",
+          name: "Assets",
+          requiredOutput: "01-assets.csv / 01-custom-nodes.md",
+          humanIntervention: "Provide sources"
+        }
+      ],
+      undefined,
+      fakeDownloader
+    );
+    const task = await orchestrator.createTask({
+      name: "Auto download ambiguous",
+      workflowFileName: "workflow.json",
+      workflowJson: { nodes: [], links: [] }
+    });
+    await fs.writeFile(
+      path.join(task.artifactPath, "01-assets.csv"),
+      [
+        "asset_name,requested_name,resolved_path,source,state,staged_path,custom_node_repo,custom_node_cache_path,wrapper_source_evidence,commit,install_status,acquisition_status,mirror_used,credential_recorded,gap",
+        '"missing_one.safetensors","missing_one.safetensors","","not found","source unknown","ComfyUI/models/diffusion_models/missing_one.safetensors","","","18:UNETLoader","","missing","requires human approval/source","none","false","source-identical asset not staged"',
+        '"missing_two.safetensors","missing_two.safetensors","","not found","source unknown","ComfyUI/models/diffusion_models/missing_two.safetensors","","","19:VAELoader","","missing","requires human approval/source","none","false","source-identical asset not staged"',
+        ""
+      ].join("\n"),
+      "utf8"
+    );
+    await fs.writeFile(
+      path.join(task.artifactPath, "01-custom-nodes.md"),
+      "| Node type | Source package or repo | Installed/source evidence | State | Human action |\n| --- | --- | --- | --- | --- |\n",
+      "utf8"
+    );
+    await fs.writeFile(
+      path.join(task.artifactPath, "01-gate-signal.json"),
+      JSON.stringify({
+        stepId: "01",
+        gated: true,
+        category: "missing_asset",
+        trigger: "deterministic",
+        reason: "Test gate: 2 unresolved assets"
+      }),
+      "utf8"
+    );
+    await store.updateStep(task.id, "01", "waiting_for_human", { summary: "Missing assets" });
+    const question = await store.appendEvent({
+      taskId: task.id,
+      stepId: "01",
+      type: "human_question",
+      message: "Missing assets require human decision.",
+      data: {
+        question: "Missing assets require human decision.",
+        choices: ["Provide exact local staged files for unresolved assets", "Stop migration at Step 01"],
+        allowFreeform: true,
+        blockingReason: "missing_asset"
+      }
+    });
+
+    await orchestrator.recordHumanDecision({
+      taskId: task.id,
+      stepId: "01",
+      questionEventId: question.id,
+      answer: "https://huggingface.co/owner/repo/resolve/main/missing_one.safetensors use this for missing_one",
+      wasFreeform: true
+    });
+
+    expect(calls).toEqual([]);
   });
 
   it("accepts actionable human context for non-Step 01 gates without repeating the question", async () => {

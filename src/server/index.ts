@@ -40,8 +40,8 @@ await store.initialize();
 await ensureDir(config.workspaceRoot);
 
 const steps = await loadStepDefinitions(config);
-const orchestrator = new MigrationOrchestrator(config, store, steps);
 const subJobs = new SubJobManager();
+const orchestrator = new MigrationOrchestrator(config, store, steps, undefined, subJobs);
 await orchestrator.reconcileStaleActiveTasks(
   "API server started; active SDK sessions from a previous process cannot be resumed safely."
 );

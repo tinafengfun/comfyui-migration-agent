@@ -156,6 +156,16 @@ interface StepSdkRunner {
   ): Promise<SdkRunResult>;
 }
 
+/**
+ * Minimal shape of SubJobManager.startSubJobForSuggestedUrl this orchestrator
+ * needs -- kept as an interface (not a direct import of SubJobManager) so
+ * this file doesn't take on subJobs.ts's full surface, matching the same
+ * loose-coupling style as StepSdkRunner/FreeformSessionRunner above.
+ */
+export interface SuggestedUrlDownloader {
+  startSubJobForSuggestedUrl(task: MigrationTask, assetName: string, url: string): Promise<unknown>;
+}
+
 export class MigrationOrchestrator {
   private readonly listeners = new Map<string, Set<EventListener>>();
   private readonly sdkRunner: StepSdkRunner;
@@ -195,7 +205,8 @@ export class MigrationOrchestrator {
     private readonly config: AppConfig,
     private readonly store: StateStore,
     private readonly steps: MigrationStepDefinition[],
-    sdkRunner?: StepSdkRunner
+    sdkRunner?: StepSdkRunner,
+    private readonly suggestedUrlDownloader?: SuggestedUrlDownloader
   ) {
     this.sdkRunner = sdkRunner ?? new CopilotSdkRunner(config);
   }
@@ -2384,6 +2395,33 @@ export class MigrationOrchestrator {
         unresolvedItems: step01Acquisition.unresolvedItems
       }
     });
+    // See extractHttpUrls' comment for the incident this closes. Only acts
+    // in the unambiguous case (exactly one URL, exactly one still-unresolved
+    // item) -- anything more ambiguous falls back to the existing
+    // write-instructions-and-wait behavior rather than guessing which URL
+    // belongs to which asset.
+    if (this.suggestedUrlDownloader && step01Acquisition.status === "waiting_for_secure_download" && step01Acquisition.unresolvedItems.length === 1) {
+      const urls = extractHttpUrls(decision.answer);
+      if (urls.length === 1) {
+        const assetName = step01Acquisition.unresolvedItems[0].assetName;
+        const url = urls[0];
+        await this.emit({
+          taskId: decision.taskId,
+          stepId,
+          type: "progress",
+          message: `Detected a single URL in the human-provided source instructions for the one remaining unresolved asset (${assetName}) -- starting a real download instead of waiting for a repeat local-only check.`,
+          data: { assetName, url }
+        });
+        this.suggestedUrlDownloader.startSubJobForSuggestedUrl(task, assetName, url).catch((error) => {
+          void this.emit({
+            taskId: decision.taskId,
+            stepId,
+            type: "progress",
+            message: `Auto-triggered download of the human-provided source for ${assetName} failed to start: ${error instanceof Error ? error.message : error}`
+          });
+        });
+      }
+    }
   }
     const acquisitionGateDetails = step01Acquisition
       ? assetAcquisitionGateDetails(step01Acquisition.unresolvedItems)
@@ -4408,6 +4446,26 @@ function step00DetailsFromArtifact(content: string): string[] {
   }
   return [...new Set(details)].slice(0, 10);
 }
+
+/**
+ * Real incident this closes: a human answered a missing-asset gate with a
+ * corrected source URL via the freeform textarea. acceptHumanGateContext
+ * only ever wrote it to 01-human-source-instructions.md (explicitly "does
+ * not claim source-identical assets are already staged") and re-ran a
+ * LOCAL-ONLY search phase, which obviously found nothing new -- the gate
+ * re-asked the identical question every time the human resubmitted, since
+ * nothing in that path ever actually downloads anything. The only way to
+ * get a real download going was a human manually clicking "Use this
+ * source" (tied to the ORIGINAL, possibly-wrong fuzzy-match suggestion) or
+ * an operator calling the download API directly. This extracts a plain
+ * http(s) URL from the answer so the unambiguous single-URL/single-item
+ * case can trigger a real download immediately instead of looping forever.
+ */
+export function extractHttpUrls(text: string): string[] {
+  const matches = text.match(/https?:\/\/[^\s`'")]+/gi) ?? [];
+  return [...new Set(matches.map((url) => url.replace(/[),.;，。]+$/g, "")))];
+}
+
 
 function isActionableSourceContext(answer: string): boolean {
   const normalized = answer.toLowerCase();
