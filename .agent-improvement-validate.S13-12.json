@@ -1,0 +1,5 @@
+{
+  "commands": [
+    "python3 .agent-improvement-validate-helpers/S13-12/check_import_availability.py /home/intel/tianfeng/comfy/ComfyUI/agent-demo/workspaces/ca76e727-68f6-45da-8c8b-bb46c70161bc/artifacts/06-source-preserving-prompt.json /home/intel/tianfeng/comfy/ComfyUI/agent-demo/workspaces/ca76e727-68f6-45da-8c8b-bb46c70161bc/artifacts/05-environment-summary.json"
+  ]
+}
