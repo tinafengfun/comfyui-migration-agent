@@ -1,0 +1,6 @@
+{
+  "commands": [
+    "python3 .agent-improvement-validate-helpers/S13-05/check_docker_fallback.py",
+    "python3 .agent-improvement-validate-helpers/S13-05/check_normal_restart.py"
+  ]
+}

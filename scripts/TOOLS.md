@@ -48,11 +48,35 @@ and reproducible.
 
 | When | Tool | Command |
 |---|---|---|
-| Start/stop/restart/status ComfyUI on a node (local or ssh) | `remote-comfyui.mts` | `npx tsx scripts/remote-comfyui.mts --node <name> --action start\|stop\|restart\|status [--wait 150]` |
+| Start/stop/restart/status ComfyUI on a node (local or ssh) | `remote-comfyui.mts` | `npx tsx scripts/remote-comfyui.mts --node <name> --action start\|stop\|restart\|status [--wait 150] [--container <name>]` |
 | Decode node types from a workflow JSON against a running ComfyUI's /object_info | `decode-workflow-node-types.mts` | `npx tsx scripts/decode-workflow-node-types.mts <workflow.json> [--comfyui-url http://host:8188] [--format csv\|json] [--output <path>]` |
 
 Uses the reliable detached-launch pattern (launcher script on target + `setsid` +
 `ssh -n` + redirected fds). Do NOT hand-write an inline `ssh "... &"` — it hangs.
+
+### Hung-PID-1 recovery (runtime=docker restart)
+
+When ComfyUI runs as PID 1 inside a container (runtime=docker nodes) and a
+long-running synchronous operation — e.g. an XPU async-stream block-swap that
+degrades to a 100%-CPU sync loop — blocks the event loop, the in-container
+`pkill -f main.py` that `restart` tries first cannot kill PID 1 from inside the
+container (EPERM / PID 1 is not killable from within its own namespace). The
+`restart` action handles this deterministically:
+
+1. It runs `docker exec <container> pkill -f main.py` (best effort).
+2. It checks `docker inspect -f {{.State.Status}} <container>`.
+3. If the container is **still running** (kill failed — the real-world hung-PID-1
+   case), it falls back to `docker restart <container>`, which cleanly terminates
+   and restarts PID 1, then waits for `/system_stats` to respond.
+4. If the kill did stop the container, it `docker start`s it again (original
+   Step-05 launch config preserved).
+
+`--container <name>` is optional: when omitted on a docker node the running
+`comfyui-*` container is auto-detected via `docker ps --filter ancestor=<image>`.
+Bare-runtime (`runtime=bare`) restart is unchanged — it still uses the
+detached-launch path. This pattern was first worked by hand at Step 12 of task
+`ca76e727` (see its `12-reflection.md`); it is now built into the tool so the
+agent never has to drop to a manual `docker restart` again.
 
 ## Environment readiness / dependencies
 
