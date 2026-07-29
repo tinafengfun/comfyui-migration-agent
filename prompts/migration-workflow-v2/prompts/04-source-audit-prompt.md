@@ -10,6 +10,10 @@ Audit risky workflow and custom-node source paths for Intel XPU compatibility be
 
 - workflow inventory
 - custom-node ledger
+
+## Audit scope rule
+
+Derive the audit scope exclusively from `03-inventory.md`'s node list. Do not carry over node-family references from any template or prior run. If a referenced node family is absent from `03-inventory.md`, drop it from the scope.
 - asset ledger and acquisition log, if already created
 - workflow JSON or extracted node widget values
 - local source paths
