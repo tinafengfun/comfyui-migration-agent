@@ -51,6 +51,20 @@ Use before patching custom nodes or declaring XPU support.
 8. Emit an all-node source-audit table. Core and dependency-free nodes can be classified as no source change expected, but they must still appear.
 9. Redact token-like values from workflow widget evidence before writing artifacts.
 10. Include a `completion_decision` block and Toolization block.
+11. **CUDA-ism scan (mandatory checklist item).** For every custom-node source root under audit, grep both the `__init__`/class-init code AND the runtime forward loop (the `forward()` method and any helper it calls during sampling) for the following CUDA-isms:
+    - `torch.cuda.is_available()`
+    - `torch.cuda.stream` / `torch.cuda.Stream` / `torch.cuda.Event`
+    - `.cuda()` tensor or module moves
+    - `device='cuda'`, `device="cuda"`, `cuda:0`, or any hard-coded `cuda` device string
+    
+    Classify every hit into exactly one of:
+    - (a) **import-time crash** — the CUDA-ism runs at import/init and will raise or segfault before the node registers on XPU
+    - (b) **silent feature disable** — the CUDA-ism gates an optimization/capacity mechanism (block-swap, async streams, prefetch) that silently no-ops on XPU, leaving the node registered but the feature off; this is the most insidious class because it produces a non-obvious device-mismatch or full-residency OOM at runtime instead of an import error
+    - (c) **device-mismatch-at-runtime** — the CUDA-ism moves a tensor to CUDA during forward while surrounding tensors live on XPU, producing a cross-device error during sampling
+    
+    **The auditor MUST check the runtime forward loop, not just the init method.** A device-agnostic init method does NOT prove the runtime path is safe — the init may offload blocks to CPU correctly while the forward loop's `torch.cuda.is_available()` gate silently disables the cycling that moves them back. Record the init finding and the forward-loop finding separately.
+    
+    **Worked example (silent feature disable, class b):** `ComfyUI-WanVideoWrapper/wanvideo/modules/model.py` — the `block_swap()` init method (lines 2040-2065) is device-agnostic and moves blocks to `offload_device` on XPU correctly, BUT the `forward()` method (lines 3202-3209) gates block cycling behind `if torch.cuda.is_available():`, setting `swap_start_idx = len(self.blocks)` in the `else` branch so that on XPU the on-cycle/off-cycle conditions (`b >= swap_start_idx and self.blocks_to_swap > 0`) are never true. Blocks offloaded to CPU at init are never moved back to `main_device` for compute, producing a device-mismatch error or full-residency OOM during sampling. The init audit alone would have missed this; only the forward-loop scan catches it.
 
 ## Common failure signatures
 
@@ -65,6 +79,7 @@ Use before patching custom nodes or declaring XPU support.
 - device picker lists CUDA/MPS/CPU but no XPU or ComfyUI-managed device option
 - source offers SDPA or CPU fallback but the workflow selects a CUDA-only placement
 - tensor output is moved to CPU only for `is_cuda` or `is_mps`, leaving XPU tensors unsupported
+- init method is device-agnostic but the runtime forward loop gates block-swap / streams behind `torch.cuda.is_available()`, silently disabling a capacity mechanism on XPU (see CUDA-ism scan, class b)
 
 ## Evidence standard
 
