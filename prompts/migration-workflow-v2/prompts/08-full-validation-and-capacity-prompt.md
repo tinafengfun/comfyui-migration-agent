@@ -106,11 +106,15 @@ Create a full-validation report with:
 
 Stop tuning and escalate if runtime evidence shows required memory exceeds available budget and theoretical active-weight/activation analysis agrees.
 
+Stop and escalate as capacity hard stop if the primary generative model itself requires block-swapping the bulk of its weights between host and device to fit the target's usable VRAM at all -- e.g. the model's active weight requirement alone leaves under roughly 2 GB of true headroom on the target card. This applies even if the run completes without OOM: a completed-but-impractically-slow block-swap run is not tight success. Small, targeted offload (VAE/text-encoder residency, a few edge blocks) is still an acceptable mitigation -- swapping the primary model's own main weight mass is not.
+
 ## Prior-migration lessons
 
 Dasiwa full-size branch `54` was a structural capacity problem on a 24 GB-class card, not an ordinary tuning miss, after both runtime and memory math aligned.
 
-Zimage Step 8 showed the inverse case: a static model-file sum can exceed physical VRAM, while staged execution, low-VRAM policy, purge/offload behavior, and block swap keep the actual runtime peak inside budget. Treat this as tight success only when the full/high-fidelity run completes and telemetry proves the peak ratio.
+Zimage Step 8 showed the inverse case: a static model-file sum can exceed physical VRAM, while staged execution, low-VRAM policy, purge/offload behavior, and block swap keep the actual runtime peak inside budget. Treat this as tight success only when the full/high-fidelity run completes and telemetry proves the peak ratio -- and only when the swap/offload is a small, targeted portion (VAE/text-encoder/edge blocks), not the primary model's own bulk weight mass (see the LongCat lesson below).
+
+LongCat-Avatar-15 (bf16, ~30 GB active transformer) on a 30.3 GB-class XPU node needed `WanVideoBlockSwap` to hold half the transformer (~15 GB) on host, half on device, transferred synchronously (`Non-blocking memory transfer: False`) every step. The run completed -- no OOM -- but was impractically slow (the ComfyUI API itself went unresponsive for extended stretches while blocked on transfer) and is not a viable production delivery path. Unlike the Zimage case above, this was block-swapping the *primary model's own bulk weight mass*, not a small targeted offload -- classify this shape of result as capacity hard stop, not tight success, regardless of whether it eventually finishes.
 
 Zimage v2 Step 8 added two tooling rules. First, reduced full-path prompts must not bypass linked seed nodes while fixing seeds. Second, a run can complete successfully but be misclassified as failed if the accounting tool treats structural primitive value nodes as missing runtime work. Step 8 reports must distinguish runtime failure from report/accounting recovery, and must carry cache-assisted versus cold-start boundaries into Step 9.
 
@@ -131,4 +135,13 @@ Runtime evidence: peak runtime memory was 95.4% of physical budget
 Theory evidence: summed model files exceeded device memory, but staged execution/offload kept the live peak under budget
 Mitigation decision: no capacity hard stop; continue with telemetry and preserve the same launch/runtime policy for GUI or delivery validation
 Boundary: source workflow unchanged; runtime-policy prompt variant used; GUI/customer validation not claimed
+```
+
+```text
+Result class: capacity hard stop (primary-model block-swap, not OOM)
+Validation level: branch smoke passed; full-size run completed but classified as infeasible
+Runtime evidence: primary model's transformer block-swapped ~50% of its own weights between host and device every step (Non-blocking memory transfer: False); ComfyUI's own API was unresponsive for extended stretches while blocked on transfer
+Theory evidence: primary model's active weight requirement alone left under ~2 GB of true headroom on the target's usable VRAM budget
+Mitigation decision: stop treating a completed-but-impractically-slow block-swap run as tight success; recommend a smaller/quantized model variant, multi-XPU escalation, or reduced-fidelity delivery tier instead of shipping this launch/runtime policy
+Boundary: this is not the same as the Zimage tight-success case above -- that swapped only VAE/text-encoder-scale portions, this swapped the primary model's own bulk weight mass
 ```

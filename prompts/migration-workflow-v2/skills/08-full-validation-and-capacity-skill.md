@@ -44,6 +44,8 @@ Use usable VRAM after reserves, not the marketing memory size.
 
 Reasonable mitigations include targeted CPU placement for VAE/text/image preprocess stages, reserve adjustment, validated attention mode changes, reduced frame count/resolution for a restricted tier, or multi-XPU escalation. Repeating generic `lowvram` settings without a new hypothesis is not a mitigation.
 
+**Block-swapping the primary generative model is not a mitigation -- it is a hard-stop signal, even when the run completes without OOM.** Confirmed live: LongCat-Avatar-15 (bf16, ~30 GB active transformer weights) on a 30.3 GB-class XPU node required `WanVideoBlockSwap` to hold half the transformer (~15 GB) on host and half on device, transferred synchronously (`Non-blocking memory transfer: False`) every step. The run eventually completed -- no OOM, no failed node -- but was impractically slow (the API server itself became unresponsive for extended stretches while blocked on transfer) and is not viable for production delivery. A "successful" run is not automatically tight success if it only succeeds by swapping the bulk of the primary model between host and device. Treat block-swap as an acceptable mitigation only for a small, targeted offload (e.g. VAE/text-encoder residency, a few edge blocks) -- not for the primary model's main weight mass. If the primary model's own active/on-device weight requirement alone leaves less than roughly 2 GB of true headroom in the target's usable VRAM budget (e.g. >28 GB active weights on a ~30 GB-class card) and the runtime evidence shows block-swap engaging to make it fit at all, classify as **capacity hard stop** regardless of whether the run completes -- do not classify it as tight success just because it finished.
+
 Static model-file sums are an upper-bound warning, not a resident-memory measurement. A file-size sum that exceeds device memory should trigger telemetry and staged-execution reasoning, not an automatic hard stop. Conversely, a successful run above 80% budget is not comfortable capacity; keep the exact launch flags, offload behavior, and memory polling evidence with the result.
 
 ## Common failure signatures
@@ -90,6 +92,8 @@ Capacity hard-stop evidence must include:
 ## Hard stops
 
 Stop and classify as capacity hard stop when runtime and theory both exceed budget.
+
+Stop and classify as capacity hard stop when the primary model requires block-swapping the bulk of its own weights (not just VAE/text-encoder/edge-block offload) to fit the target's usable VRAM at all -- even if the run completes -- see the block-swap note above. A completed-but-impractically-slow run is not tight success.
 
 Do not classify report/accounting defects as capacity hard stops. If history succeeded and outputs/telemetry exist, repair the report/accounting artifact without rerunning expensive GPU work unless the evidence is stale.
 
