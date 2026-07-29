@@ -16,6 +16,10 @@ This includes:
 
 Use before patching custom nodes or declaring XPU support.
 
+## Source authority (agent-local mirror vs runtime checkout)
+
+The runtime docker node's custom-node checkout is the authoritative source for source-audit and behavior claims. The agent-local mirror is a convenience only; if commit hashes differ, the runtime checkout governs. Record both hashes when they differ (and note which one each finding was read against), so Step 05 can reconcile without re-auditing. This does not weaken the no-bypass / no-edit-source rules (Contract items 1-2): it only specifies which copy of the read-only source is canonical for claims. When the agent and runtime mirrors match (same commit hash), Step 04 proceeds with no extra reconciliation.
+
 ## Inputs
 
 - custom-node source paths
