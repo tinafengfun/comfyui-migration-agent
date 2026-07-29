@@ -33,6 +33,22 @@ export interface TaskStateLedgerStep {
   handoff_ref?: string;
 }
 
+/**
+ * A backend/tool fault recorded when an ask_user dispatch fails as a tool
+ * error (NOT a human "no answer"). Distinct from a human-gate event: this
+ * records that the tool itself failed to reach a human decision, requiring
+ * operator attention -- it is never an auto-proceed signal (the permanently
+ * rejected gate-skip pattern stays banned).
+ */
+export interface BackendToolFault {
+  id: string;
+  taskId: string;
+  stepId?: string;
+  tool: string;
+  reason: string;
+  occurredAt: string;
+}
+
 export interface TaskStateLedger {
   schema_version: 1;
   generated_by: "orchestrator";
@@ -45,7 +61,10 @@ export interface TaskStateLedger {
   updated_at: string;
   steps: TaskStateLedgerStep[];
   human_decisions: HumanDecision[];
+  backend_faults: BackendToolFault[];
 }
+
+const BACKEND_FAULTS_FILENAME = "backend-faults.json";
 
 /**
  * Pure assembly of the ledger shape from already-authoritative backend data.
@@ -56,7 +75,8 @@ export interface TaskStateLedger {
 export function buildTaskStateLedger(
   task: MigrationTask,
   decisions: HumanDecision[],
-  handoffRefs: Record<string, string> = {}
+  handoffRefs: Record<string, string> = {},
+  backendFaults: BackendToolFault[] = []
 ): TaskStateLedger {
   return {
     schema_version: 1,
@@ -77,7 +97,8 @@ export function buildTaskStateLedger(
       error: step.error,
       ...(handoffRefs[step.id] ? { handoff_ref: handoffRefs[step.id] } : {})
     })),
-    human_decisions: decisions
+    human_decisions: decisions,
+    backend_faults: backendFaults
   };
 }
 
@@ -99,9 +120,63 @@ export async function writeTaskStateLedger(
       handoffRefs[step.id] = relRef;
     }
   }
-  const ledger = buildTaskStateLedger(task, decisions, handoffRefs);
+  const backendFaults = await readBackendFaults(task.artifactPath);
+  const ledger = buildTaskStateLedger(task, decisions, handoffRefs, backendFaults);
   const taskStatePath = getLayoutForTask(task).taskStatePath;
   await writeJson(taskStatePath, ledger);
+}
+
+/**
+ * Appends a backend/tool fault to the per-task `backend-faults.json` sidecar
+ * (under artifactPath) and reflects it immediately into `task-state.json` if a
+ * ledger already exists on disk, so the operator sees the fault in the ledger
+ * without waiting for the next `writeTaskStateLedger` rebuild. Called from the
+ * ask_user dispatch path (`copilotSdkRunner.ts`) when ask_user returns a tool
+ * error that exhausts retries. Never an auto-proceed signal.
+ */
+export async function recordBackendToolFault(input: {
+  taskId: string;
+  stepId?: string;
+  tool: string;
+  reason: string;
+  artifactPath: string;
+  workspacePath: string;
+}): Promise<BackendToolFault> {
+  const fault: BackendToolFault = {
+    id: `fault-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    taskId: input.taskId,
+    stepId: input.stepId,
+    tool: input.tool,
+    reason: input.reason,
+    occurredAt: new Date().toISOString()
+  };
+  const existing = await readBackendFaults(input.artifactPath);
+  const updated = [...existing, fault];
+  const sidecarPath = path.join(input.artifactPath, BACKEND_FAULTS_FILENAME);
+  await writeJson(sidecarPath, updated);
+  // Reflect immediately into the ledger if one already exists on disk. If no
+  // ledger exists yet, the next writeTaskStateLedger call will pick up the
+  // sidecar (it reads backend-faults.json before building the ledger).
+  const taskStatePath = path.join(input.workspacePath, "task-state.json");
+  try {
+    const raw = await fs.readFile(taskStatePath, "utf8");
+    const ledger = JSON.parse(raw) as TaskStateLedger;
+    ledger.backend_faults = updated;
+    await writeJson(taskStatePath, ledger);
+  } catch {
+    // No ledger on disk yet (or unreadable) -- sidecar is the source of truth.
+  }
+  return fault;
+}
+
+async function readBackendFaults(artifactPath: string): Promise<BackendToolFault[]> {
+  try {
+    const raw = await fs.readFile(path.join(artifactPath, BACKEND_FAULTS_FILENAME), "utf8");
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? (parsed as BackendToolFault[]) : [];
+  } catch {
+    return [];
+  }
 }
 
 async function fileExists(filePath: string): Promise<boolean> {
