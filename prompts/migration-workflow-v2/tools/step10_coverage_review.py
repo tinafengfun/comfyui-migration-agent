@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import sys
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -34,7 +35,6 @@ def write_csv(path: Path, rows: list[dict[str, Any]], fieldnames: list[str]) -> 
 
 def prompt_statuses(prompt_map_csv: Path) -> dict[str, str]:
     return {row["node_id"]: row["prompt_status"] for row in read_csv(prompt_map_csv)}
-
 
 def smoke_evidence(step07_summary: dict[str, Any]) -> dict[str, dict[str, Any]]:
     evidence: dict[str, dict[str, Any]] = defaultdict(
@@ -82,16 +82,21 @@ def classify_row(
     return "uncovered_executable", "none", "blocks release until covered or explicitly gated"
 
 
-def build_coverage(workspace: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    artifact_dir = workspace / "artifacts"
-    inventory = read_csv(artifact_dir / "03-node-inventory.csv")
-    prompt_map = prompt_statuses(artifact_dir / "06-node-prompt-map.csv")
-    node_accounting = read_json(artifact_dir / "08-full-validation" / "08-node-accounting.json")
+def build_coverage(
+    inventory_csv: Path,
+    prompt_map_csv: Path,
+    node_accounting_json: Path,
+    step07_summary: Path,
+    step08_summary: Path,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    inventory = read_csv(inventory_csv)
+    prompt_map = prompt_statuses(prompt_map_csv)
+    node_accounting = read_json(node_accounting_json)
     full_nodes = {item["node_id"]: item for item in node_accounting["nodes"]}
-    step07_summary = read_json(artifact_dir / "07-branch-smoke-summary.json")
-    step08_summary = read_json(artifact_dir / "08-full-validation-summary.json")
-    smoke = smoke_evidence(step07_summary)
-    outputs = full_output_nodes(step08_summary)
+    step07 = read_json(step07_summary)
+    step08 = read_json(step08_summary)
+    smoke = smoke_evidence(step07)
+    outputs = full_output_nodes(step08)
 
     rows: list[dict[str, Any]] = []
     for item in inventory:
@@ -133,11 +138,11 @@ def build_coverage(workspace: Path) -> tuple[list[dict[str, Any]], dict[str, Any
             status: sum(1 for item in rows if item["prompt_status"] == status)
             for status in sorted({item["prompt_status"] for item in rows})
         },
-        "branch_total": step07_summary["branches_total"],
-        "branch_run": step07_summary["branches_run"],
-        "branch_statuses": {item["branch"]: item["status"] for item in step07_summary["branch_summaries"]},
-        "step08_result_class": step08_summary["result_class"],
-        "step08_peak_memory_budget_ratio": step08_summary["memory_runtime"]["peak_memory_budget_ratio"],
+        "branch_total": step07["branches_total"],
+        "branch_run": step07["branches_run"],
+        "branch_statuses": {item["branch"]: item["status"] for item in step07["branch_summaries"]},
+        "step08_result_class": step08["result_class"],
+        "step08_peak_memory_budget_ratio": step08["memory_runtime"]["peak_memory_budget_ratio"],
     }
 
 
@@ -259,12 +264,104 @@ def make_report(summary: dict[str, Any], report_path: Path) -> None:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--workspace", type=Path, default=WORKSPACE_DEFAULT)
+    parser = argparse.ArgumentParser(
+        description=(
+            "Reconcile Step 10 coverage across source, prompt, smoke, and full-run "
+            "evidence. All input paths are supplied via CLI flags; --workspace is an "
+            "optional convenience fallback that resolves the conventional artifact "
+            "filenames under <workspace>/artifacts."
+        )
+    )
+    parser.add_argument(
+        "--inventory-csv",
+        type=Path,
+        default=None,
+        help="Path to 03-node-inventory.csv. Required unless --workspace is given.",
+    )
+    parser.add_argument(
+        "--prompt-map-csv",
+        type=Path,
+        default=None,
+        help="Path to 06-node-prompt-map.csv. Required unless --workspace is given.",
+    )
+    parser.add_argument(
+        "--node-accounting-json",
+        type=Path,
+        default=None,
+        help="Path to 08-full-validation/08-node-accounting.json. Required unless --workspace is given.",
+    )
+    parser.add_argument(
+        "--step07-summary",
+        type=Path,
+        default=None,
+        help="Path to 07-branch-smoke-summary.json. Required unless --workspace is given.",
+    )
+    parser.add_argument(
+        "--step08-summary",
+        type=Path,
+        default=None,
+        help="Path to 08-full-validation-summary.json. Required unless --workspace is given.",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=None,
+        help="Directory to write Step 10 artifacts. Defaults to <workspace>/artifacts or the current directory.",
+    )
+    parser.add_argument(
+        "--workspace",
+        type=Path,
+        default=None,
+        help="Optional convenience fallback: resolve conventional artifact filenames under <workspace>/artifacts.",
+    )
     args = parser.parse_args()
-    workspace = args.workspace.resolve()
-    artifact_dir = workspace / "artifacts"
-    rows, summary_base = build_coverage(workspace)
+
+    workspace: Path | None = args.workspace.resolve() if args.workspace is not None else None
+    artifact_dir: Path
+    if args.output_dir is not None:
+        artifact_dir = args.output_dir.resolve()
+    elif workspace is not None:
+        artifact_dir = workspace / "artifacts"
+    else:
+        artifact_dir = Path.cwd()
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+
+    def resolve(cli_val: Path | None, conventional_name: str) -> Path | None:
+        if cli_val is not None:
+            return cli_val
+        if workspace is not None:
+            return workspace / "artifacts" / conventional_name
+        return None
+
+    inventory_csv = resolve(args.inventory_csv, "03-node-inventory.csv")
+    prompt_map_csv = resolve(args.prompt_map_csv, "06-node-prompt-map.csv")
+    node_accounting_json = resolve(args.node_accounting_json, "08-full-validation/08-node-accounting.json")
+    step07_summary = resolve(args.step07_summary, "07-branch-smoke-summary.json")
+    step08_summary = resolve(args.step08_summary, "08-full-validation-summary.json")
+
+    missing: list[str] = []
+    for label, path in [
+        ("--inventory-csv", inventory_csv),
+        ("--prompt-map-csv", prompt_map_csv),
+        ("--node-accounting-json", node_accounting_json),
+        ("--step07-summary", step07_summary),
+        ("--step08-summary", step08_summary),
+    ]:
+        if path is None:
+            missing.append(label)
+        elif not path.is_file():
+            missing.append(f"{label} (not found: {path})")
+    if missing:
+        print(
+            "ERROR: missing required inputs. Provide via CLI flags or a --workspace "
+            "with the conventional artifacts present:\n  - " + "\n  - ".join(missing),
+            file=sys.stderr,
+        )
+        return 1
+
+    rows, summary_base = build_coverage(
+        inventory_csv, prompt_map_csv, node_accounting_json, step07_summary, step08_summary
+    )
 
     coverage_csv = artifact_dir / "10-node-coverage.csv"
     summary_path = artifact_dir / "10-coverage-summary.json"
@@ -291,9 +388,9 @@ def main() -> int:
     decision = completion_decision(summary_base)
     summary = {
         "generated_at": utc_now(),
-        "workspace": str(workspace),
+        "workspace": str(workspace) if workspace is not None else None,
         "tool_path": str(Path(__file__).resolve()),
-        "command_used": f"{Path(__file__).resolve()} --workspace {workspace}",
+        "command_used": f"{Path(__file__).resolve()} {' '.join(sys.argv[1:])}",
         **summary_base,
         "coverage_csv": str(coverage_csv),
         "claim_boundary": {
@@ -306,7 +403,7 @@ def main() -> int:
             ],
         },
         "step11_context": {
-            "workspace": str(workspace),
+            "workspace": str(workspace) if workspace is not None else None,
             "artifact_folder": str(artifact_dir),
             "step10_summary": str(summary_path),
             "coverage_csv": str(coverage_csv),
