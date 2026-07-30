@@ -47,6 +47,7 @@ Audit risky workflow and custom-node source paths for Intel XPU compatibility be
    - feature-development gap: CUDA-shaped architecture, missing `torch.xpu` path, unsupported custom kernel, or hard-coded device model requires real source work
 6. Classify required change: workflow/runtime policy, ComfyUI core patch, custom-node patch, environment/dependency fix, CPU fallback, or blocked feature work.
 7. Record exact source locations, workflow widget evidence, expected failure signatures, and validation needed.
+8. **CUDA-ism scan (mandatory).** For every custom-node source root, grep both the init code AND the runtime forward loop (`forward()` and helpers it calls during sampling) for `torch.cuda.is_available()`, `torch.cuda.stream`/`Stream`/`Event`, `.cuda()`, and `device='cuda'`/`cuda:0`. Classify each hit as (a) import-time crash, (b) silent feature disable, or (c) device-mismatch-at-runtime. A device-agnostic init method does NOT prove the runtime path is safe — check the forward loop separately. Worked example: `ComfyUI-WanVideoWrapper/wanvideo/modules/model.py` `forward()` lines 3202-3209 gate block cycling behind `torch.cuda.is_available()`; the init `block_swap()` (lines 2040-2065) is device-agnostic and would have hidden the runtime cuda-gate from an init-only audit.
 
 ## Output
 
@@ -95,6 +96,8 @@ Also stop native-XPU claims when:
 Some Dasiwa custom nodes needed code patches, some only needed Intel-safe runtime overrides, and some only needed installation. Mixlab showed that import-time side effects and family-level risk must be classified separately.
 
 Zimage showed that source audit must combine source code and workflow widget evidence. A package may have SDPA or CPU fallback in source while the workflow still hard-codes `cuda:0`, and a prompt-enhancement/display-looking branch may be critical if its text output feeds generation. Zimage also showed that "no `torch.xpu` implementation found" is not automatically a failure for ComfyUI core nodes that use ComfyUI device abstractions, but it is a hard boundary against claiming native XPU support for independent custom nodes until patched or validated.
+
+WanVideoWrapper showed that an init method can be device-agnostic while the runtime forward loop is CUDA-gated: `block_swap()` (init) offloads blocks to CPU correctly on XPU, but `forward()` lines 3202-3209 gate the on/off cycling behind `torch.cuda.is_available()`, silently disabling block-swap on XPU and producing a device-mismatch or full-residency OOM during sampling rather than an import error. The CUDA-ism scan must therefore cover the runtime forward loop, not just the init method, and must classify silent feature disables (class b) separately from import-time crashes.
 
 ## Automation hook
 
