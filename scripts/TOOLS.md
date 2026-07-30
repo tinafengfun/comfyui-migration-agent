@@ -109,3 +109,26 @@ node is prepared once instead of tripping the same gaps every migration.
 | Sync analytics DB | `sync-analytics.mts` |
 | XPU python wrapper | `xpu-python.sh` |
 | XPU memory telemetry | `xpu-smi dump -d 0 -m 18` (provides per-second GPU Memory Used MiB). Poll duration should cover the full workflow execution (e.g., 120s for typical upscale runs). |
+| Out-of-band monitor when the ComfyUI API is blocked by synchronous sampling (100% CPU, HTTP timeouts) | `xpu-run-monitor.mts` |
+
+`xpu-run-monitor.mts` — polls `xpu-smi` (GPU Memory Used `-m 18` / Util % `-m 5`) and
+`/proc/<hostPid>/task/<tid>/stat` (per-thread utime+stime, fields 14+15) from *outside*
+the container to confirm active computation (CPU time increasing) and VRAM budget while
+the in-process HTTP API is unresponsive. Use this instead of hand-writing the
+`xpu-smi dump` + `/proc/PID/task/*/stat` polling that Steps 08/09 had to improvise.
+Read-only and non-invasive: no ptrace, no signals, no device writes — running it cannot
+perturb the computation it is observing (unlike py-spy, which needs `SYS_PTRACE`).
+
+```
+npx tsx scripts/xpu-run-monitor.mts --container <name> [--node <gpu-node>] \
+  [--prompt-id <id>] [--pid <n>] [--device 0] [--interval 5] [--samples 12] \
+  [--vram-budget-mib 30720] [--json]
+```
+
+`--node` resolves an ssh node from `gpu-nodes.json` (override path with `GPU_NODES_PATH=`);
+omitted → runs locally. `--container` resolves the host PID via `docker inspect
+{{.State.Pid}}`; `--pid` uses a host PID directly (bare-metal run, no container).
+`--prompt-id` is only echoed in the report header for correlation — the API is assumed
+unresponsive, so the monitor never queries the server. `--vram-budget-mib` flags (does not
+act on) a VRAM breach. `--json` streams one NDJSON row per sample; default prints a table
+plus a `summary:` line counting samples with increasing CPU time.
