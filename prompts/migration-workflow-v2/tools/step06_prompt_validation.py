@@ -582,24 +582,166 @@ def render_report(summary: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _load_step05_context(workspace: Path) -> dict[str, Any]:
+    """Best-effort read of Step 05 handoff context from task-state.json.
+
+    Handles both dict-based ({"steps": {"05": {...}}}) and list-based
+    ({"steps": [{"id": "05", ...}]}) step layouts. Returns the
+    completion_signals.step06_context dict if present, otherwise an empty
+    dict; callers must not assume any key is present.
+    """
+    task_state_path = workspace / "task-state.json"
+    if not task_state_path.is_file():
+        return {}
+    try:
+        task_state = read_json(task_state_path)
+    except Exception:
+        return {}
+    steps = task_state.get("steps")
+    step05 = None
+    if isinstance(steps, dict):
+        step05 = steps.get("05") or steps.get(5)
+    elif isinstance(steps, list):
+        for entry in steps:
+            if isinstance(entry, dict) and str(entry.get("id")) == "05":
+                step05 = entry
+                break
+    if not isinstance(step05, dict):
+        return {}
+    signals = step05.get("completion_signals")
+    if not isinstance(signals, dict):
+        return {}
+    ctx = signals.get("step06_context")
+    return ctx if isinstance(ctx, dict) else {}
+
+
 def main() -> int:
     original_argv = sys.argv[:]
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--workspace", type=Path, default=WORKSPACE_DEFAULT)
-    parser.add_argument("--comfy-root", type=Path, default=COMFY_ROOT_DEFAULT)
+    parser = argparse.ArgumentParser(
+        description=(
+            "Convert and validate a ComfyUI workflow API prompt for Step 06. "
+            "All input paths are supplied via CLI flags; --workspace is an "
+            "optional convenience fallback that reads task-state.json (supports "
+            "both dict- and list-based step layouts)."
+        )
+    )
+    parser.add_argument(
+        "--workflow",
+        type=Path,
+        default=None,
+        help="Source workflow JSON (GUI .json exported from ComfyUI). Required unless available via --workspace.",
+    )
+    parser.add_argument(
+        "--artifact-dir",
+        type=Path,
+        default=None,
+        help="Directory to write Step 06 artifacts. Defaults to <workspace>/artifacts or ./artifacts.",
+    )
+    parser.add_argument(
+        "--object-info",
+        type=Path,
+        default=None,
+        help="Path to object_info.json (Step 05 artifact). Required unless available via --workspace.",
+    )
+    parser.add_argument(
+        "--extra-model-paths",
+        type=Path,
+        default=None,
+        help="Path to extra_model_paths.yaml. Required unless available via --workspace.",
+    )
+    parser.add_argument(
+        "--branch-map-csv",
+        type=Path,
+        default=None,
+        help="CSV with an 'output_node_id' column listing intended terminal nodes (e.g. 03-branch-map.csv). Required unless available via --workspace.",
+    )
+    parser.add_argument(
+        "--api-url",
+        default=None,
+        help="ComfyUI API URL recorded into step07_context (optional).",
+    )
+    parser.add_argument(
+        "--non-source-identical-node-ids",
+        default=None,
+        help="Comma-separated node IDs that are non-source-identical substitutes (optional).",
+    )
+    parser.add_argument(
+        "--workspace",
+        type=Path,
+        default=None,
+        help="Optional convenience fallback: read paths from <workspace>/task-state.json Step 05 completion_signals.step06_context.",
+    )
+    parser.add_argument(
+        "--comfy-root",
+        type=Path,
+        default=COMFY_ROOT_DEFAULT,
+        help="Path to the ComfyUI repository root (for workflow_to_prompt imports).",
+    )
     args = parser.parse_args()
 
-    workspace = args.workspace.resolve()
-    artifact_dir = workspace / "artifacts"
-    artifact_dir.mkdir(parents=True, exist_ok=True)
     comfy_root = args.comfy_root.resolve()
-    workflow_path = Path(read_json(workspace / "task-state.json")["steps"]["05"]["completion_signals"]["step06_context"]["source_workflow_copy"])
-    extra_model_paths = Path(
-        read_json(workspace / "task-state.json")["steps"]["05"]["completion_signals"]["step06_context"][
-            "extra_model_paths_config"
+
+    # Resolve paths: CLI args are primary; --workspace task-state.json is a
+    # convenience fallback (handles dict- and list-based step layouts).
+    workspace: Path | None = None
+    ctx: dict[str, Any] = {}
+    if args.workspace is not None:
+        workspace = args.workspace.resolve()
+        ctx = _load_step05_context(workspace)
+
+    def resolve(cli_val: Path | None, ctx_key: str) -> Path | None:
+        if cli_val is not None:
+            return Path(cli_val)
+        if ctx.get(ctx_key):
+            return Path(ctx[ctx_key])
+        return None
+
+    workflow_path = resolve(args.workflow, "source_workflow_copy")
+    extra_model_paths = resolve(args.extra_model_paths, "extra_model_paths_config")
+    object_info_path = resolve(args.object_info, "object_info_artifact")
+    branch_map_csv = resolve(args.branch_map_csv, "branch_map_csv")
+    api_url = args.api_url or ctx.get("api_url")
+    non_source_ids_raw = args.non_source_identical_node_ids
+    if non_source_ids_raw is None:
+        non_source_ids_raw = ctx.get("non_source_identical_node_ids")
+
+    if args.artifact_dir is not None:
+        artifact_dir = args.artifact_dir.resolve()
+    elif workspace is not None:
+        artifact_dir = workspace / "artifacts"
+    else:
+        artifact_dir = Path.cwd() / "artifacts"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+
+    # Validate required inputs exist.
+    missing: list[str] = []
+    for label, path in [
+        ("--workflow", workflow_path),
+        ("--extra-model-paths", extra_model_paths),
+        ("--object-info", object_info_path),
+        ("--branch-map-csv", branch_map_csv),
+    ]:
+        if path is None:
+            missing.append(label)
+        elif not path.is_file():
+            missing.append(f"{label} (not found: {path})")
+    if missing:
+        print(
+            "ERROR: missing required inputs. Provide via CLI flags or a --workspace "
+            "with task-state.json Step 05 completion_signals.step06_context:\n  - "
+            + "\n  - ".join(missing),
+            file=sys.stderr,
+        )
+        return 1
+
+    if isinstance(non_source_ids_raw, (list, tuple)):
+        non_source_identical_node_ids = [str(x) for x in non_source_ids_raw]
+    elif isinstance(non_source_ids_raw, str) and non_source_ids_raw:
+        non_source_identical_node_ids = [
+            s.strip() for s in non_source_ids_raw.split(",") if s.strip()
         ]
-    )
-    branch_map_csv = artifact_dir / "03-branch-map.csv"
+    else:
+        non_source_identical_node_ids = []
 
     workflow = load_workflow(workflow_path)
     source_prompt = convert_workflow(comfy_root, workflow)
@@ -633,11 +775,6 @@ def main() -> int:
     write_json(variant_validation_path, variant_validation)
 
     intended = intended_outputs(branch_map_csv)
-    object_info_path = Path(
-        read_json(workspace / "task-state.json")["steps"]["05"]["completion_signals"]["step06_context"][
-            "object_info_artifact"
-        ]
-    )
     object_info = read_json(object_info_path)
     validation_outputs, terminal_non_output = partition_validation_outputs(workflow, object_info, intended)
     source_status = output_status(source_validation, validation_outputs, terminal_non_output)
@@ -657,7 +794,7 @@ def main() -> int:
 
     summary = {
         "generated_at": utc_now(),
-        "workspace": str(workspace),
+        "workspace": str(workspace) if workspace is not None else None,
         "tool_path": str(Path(__file__).resolve()),
         "command_used": " ".join([sys.executable, str(Path(__file__).resolve()), *original_argv[1:]]),
         "validation_method": "offline execution.validate_prompt; no /prompt queue",
@@ -686,17 +823,15 @@ def main() -> int:
         source_status, variant_status, variant_validation, node_map_rows, variant_changes
     )
     summary["step07_context"] = {
-        "workspace": str(workspace),
+        "workspace": str(workspace) if workspace is not None else None,
         "artifact_folder": str(artifact_dir),
         "prompt_for_branch_smoke": str(variant_prompt_path),
         "branch_prompts_csv": str(branch_csv),
         "branch_prompt_dir": str(branch_dir),
         "branch_map_csv": str(branch_map_csv),
-        "api_url": read_json(workspace / "task-state.json")["steps"]["05"]["completion_signals"]["api_url"],
+        "api_url": api_url,
         "validation_log": str(validation_log),
-        "non_source_identical_node_ids": read_json(workspace / "task-state.json")["steps"]["05"][
-            "completion_signals"
-        ]["non_source_identical_node_ids"],
+        "non_source_identical_node_ids": non_source_identical_node_ids,
     }
 
     summary_path = artifact_dir / "06-prompt-validation-summary.json"

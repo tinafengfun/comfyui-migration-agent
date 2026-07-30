@@ -435,6 +435,21 @@ def main() -> int:
     )
     args = parser.parse_args()
 
+    # Validate that input files exist before doing any work.
+    missing: list[str] = []
+    for label, path in [
+        ("--inventory", args.inventory),
+        ("--full-history", args.full_history),
+    ]:
+        if not path.is_file():
+            missing.append(f"{label} (not found: {path})")
+    for path in args.smoke_histories:
+        if not path.is_file():
+            missing.append(f"--smoke-histories (not found: {path})")
+    if missing:
+        print("ERROR: missing required inputs:\n  - " + "\n  - ".join(missing), file=sys.stderr)
+        return 1
+
     output_dir = args.output_dir.resolve()
 
     # 1. Parse inventory
