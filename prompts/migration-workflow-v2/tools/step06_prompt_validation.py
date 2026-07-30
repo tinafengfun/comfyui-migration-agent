@@ -82,6 +82,88 @@ def convert_workflow(comfy_root: Path, workflow: dict[str, Any]) -> dict[str, An
     return workflow_to_prompt(workflow, forced_defaults={})
 
 
+# Values the ComfyUI GUI writes for the seed widget's "control_after_generate"
+# companion selector. The GUI inserts this value into widgets_values immediately
+# after the seed value, but it has no corresponding API input, so the converter's
+# straight zip of widget-annotated inputs against widgets_values shifts every
+# downstream widget by one slot (e.g. force_offload <- "randomize").
+CONTROL_AFTER_GENERATE_VALUES = {"randomize", "fixed", "increment", "decrement"}
+
+
+def repair_seed_control_widget_alignment(
+    workflow: dict[str, Any], prompt: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """Re-align widget inputs after the GUI-only control_after_generate selector.
+
+    The GUI-only ``control_after_generate`` widget (value like ``"randomize"``)
+    sits in ``widgets_values`` right after the ``seed`` value but has no API
+    input. The converter zips widget-annotated inputs straight against
+    ``widgets_values``, so the selector consumes the next widget's slot and every
+    following widget is off by one. This re-maps the widget inputs for each
+    affected node, skipping that selector, and writes the corrected values back
+    into the prompt (link inputs are never touched). The source workflow is only
+    read, never mutated.
+    """
+    changes: list[dict[str, Any]] = []
+    for node in workflow.get("nodes", []):
+        node_id = str(node["id"])
+        prompt_node = prompt.get(node_id)
+        if not isinstance(prompt_node, dict):
+            continue
+        widget_values = node.get("widgets_values")
+        if not isinstance(widget_values, list) or not widget_values:
+            continue
+        # Ordered widget-backed, non-linked input names from the GUI inputs array
+        # (the same set the converter consumes sequentially from widgets_values).
+        widget_input_names = [
+            item.get("name")
+            for item in (node.get("inputs") or [])
+            if isinstance(item, dict)
+            and item.get("widget") is not None
+            and item.get("link") is None
+            and item.get("name")
+        ]
+        if not widget_input_names or "seed" not in widget_input_names:
+            continue
+
+        values = list(widget_values)
+        corrected: dict[str, Any] = {}
+        vi = 0
+        skipped_selector = False
+        for name in widget_input_names:
+            if vi >= len(values):
+                break
+            corrected[name] = values[vi]
+            vi += 1
+            # The GUI inserts the control_after_generate selector right after the
+            # seed widget value; consume and skip it so downstream widgets align.
+            if name == "seed" and vi < len(values) and values[vi] in CONTROL_AFTER_GENERATE_VALUES:
+                vi += 1
+                skipped_selector = True
+
+        if not skipped_selector:
+            continue  # no control_after_generate slot -> converter already aligned
+
+        inputs = prompt_node.setdefault("inputs", {})
+        for name, value in corrected.items():
+            if name not in inputs:
+                continue  # never inject a widget input the converter omitted (e.g. link-overridden)
+            old_value = inputs.get(name)
+            if old_value != value:
+                changes.append(
+                    {
+                        "node_id": node_id,
+                        "class_type": prompt_node.get("class_type"),
+                        "input_name": name,
+                        "old_value": old_value,
+                        "new_value": value,
+                        "reason": "control_after_generate GUI selector shifted downstream widget values; re-aligned from widgets_values",
+                    }
+                )
+                inputs[name] = value
+    return changes
+
+
 def load_extra_model_paths(comfy_root: Path, extra_model_paths: Path) -> None:
     import utils.extra_config
 
@@ -445,6 +527,21 @@ def render_report(summary: dict[str, Any]) -> str:
     lines.extend(
         [
             "",
+            "## Converter repairs (widget re-alignment, source workflow untouched)",
+            "",
+        ]
+    )
+    if summary.get("converter_repairs"):
+        for change in summary["converter_repairs"]:
+            lines.append(
+                f"- Node {change['node_id']} `{change['class_type']}.{change['input_name']}`: "
+                f"`{change['old_value']}` -> `{change['new_value']}` ({change['reason']})"
+            )
+    else:
+        lines.append("- none")
+    lines.extend(
+        [
+            "",
             "## Headless-test-only bypasses (never applied to delivered/GUI workflow)",
             "",
         ]
@@ -506,6 +603,7 @@ def main() -> int:
 
     workflow = load_workflow(workflow_path)
     source_prompt = convert_workflow(comfy_root, workflow)
+    converter_repairs = repair_seed_control_widget_alignment(workflow, source_prompt)
     # source_prompt (source-preserving) is only ever structurally validated, never
     # queued (see run_validations), so it never hits a human-in-the-loop hang and
     # is left completely untouched. variant_prompt IS queued for real execution by
@@ -578,6 +676,7 @@ def main() -> int:
         "variant_validation_path": str(variant_validation_path),
         "variant_validation": variant_validation,
         "variant_output_status": variant_status,
+        "converter_repairs": converter_repairs,
         "terminal_non_output_branches": terminal_non_output,
         "node_prompt_map_csv": str(node_map_csv),
         "branch_prompts_csv": str(branch_csv),
