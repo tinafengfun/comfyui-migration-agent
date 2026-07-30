@@ -45,6 +45,17 @@ Retain patch bundle, deployment guide, validation report, outputs, and artifact 
 
 The output bundle must include only evidence that supports the declared boundary. If Step 12 is pending, include a manual test plan and `customer_ready=false`.
 
+## Restricted-runtime-policy delivery pattern
+
+When the migration is a restricted runtime-policy variant (not source-identical, smoke-level only — i.e. `workflows/runtime-policy-changes.json` is non-empty AND full-size/validation is incomplete), apply this 6-point checklist before writing `11-delivery-summary.json`. These are pre-specified defaults, not ad-hoc decisions to rediscover during the run:
+
+1. **`customer_ready=false`** in `completion_decision` and `support_matrix`. Smoke-level support is the only supported claim; customer-ready stays false until Step 12 GUI/manual evidence exists.
+2. **Bundle only boundary-matching evidence.** The output bundle and `evidence_artifacts` list must include only artifacts that support the `restricted-runtime-policy-smoke-level` claim boundary. Exclude full-size outputs (none exist), GUI acceptance (deferred), and any evidence from prior/abandoned attempts.
+3. **Preserve source and runtime-policy artifacts as separate files.** Copy `workflows/source-workflow.json` unmodified AND the runtime-policy prompts (`runtime-policy-prompt.json`, mitigation prompts) as distinct files. Do NOT merge them into a single importable GUI workflow in Step 11.
+4. **Route GUI/manual acceptance to Step 12.** Set `acceptance_steps.gui_manual_met=false`, `step12_required=true`, and `next_step_recommendation` to the Step 12 GUI/manual acceptance path. Do not claim GUI/manual success in Step 11.
+5. **`step12_context` must include:** delivery directory, source workflow copy, runtime-policy prompts (runtime-policy + mitigation), model-path config, validation report, coverage report, manual test plan, API URL, and an explicit `claim_boundary_warning` stating this is a restricted runtime-policy variant, smoke-level only, NOT source-identical, NOT customer-ready, and that `source-workflow.json` must not be used for GUI import until Step 12 produces `runtime-policy-gui-workflow.json`.
+6. **`runtime-policy-gui-workflow.json` is produced in Step 12, not Step 11.** Do not synthesize or claim it in Step 11. It exists only after Step 12 applies the runtime-policy settings in the GUI and exports. Any `customer_ready`/GUI-acceptance claim is invalid until that file is present in the package.
+
 ## Hard stops
 
 Stop delivery if reproduction steps or evidence do not support the support statement.
