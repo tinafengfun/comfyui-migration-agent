@@ -13,6 +13,7 @@ import {
   summarizeSdkEventForStorage
 } from "./contextRetention";
 import { serializeStepJobForAgent } from "./promptSkillCompiler";
+import { recordBackendToolFault } from "./taskStateLedger";
 
 
 export type AgentEventSink = (
@@ -79,6 +80,141 @@ const RETRYABLE_CONNECTION_ERROR_PATTERNS = [
 export function isRetryableSdkConnectionError(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
   return RETRYABLE_CONNECTION_ERROR_PATTERNS.some((pattern) => pattern.test(error.message));
+}
+
+/**
+ * Real incident this closes: during human gates in Steps 02, 04, and 12 the
+ * ask_user dispatch returned "The user was unable to respond due to an error"
+ * -- a backend/tool fault (the human never ignored the gate). The backend
+ * provided no retry, no reconnection, and no Web-visible surfacing of the tool
+ * fault, so a gate could stall silently. The fix below retries transient
+ * ask_user tool faults with backoff, and on exhaustion emits a Web-visible
+ * backend-fault event (distinct from a pending human_question gate) and
+ * records the fault in the task ledger. It NEVER auto-proceeds with a guessed
+ * default -- the permanently-rejected gate-skip pattern stays banned.
+ */
+const ASK_USER_MAX_ATTEMPTS = Math.max(1, Number(process.env.MIGRATION_AGENT_ASK_USER_MAX_ATTEMPTS ?? 3));
+const ASK_USER_BACKOFF_MS = Number(process.env.MIGRATION_AGENT_ASK_USER_BACKOFF_MS ?? 2000);
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/** Human genuinely did not answer in time -- a gate closure, not a tool fault. */
+function isHumanGateTimeoutError(error: unknown): boolean {
+  return error instanceof Error && /Timed out waiting for human decision/i.test(error.message);
+}
+
+/** Gate was cancelled (e.g. hard stop) -- a closure, not a tool fault. */
+function isHumanGateCancellationError(error: unknown): boolean {
+  return error instanceof Error && /^Cancelled:/i.test(error.message);
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Dispatches an ask_user request to the human-gate UI with retry/backoff for
+ * transient tool/backend faults. Exported (and kept free of SDK coupling) so
+ * the retry-then-Web-visible-fault behavior is unit-testable without spinning
+ * a real Copilot SDK session.
+ *
+ * Semantics:
+ *  - No `waitForDecision` (non-UI driver path): surface the gate as a
+ *    human_question event and return a clear "input required" marker. This is
+ *    NOT a guessed default -- it's surfaced to the SDK as an unanswered gate.
+ *  - A human answering resolves immediately (no retry).
+ *  - A human "no answer" timeout or a hard-stop cancellation is a legitimate
+ *    gate closure (not a tool fault): propagate immediately, no retry, so no
+ *    gate can be silently bypassed.
+ *  - Any other rejection is a tool/backend fault: retry up to
+ *    ASK_USER_MAX_ATTEMPTS with linear backoff, re-surfacing the gate each
+ *    attempt. On exhaustion, emit a Web-visible backend-fault event (a
+ *    `progress` event with `data.kind === "backend_tool_fault"`, distinct from
+ *    a pending `human_question` gate) and record the fault in the task ledger,
+ *    then re-throw so the step fails visibly.
+ *
+ * The permanently-rejected auto-proceed-with-guessed-default pattern stays
+ * banned: this function never returns a fabricated answer on a tool fault.
+ */
+export interface AskUserDispatchDeps {
+  taskId: string;
+  stepId: string;
+  artifactPath: string;
+  workspacePath: string;
+  question: HumanQuestion;
+  emit: AgentEventSink;
+  waitForDecision?: HumanDecisionWaiter;
+}
+
+export async function dispatchAskUserWithRetry(
+  deps: AskUserDispatchDeps
+): Promise<{ answer: string; wasFreeform: boolean }> {
+  const { taskId, stepId, artifactPath, workspacePath, question, emit, waitForDecision } = deps;
+  if (!waitForDecision) {
+    await emit({
+      taskId,
+      stepId,
+      type: "human_question",
+      message: question.question,
+      data: question
+    });
+    return {
+      answer: "Human input is required in the migration web UI before this step can continue.",
+      wasFreeform: true
+    };
+  }
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= ASK_USER_MAX_ATTEMPTS; attempt++) {
+    const event = await emit({
+      taskId,
+      stepId,
+      type: "human_question",
+      message: question.question,
+      data: question
+    });
+    try {
+      const decision = await waitForDecision(event);
+      return { answer: decision.answer, wasFreeform: decision.wasFreeform };
+    } catch (error) {
+      lastError = error;
+      if (isHumanGateTimeoutError(error) || isHumanGateCancellationError(error)) {
+        throw error;
+      }
+      if (attempt < ASK_USER_MAX_ATTEMPTS) {
+        await emit({
+          taskId,
+          stepId,
+          type: "progress",
+          message: `ask_user tool fault on attempt ${attempt}/${ASK_USER_MAX_ATTEMPTS} (will retry): ${errorMessage(error)}`
+        });
+        await sleep(ASK_USER_BACKOFF_MS * attempt);
+        continue;
+      }
+    }
+  }
+  const reason = errorMessage(lastError);
+  await emit({
+    taskId,
+    stepId,
+    type: "progress",
+    message: `Backend tool fault: ask_user failed after ${ASK_USER_MAX_ATTEMPTS} attempts and could not reach a human decision. Operator attention required (this is a tool failure, not an ignored gate).`,
+    data: { kind: "backend_tool_fault", tool: "ask_user", attempts: ASK_USER_MAX_ATTEMPTS, reason }
+  });
+  try {
+    await recordBackendToolFault({
+      taskId,
+      stepId,
+      tool: "ask_user",
+      reason,
+      artifactPath,
+      workspacePath
+    });
+  } catch {
+    // Ledger recording must never mask the original tool fault.
+  }
+  throw lastError;
 }
 
 export class CopilotSdkRunner {
@@ -264,24 +400,15 @@ export class CopilotSdkRunner {
             allowFreeform: request.allowFreeform ?? true,
             blockingReason: "other"
           };
-          const event = await emit({
+          return dispatchAskUserWithRetry({
             taskId: job.taskId,
             stepId: job.stepId,
-            type: "human_question",
-            message: request.question,
-            data: question
+            artifactPath: job.artifactPath,
+            workspacePath: job.workspacePath,
+            question,
+            emit,
+            waitForDecision
           });
-          if (waitForDecision) {
-            const decision = await waitForDecision(event);
-            return {
-              answer: decision.answer,
-              wasFreeform: decision.wasFreeform
-            };
-          }
-          return {
-            answer: "Human input is required in the migration web UI before this step can continue.",
-            wasFreeform: true
-          };
         },
         onEvent: async (event: SessionEvent) => {
           const semanticProgress = getSemanticProgress(event);

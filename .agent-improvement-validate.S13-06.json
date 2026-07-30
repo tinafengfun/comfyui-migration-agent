@@ -1,0 +1,7 @@
+{
+  "commands": [
+    "MIGRATION_AGENT_ASK_USER_BACKOFF_MS=1 npx tsx .agent-improvement-validate-helpers/S13-06/check_ask_user_fault_retry.ts",
+    "npx vitest run src/server/taskStateLedger.test.ts src/server/copilotSdkRunner.test.ts",
+    "npx tsc --noEmit"
+  ]
+}
