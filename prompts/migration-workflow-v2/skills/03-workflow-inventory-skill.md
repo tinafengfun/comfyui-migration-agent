@@ -17,13 +17,28 @@ Use as Step 03 after asset/custom-node resolution and feasibility routing, befor
 2. Identify all output nodes by type and by graph role.
 3. Trace each output node upstream to determine branch ownership and critical paths.
 4. Trace output/display nodes downstream before classifying them. If they feed another executable node, keep them in the executable path.
-5. Split structural/UI nodes from executable nodes.
-6. List disconnected notes, examples, bypass utilities, and dead-end nodes separately from runtime blockers.
-7. Mark custom-node packages and widget-heavy nodes.
-8. If asset/custom-node/acquisition artifacts already exist, refresh dependency states from them so the inventory does not repeat stale hard stops.
-9. Produce a branch map, critical-path inventory, node inventory table, and recommended validation order.
-10. Emit all-node inventory: every source node must appear exactly once with role, branch membership, package/origin, dependency state, and migration risk.
-11. Emit a `completion_decision` block and a Toolization block before closing Step 03.
+5. **Dead-end node detection.** Take the output nodes validated by `execution.validate_prompt` (the nodes whose class is registered `OUTPUT_NODE = True` — the nodes ComfyUI actually treats as output roots) and, for each, trace its full upstream dependency tree within the API prompt. Compute the union of all those trees. Any API-prompt node that is *not* in that union is a **dead-end** node: ComfyUI prunes it (it never executes), so it has no effect on rendered output. Classify and list every dead-end node explicitly in `03-inventory.md` with the pruned/unconsumed-output reason and, where a sibling node supersedes it on the active output path, which active node/path replaces it (e.g. `WanVideoBlockSwap->WanVideoSetBlockSwap` pairs where a parallel `WanVideoBlockSwap` feeds the real model loader). Do this in the **first pass** — do not defer dead-end classification to Step 10 coverage review.
+6. Split structural/UI nodes from executable nodes.
+7. List disconnected notes, examples, bypass utilities, and dead-end nodes separately from runtime blockers. The dead-end list from step 5 must appear here verbatim.
+8. Mark custom-node packages and widget-heavy nodes.
+9. If asset/custom-node/acquisition artifacts already exist, refresh dependency states from them so the inventory does not repeat stale hard stops.
+10. Produce a branch map, critical-path inventory, node inventory table, and recommended validation order.
+11. Emit all-node inventory: every source node must appear exactly once with role, branch membership, package/origin, dependency state, migration risk, and **dead-end flag** (live / dead-end).
+12. Emit a `completion_decision` block and a Toolization block before closing Step 03.
+
+## Dead-end node detection (API prompt graph trace)
+
+ComfyUI's `execution.validate_prompt` resolves which nodes are true output roots for a given API prompt: a node is an output root if its class is registered with `OUTPUT_NODE = True` in the backend node registry (read from `object_info` / registration evidence). Only these output roots, and their upstream dependency trees, are executed by ComfyUI and affect rendered output. Any other API-prompt node is a **dead-end**: present in the prompt but pruned by ComfyUI (never executed), because no registered output node depends on it.
+
+Step 03 must perform this trace itself, in the first pass:
+
+1. Determine output roots the same way `execution.validate_prompt` does: a node is an output root iff its class is registered with `OUTPUT_NODE = True` in the backend node registry (read from `object_info` / registration evidence; e.g. `VHS_VideoCombine`, `easy showAnything`, `Evaluate Floats`, `SaveImage`, `PreviewImage`). Note this is **not** the same as "no outgoing links" — a registered output node whose output is also fed onward is still an output root, and a non-output leaf (e.g. `WanVideoSetBlockSwap`) is **not** an output root and is pruned by ComfyUI entirely. (When the GUI export and the normalized API prompt differ, run this on the API prompt that Steps 05/07/08 will actually execute.)
+2. For each output root, walk upstream over `inputs` links (an input value of the form `[<upstream_node_id>, <output_index>]` is a link; scalar values are widgets and have no upstream node) until no further upstream node exists. Collect the visited set.
+3. The union of all upstream trees is the **live set**. Every API-prompt node not in the live set is a **dead-end** node (ComfyUI prunes it and never executes it).
+4. For each dead-end node, record: node id, type, what its output feeds (if anything), and the active live node/path that supersedes it (so downstream steps know which competing widget value — e.g. `blocks_to_swap` — is actually in effect).
+5. Emit the dead-end list in `03-inventory.md` and flag each node `dead-end` in the all-node inventory table. Downstream steps (06 prompt conversion, 10 coverage review) must consume this classification rather than re-deriving it.
+
+This catches cases like two `WanVideoBlockSwap` nodes where only one's `block_swap_args` reaches the active `WanVideoModelLoader` (via `WanVideoSetBlockSwap`); the other `WanVideoBlockSwap->WanVideoSetBlockSwap` pair is dead-end (its `WanVideoSetBlockSwap` is not an `OUTPUT_NODE`, so ComfyUI prunes the whole pair) and its `blocks_to_swap` widget value is inert. Surfacing this in Step 03 prevents downstream confusion about which value is active.
 
 ## Graph normalization (GUI→API cycle resolution)
 
@@ -38,6 +53,7 @@ The backend runs a deterministic normalizer during Step 03 and writes `03-graph-
 - display-only nodes counted as runtime blockers
 - display-looking output nodes marked display-only even though their outputs feed later runtime nodes
 - disconnected notes, example preprocessors, or bypass utilities treated as output blockers
+- dead-end nodes (output consumed by no output node) missed in Step 03 and only discovered later in Step 10 coverage review, causing confusion about which competing widget value is active
 - stale Step 00 dependency gaps repeated after Step 01 already staged a replacement asset or dependency cache
 - artifact name mismatch between `03-inventory.md` and project-specific split outputs
 - branch not represented in API prompt
@@ -45,9 +61,9 @@ The backend runs a deterministic normalizer during Step 03 and writes `03-graph-
 
 ## Evidence standard
 
-Retain workflow JSON, branch map, node/type table, output-node list, disconnected/dead-end node list, and the latest dependency-state artifacts used as inputs.
+Retain workflow JSON, branch map, node/type table, output-node list, disconnected/dead-end node list, the dead-end detection trace (output roots, live set, dead-end set), and the latest dependency-state artifacts used as inputs.
 
-Do not claim completion unless node count, link count, output branches, disconnected/reference nodes, and dependency states are backed by durable artifacts. Source workflow immutability must be explicitly stated.
+Do not claim completion unless node count, link count, output branches, disconnected/dead-end/structural nodes are classified, the dead-end detection trace is present, latest dependency states are reflected, source workflow immutability is confirmed, and `step04_context` is present.
 
 ## Hard stops
 
@@ -67,11 +83,11 @@ completion_decision:
   next_step_allowed:
 ```
 
-`complete` is allowed only when Step 02 context was consumed, every source node is inventoried, output branches are mapped, disconnected/dead-end/structural nodes are classified, latest dependency states are reflected, source workflow immutability is confirmed, and `step04_context` is present.
+`complete` is allowed only when Step 02 context was consumed, every source node is inventoried, output branches are mapped, disconnected/dead-end/structural nodes are classified (with the dead-end detection trace recorded), latest dependency states are reflected, source workflow immutability is confirmed, and `step04_context` is present.
 
 ## Output schema
 
-`node_count`, `link_count`, `outputs`, `branches`, `executable_nodes`, `structural_nodes`, `disconnected_nodes`, `custom_node_packages`, `export_risks`, `node_inventory`.
+`node_count`, `link_count`, `outputs`, `branches`, `executable_nodes`, `structural_nodes`, `disconnected_nodes`, `dead_end_nodes` (with output roots, live set, and dead-end set from the API-prompt graph trace), `custom_node_packages`, `export_risks`, `node_inventory`.
 
 Default artifact:
 
