@@ -10,7 +10,14 @@
  *
  * Usage:
  *   npx tsx scripts/remote-comfyui.mts --node <name> --action start|stop|restart|status
- *     [--api-url http://host:8188] [--wait 150]
+ *     [--api-url http://host:8188] [--wait 150] [--container <docker-container-name>]
+ *
+ * restart on a runtime=docker node: tries an in-container `pkill -f main.py` first;
+ * if that fails to bring PID 1 down (PID 1 / EPERM — common when a synchronous
+ * block-swap has pegged the event loop at 100% CPU), falls back to
+ * `docker restart <container>` and waits for the API. `--container` is optional —
+ * when omitted on a docker node the running `comfyui-*` container is auto-detected
+ * via `docker ps --filter ancestor=<docker_image>`.
  */
 import { execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
@@ -21,12 +28,17 @@ const execFile = promisify(execFileCb);
 const nodeName = argValue("--node");
 const action = (argValue("--action") ?? "status") as "start" | "stop" | "restart" | "status";
 const waitSec = Number(argValue("--wait") ?? "150");
+const containerFlag = argValue("--container");
 
 function argValue(flag: string): string | undefined {
   const i = process.argv.indexOf(flag);
   return i >= 0 ? process.argv[i + 1] : undefined;
 }
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+function shellQuote(s: string): string {
+  return /[^\w@%+=:,./-]/.test(s) ? `'${s.replace(/'/g, `'\\''`)}'` : s;
+}
 
 function sshBase(node: GpuNode): string[] {
   const s = node.ssh!;
@@ -39,6 +51,70 @@ async function objectInfoUp(apiUrl: string): Promise<boolean> {
     const r = await fetch(`${apiUrl.replace(/\/+$/, "")}/system_stats`, { signal: AbortSignal.timeout(5000) });
     return r.ok;
   } catch { return false; }
+}
+
+/** Run `docker <args>` on the node — locally or over ssh. Never throws. */
+async function dockerOnNode(node: GpuNode, args: string[], timeoutMs = 30_000): Promise<{ ok: boolean; stdout: string; stderr: string }> {
+  try {
+    let stdout = "", stderr = "";
+    if (node.kind === "ssh") {
+      const r = await execFile("ssh", ["-n", ...sshBase(node), `docker ${args.map(shellQuote).join(" ")}`], { timeout: timeoutMs });
+      stdout = r.stdout; stderr = r.stderr;
+    } else {
+      const r = await execFile("docker", args, { timeout: timeoutMs });
+      stdout = r.stdout; stderr = r.stderr;
+    }
+    return { ok: true, stdout, stderr };
+  } catch (e: any) {
+    return { ok: false, stdout: e?.stdout ?? "", stderr: e?.stderr ?? String(e) };
+  }
+}
+
+/** For a runtime=docker node, find the running `comfyui-*` container from its image. */
+async function detectContainer(node: GpuNode): Promise<string | undefined> {
+  if (node.runtime !== "docker" || !node.docker_image) return undefined;
+  const r = await dockerOnNode(node, ["ps", "-a", "--filter", `ancestor=${node.docker_image}`, "--format", "{{.Names}}"]);
+  if (!r.ok) return undefined;
+  const names = r.stdout.split(/\s+/).filter(Boolean);
+  return names.find((n) => n.startsWith("comfyui-")) ?? names[0];
+}
+
+/**
+ * restart for a runtime=docker node. Tries an in-container `pkill -f main.py`
+ * first (mirrors the bare-runtime stop path); if the container is still running
+ * afterward — i.e. the in-container kill failed because PID 1 can't be killed
+ * from inside the container (EPERM / PID 1), the real-world failure when a
+ * synchronous block-swap pegs the event loop at 100% CPU — falls back to
+ * `docker restart <container>`, which cleanly terminates and restarts PID 1.
+ * If the kill did stop the container, `docker start` brings it back with its
+ * original Step-05 launch config intact.
+ */
+async function restartDocker(node: GpuNode, container: string, apiUrl: string): Promise<boolean> {
+  console.log(`attempting in-container kill: docker exec ${container} pkill -f main.py`);
+  await dockerOnNode(node, ["exec", container, "pkill", "-f", "main.py"], 30_000);
+  await sleep(3000);
+
+  const st = await dockerOnNode(node, ["inspect", "-f", "{{.State.Status}}", container]);
+  const status = st.stdout.trim();
+  if (!st.ok) {
+    console.error(`docker inspect ${container} failed: ${st.stderr || status}`);
+    return false;
+  }
+
+  if (status === "running") {
+    // In-container kill failed (PID 1 / EPERM) — fall back to docker restart.
+    console.log(`in-container kill failed (container still running — PID 1 / EPERM); falling back to docker restart ${container}`);
+    const rr = await dockerOnNode(node, ["restart", container], 90_000);
+    if (!rr.ok) { console.error(`docker restart failed: ${rr.stderr}`); return false; }
+  } else {
+    // Kill succeeded (container stopped) — start it again with its original config.
+    console.log(`container stopped after kill; docker start ${container}`);
+    const sr = await dockerOnNode(node, ["start", container], 90_000);
+    if (!sr.ok) { console.error(`docker start failed: ${sr.stderr}`); return false; }
+  }
+
+  console.log(`waiting up to ${waitSec}s for /system_stats…`);
+  return await waitUp(apiUrl);
 }
 
 async function stop(node: GpuNode): Promise<void> {
@@ -84,7 +160,7 @@ async function waitUp(apiUrl: string): Promise<boolean> {
 }
 
 async function main() {
-  if (!nodeName) { console.error("usage: remote-comfyui.mts --node <name> --action start|stop|restart|status [--wait 150]"); process.exit(2); }
+  if (!nodeName) { console.error("usage: remote-comfyui.mts --node <name> --action start|stop|restart|status [--wait 150] [--container <name>]"); process.exit(2); }
   const config = loadConfig();
   const node = pickNode(loadGpuNodes(config), nodeName);
   const apiUrl = argValue("--api-url") ?? nodeApiUrl(node);
@@ -96,6 +172,16 @@ async function main() {
   }
   if (action === "stop") { await stop(node); console.log("stopped"); return; }
   if (action === "start" || action === "restart") {
+    if (action === "restart" && node.runtime === "docker") {
+      const container = containerFlag ?? (await detectContainer(node));
+      if (container) {
+        const up = await restartDocker(node, container, apiUrl);
+        console.log(up ? "UP ✓" : "did NOT come up in time ✗");
+        process.exit(up ? 0 : 1);
+        return;
+      }
+      console.log("no --container given and could not auto-detect a comfyui-* container; falling back to bare-metal restart path");
+    }
     await start(node, apiUrl);
     console.log(`launched; waiting up to ${waitSec}s for /system_stats…`);
     const up = await waitUp(apiUrl);
