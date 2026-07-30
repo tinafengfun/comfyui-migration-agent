@@ -471,6 +471,44 @@ async function runCheck(repoRoot: string, label: string, command: string, args: 
   }
 }
 
+const RETRY_DELAY_MS = 5_000;
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Real incident: pushing 16 approved items in one round ran 16 back-to-back
+ * `tsc --noEmit` + `vitest run` cycles (each spawning vitest's own worker
+ * pool) with zero pause between them. All 16 merges reverted with the exact
+ * same "vitest run failed after merge" reason -- a single background-
+ * download-polling test (subJobs.test.ts) flaking under the cumulative CPU/
+ * process-table pressure of that many heavy suite runs in a row. Confirmed
+ * live: re-running the identical merged state in isolation, moments later,
+ * passed cleanly every time -- this was never a real defect in any of the
+ * 16 items, just transient resource contention with no recovery built in.
+ * A bounded retry-with-pause here mirrors the same MAX_FIX_ATTEMPTS pattern
+ * this pipeline's own draft/verify loop already uses for exactly this
+ * reason (a flaky first result isn't necessarily a real failure).
+ */
+async function runCheckWithRetry(
+  repoRoot: string,
+  label: string,
+  command: string,
+  args: string[],
+  log: Logger,
+  maxAttempts = 3
+): Promise<boolean> {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const attemptLabel = attempt === 1 ? label : `${label} (retry ${attempt - 1}/${maxAttempts - 1})`;
+    if (await runCheck(repoRoot, attemptLabel, command, args, log)) return true;
+    if (attempt < maxAttempts) {
+      log(`  ${label} failed on attempt ${attempt}/${maxAttempts} -- pausing ${RETRY_DELAY_MS}ms and retrying (transient flakiness under load, not assumed to be a real failure yet)...`);
+      await sleep(RETRY_DELAY_MS);
+    }
+  }
+  return false;
+}
+
 /** Local `git merge --no-ff` + tsc/vitest gate, auto-reverting on failure. Never pushes. */
 export async function mergeImprovement(input: {
   repoRoot: string;
@@ -510,8 +548,12 @@ export async function mergeImprovement(input: {
   const mergeSha = (await git(repoRoot, ["rev-parse", "HEAD"])).trim();
   log(`  merged locally as ${mergeSha}`);
 
+  // tsc is a fast, single-process, deterministic check -- a real failure
+  // there is a real failure, no retry warranted. vitest spawns a worker pool
+  // and includes timing/polling-sensitive tests -- see runCheckWithRetry's
+  // docstring for the incident that makes retrying it worthwhile.
   const typecheckOk = await runCheck(repoRoot, "tsc --noEmit", "npx", ["tsc", "--noEmit", "-p", "."], log);
-  const testsOk = typecheckOk && (await runCheck(repoRoot, "vitest run", "npx", ["vitest", "run"], log));
+  const testsOk = typecheckOk && (await runCheckWithRetry(repoRoot, "vitest run", "npx", ["vitest", "run"], log));
 
   if (!typecheckOk || !testsOk) {
     log(`  reverting merge -- checks failed. Resetting ${repoRoot} back to ${preMergeSha}.`);
