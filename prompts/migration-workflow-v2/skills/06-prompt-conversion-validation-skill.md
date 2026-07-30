@@ -27,6 +27,11 @@ Use before any runtime result is interpreted.
 5. Validate without queueing execution when the task is validation-only. Use internal `execution.validate_prompt()` or an equivalent no-queue path; use `/prompt` only when execution is intentionally allowed.
 6. Inspect `node_errors`, output set, and pruned nodes.
 6a. **Scan `widgets_values` for cuda device references.** For every source-workflow node, inspect its `widgets_values` array for string entries that contain `cuda:0`, `cuda:1`, or the standalone token `cuda` (not part of a longer path). Record each hit with the node ID, widget index, and matched string. These are candidate runtime-policy changes — feed them into step 8's variant generation for explicit documentation and automated patching in the `06b-runtime-policy-changes.json` change-note artifact. Do not rewrite them in-place in the source workflow.
+6b. **Import-availability pre-check for CUDA-only attention packages (optional but recommended).** `execution.validate_prompt()` only checks schema/structure — a widget value can pass validation yet crash at runtime because the backing package is not installed. This is most common with attention backends that are CUDA-only. After validation succeeds, scan the converted prompt for widget values that select one of the known CUDA-only attention packages and attempt an import of the corresponding Python module on the target environment:
+    - `sageattn` / `sageattention` → `import sageattention`
+    - `flash_attn` / `flash_attention` → `import flash_attn`
+    - `xformers` → `import xformers`
+    For each widget value whose import fails (e.g. `ModuleNotFoundError`), record a warning entry in the validation report (node ID, class type, input name, the value, the module that failed to import, and the target device class). Flag it as `unavailable-on-<device>` (e.g. `unavailable-on-xpu`). Do **not** fail Step 06 on this warning alone — it is advisory and does not replace runtime validation in Step 07/08 — but feed each flagged entry into step 8's runtime-policy variant generation so the risk is documented in `06b-runtime-policy-changes.json` and the variant substitutes an XPU-safe value (per step 8a for `PatchSageAttentionKJ`, or the closest source-supported default otherwise). The intent is to surface the gap *before* a runtime crash in Step 07/08, not to alter the source-preserving prompt.
 7. Separate exporter fixes from workflow semantic changes. Correct widget-order or selector serialization bugs, but do not silently rewrite runtime policy values such as `cuda:0`, presets, seeds, dtype, or resolution.
 7a. **Enum value not in target list (sampler_name/scheduler/upscale_method/…) — fidelity priority.** When `execution.validate_prompt()` rejects a widget value because it is not in the node's enum list (e.g. `'res_2s' not in (44 samplers)`, `'bong_tangent' not in [...]`), this is almost always an **implicit package dependency**: a custom package (e.g. RES4LYF) injected that value into a core node's dropdown in the source environment, and it is missing on the target. Resolve in this precedence — **substitution is the last resort, not the default**:
    - **(1) Install the providing package (apple-to-apple, preferred).** Identify the package from `00-enum-dependencies.csv` / the source `object_info` / a matching recipe (`providesEnumValues`), then loop back to Step 05 to install it on the target and re-fetch `/object_info`. Once the enum value is present natively, the value is kept **identical to source** — no change.
@@ -77,6 +82,7 @@ It converts the source workflow, runs offline `execution.validate_prompt()` with
 - selector subfolders are incorrectly stripped to basenames
 - UI-only control widgets shift later widget values into wrong inputs
 - a terminal branch node is not an `OUTPUT_NODE` and needs a generated preview/output wrapper for Step 07
+- a widget value selecting a CUDA-only attention backend (e.g. `sageattn`, `flash_attn`, `xformers`) passes `execution.validate_prompt()` but crashes at runtime because the package is not installed on the target device
 
 ## Evidence standard
 
@@ -94,4 +100,4 @@ Do not continue to branch smoke from a silent or undocumented policy rewrite. Co
 
 ## Output schema
 
-`prompt_path`, `validation_method`, `queued_execution`, `validation_response`, `node_errors`, `validated_outputs`, `missing_inputs`, `pruned_outputs`, `fixes`, `semantic_change_required`, `variant_path`, `variant_changes`, `source_workflow_modified`, `nodes_bypassed`, `node_prompt_map`, `branch_prompts`, `terminal_non_output_branches`, `completion_decision`, `step07_context`.
+`prompt_path`, `validation_method`, `queued_execution`, `validation_response`, `node_errors`, `validated_outputs`, `missing_inputs`, `pruned_outputs`, `fixes`, `semantic_change_required`, `variant_path`, `variant_changes`, `source_workflow_modified`, `nodes_bypassed`, `node_prompt_map`, `branch_prompts`, `terminal_non_output_branches`, `import_availability_warnings`, `completion_decision`, `step07_context`.
