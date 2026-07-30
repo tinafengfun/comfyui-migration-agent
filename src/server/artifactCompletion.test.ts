@@ -288,4 +288,41 @@ describe("artifact completion", () => {
       reason: expect.stringContaining("All Step 13 self-evolution artifacts")
     });
   });
+
+  it("requires the Step 12b final-delivery artifact before completion", async () => {
+    expect(expectedArtifactCandidates({ id: "12b", name: "Final delivery", requiredOutput: "", humanIntervention: "" })).toEqual([
+      "12b-final-delivery.md"
+    ]);
+
+    const root = path.join(process.cwd(), ".demo-state", "tests", `artifact-step12b-${Date.now()}`);
+    const artifactPath = path.join(root, "artifacts");
+    await ensureDir(artifactPath);
+    const task: MigrationTask = {
+      id: "task",
+      name: "Task",
+      status: "running",
+      workflowPath: path.join(root, "workflow.json"),
+      workspacePath: root,
+      artifactPath,
+      createdAt: "now",
+      updatedAt: "now",
+      steps: [{ id: "12b", status: "running" }]
+    };
+    const step = {
+      id: "12b",
+      name: "Final delivery",
+      requiredOutput: "12b-final-delivery.md",
+      humanIntervention: ""
+    };
+
+    await expect(checkRequiredArtifactCompletion(task, step)).resolves.toMatchObject({
+      complete: false
+    });
+
+    await fs.writeFile(path.join(artifactPath, "12b-final-delivery.md"), "# final delivery\n", "utf8");
+
+    await expect(checkRequiredArtifactCompletion(task, step)).resolves.toMatchObject({
+      complete: true
+    });
+  });
 });

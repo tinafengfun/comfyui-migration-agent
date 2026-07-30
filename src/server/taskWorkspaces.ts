@@ -20,6 +20,7 @@ export interface TaskWorkspaceLayout {
   previewOutputDir: string;
   validationRunsDir: string;
   guiAcceptanceDir: string;
+  finalDeliveryVerificationDir: string;
   logsDir: string;
   sdkLogPath: string;
   packageDir: string;
@@ -47,6 +48,7 @@ export async function createTaskWorkspace(input: {
     fs.mkdir(layout.previewOutputDir, { recursive: true }),
     fs.mkdir(layout.validationRunsDir, { recursive: true }),
     fs.mkdir(layout.guiAcceptanceDir, { recursive: true }),
+    fs.mkdir(layout.finalDeliveryVerificationDir, { recursive: true }),
     fs.mkdir(layout.logsDir, { recursive: true }),
     fs.mkdir(layout.packageDir, { recursive: true }),
     fs.mkdir(layout.feedbackDir, { recursive: true }),
@@ -82,6 +84,7 @@ export function getTaskWorkspaceLayout(input: {
     previewOutputDir: path.join(outputsDir, STEP_OUTPUT_SUBDIR["07"]),
     validationRunsDir: path.join(outputsDir, STEP_OUTPUT_SUBDIR["08"]),
     guiAcceptanceDir: path.join(outputsDir, STEP_OUTPUT_SUBDIR["12"]),
+    finalDeliveryVerificationDir: path.join(outputsDir, STEP_OUTPUT_SUBDIR["12b"]),
     logsDir,
     sdkLogPath: path.join(logsDir, TASK_FILES.sdkLog),
     packageDir,
@@ -118,6 +121,7 @@ export function getLayoutForTask(task: {
     previewOutputDir: path.join(outputsDir, STEP_OUTPUT_SUBDIR["07"]),
     validationRunsDir: path.join(outputsDir, STEP_OUTPUT_SUBDIR["08"]),
     guiAcceptanceDir: path.join(outputsDir, STEP_OUTPUT_SUBDIR["12"]),
+    finalDeliveryVerificationDir: path.join(outputsDir, STEP_OUTPUT_SUBDIR["12b"]),
     logsDir,
     sdkLogPath: path.join(logsDir, TASK_FILES.sdkLog),
     packageDir,
@@ -154,6 +158,7 @@ async function writePackageManifest(layout: TaskWorkspaceLayout): Promise<void> 
       previews: relative(layout, layout.previewOutputDir),
       validationRuns: relative(layout, layout.validationRunsDir),
       guiAcceptance: relative(layout, layout.guiAcceptanceDir),
+      finalDeliveryVerification: relative(layout, layout.finalDeliveryVerificationDir),
       logs: relative(layout, layout.logsDir),
       sdkLog: relative(layout, layout.sdkLogPath),
       packageDir: relative(layout, layout.packageDir),

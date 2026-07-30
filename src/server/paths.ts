@@ -45,7 +45,8 @@ export const CACHE_SUBDIRS = {
 export const STEP_OUTPUT_SUBDIR: Readonly<Record<string, string>> = {
   "07": "previews",
   "08": "validation-runs",
-  "12": "gui-acceptance"
+  "12": "gui-acceptance",
+  "12b": "final-delivery-verification"
 } as const;
 
 /** Filenames standard to every task workspace. */

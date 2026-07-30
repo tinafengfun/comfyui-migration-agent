@@ -288,14 +288,23 @@ function recommendedInputArtifactsForStep(stepId: string): string[] {
       return ["08-full-validation.md", "09-tuning.md", "10-coverage-review.md"];
     case "12":
       return ["11-delivery.md", "migration-result-report.md"];
+    case "12b":
+      return [
+        "01-assets.csv",
+        "01-custom-nodes.md",
+        "05-environment.md",
+        "11-delivery.md",
+        "12-gui-acceptance.md",
+        "12-output-manifest.json"
+      ];
     case "13":
       return [
         "task-state.json",
         "phase1-context/running-summary.md",
         "phase1-context/context-debt.json",
         "phase1-context/phase3-extraction-candidates.json",
-        "12-gui-acceptance.md",
-        "12-output-manifest.json"
+        "12b-final-delivery.md",
+        "12b-output-manifest.json"
       ];
     default:
       return [];

@@ -112,6 +112,14 @@ const stepSeed: Array<Omit<MigrationStepDefinition, "promptPath" | "skillPath"> 
     humanIntervention: "Run clean GUI workflow and sign off generated outputs."
   },
   {
+    id: "12b",
+    name: "Final delivery: docker deployment guide",
+    prompt: "migration-workflow-v2/prompts/12b-final-delivery-prompt.md",
+    skill: "migration-workflow-v2/skills/12b-final-delivery-skill.md",
+    requiredOutput: "12b-final-delivery.md / deployment-guide.md",
+    humanIntervention: "Review the generated docker deployment guide for accuracy; no manual action is required for pipeline completion -- the automated fresh-container dry-run is the completion gate."
+  },
+  {
     id: "13",
     name: "Agent improvement and playbook hardening",
     prompt: "migration-workflow-v2/prompts/13-agent-improvement-prompt.md",

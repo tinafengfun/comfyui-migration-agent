@@ -2841,7 +2841,7 @@ describe("hidden runtime asset prestage integration (real incident: IndexTTS2Run
   });
 });
 
-describe("Step 12 completion always reports archive status (real incident: a non-accepted/mismatched manual_result silently no-opped the NFS archive with zero trace in the event log, and nobody noticed until the task's workspace was already wiped by a later task's creation)", () => {
+describe("Step 12b completion always reports archive status (real incident: a non-accepted/mismatched manual_result silently no-opped the NFS archive with zero trace in the event log, and nobody noticed until the task's workspace was already wiped by a later task's creation)", () => {
   it("emits a progress event explaining why the delivery bundle was NOT archived, instead of staying silent", async () => {
     const root = path.join(process.cwd(), ".demo-state", "tests", `orchestrator-archive-visibility-${Date.now()}`);
     const config: AppConfig = {
@@ -2862,18 +2862,20 @@ describe("Step 12 completion always reports archive status (real incident: a non
     const orchestrator = new MigrationOrchestrator(
       config,
       store,
-      [{ id: "12", name: "GUI acceptance", requiredOutput: "12-gui-acceptance.md", humanIntervention: "n/a" }],
+      [{ id: "12b", name: "Final delivery", requiredOutput: "12b-final-delivery.md", humanIntervention: "n/a" }],
       {
         async runStep() {
-          await fs.writeFile(path.join(task.artifactPath, "12-gui-acceptance.md"), "ok", "utf8");
+          await fs.writeFile(path.join(task.artifactPath, "12b-final-delivery.md"), "ok", "utf8");
           // A real-world mismatch: not one of the four exact contract strings
-          // ("accepted"/"rejected"/"blocked"/"pending_human_run").
+          // ("accepted"/"rejected"/"blocked"/"pending_human_run") -- this is
+          // still Step 12's own field; Step 12b's completion is what now
+          // triggers the archive check that reads it.
           await fs.writeFile(
             path.join(task.artifactPath, "12-gui-acceptance-summary.json"),
             JSON.stringify({ manual_result: "approved" }),
             "utf8"
           );
-          return { sessionId: "fake-session", summary: "Step 12 complete." };
+          return { sessionId: "fake-session", summary: "Step 12b complete." };
         }
       }
     );
@@ -2883,7 +2885,7 @@ describe("Step 12 completion always reports archive status (real incident: a non
       workflowJson: { nodes: [], links: [] }
     });
 
-    await orchestrator.runStep(task.id, "12");
+    await orchestrator.runStep(task.id, "12b");
 
     const events = await store.listEvents(task.id);
     expect(

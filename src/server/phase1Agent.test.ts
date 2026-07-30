@@ -64,6 +64,7 @@ describe("Phase 1 monolithic agent", () => {
       "10",
       "11",
       "12",
+      "12b",
       "13"
     ]);
     expect(steps.find((step) => step.id === "13")?.promptPath).toContain(

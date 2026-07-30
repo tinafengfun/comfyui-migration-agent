@@ -68,12 +68,29 @@ workspaces/{taskId}/
   outputs/previews/
   outputs/validation-runs/
   outputs/gui-acceptance/
+  outputs/final-delivery-verification/
   logs/sdk-session.jsonl
   package/manifest.json
   package/migration-bundle.zip
 ```
 
 `package/manifest.json` records the layout and packaging policy. Bundles should include task evidence, reports, migrated workflows, logs, and manifests only; large model files stay in `/home/intel/hf_models` and are referenced by path/digest.
+
+## Final delivery guide (Step 12b)
+
+After Step 12 GUI acceptance, Step 12b renders a self-contained, docker-based deployment guide
+(`deployment-guide.md` + an executable `12-docker-launch.sh`) covering the ComfyUI code location,
+every custom node and its location, every model and its resolved path, the migrated workflow file,
+and the literal docker startup command -- then proves the guide works by tearing down the running
+container and redeploying it from those exact commands as an automated dry run
+(`/system_stats` + `/object_info` + a prompt resubmission). Unlike Step 12, this step needs no human
+sign-off to complete; the dry-run evidence is the completion gate.
+
+No special frontend work is needed to use this: open the task in the web UI, select **Step 12b**, and
+use the artifact browser -- it lists every file under `artifacts/12b-final-delivery/` generically, so
+clicking `deployment-guide.md` shows the full guide immediately, and "Open raw" downloads it or
+`12-docker-launch.sh` directly. The same bundle is also mirrored into `artifacts/11-delivery/final-delivery/`
+so it ships inside the packaged delivery bundle and the NFS archive.
 
 ## Agent approval flow
 

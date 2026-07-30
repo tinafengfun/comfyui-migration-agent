@@ -250,4 +250,59 @@ describe("prompt skill compiler", () => {
     expect(serialized).toContain("QwenVL");
     expect(serialized).toContain("SeedVR2");
   });
+
+  it("recommends Step 12b's own upstream inputs, and points Step 13 at Step 12b's outputs instead of Step 12's (12b now supersedes 12 as the final-delivery evidence source)", async () => {
+    const root = path.join(process.cwd(), ".demo-state", "tests", `compiler-12b-${Date.now()}`);
+    await ensureDir(root);
+
+    const config: AppConfig = {
+      port: 0,
+      projectRoot: root,
+      workspaceRoot: root,
+      stateRoot: root,
+      draftDocRoot: root,
+      comfyuiRoot: "/tmp/comfy",
+      modelRoots: ["/home/intel/hf_models"],
+      gpuNodesPath: path.join(root, "gpu-nodes.json"),
+      workflowArchiveRoot: path.join(root, "nfs-workflows"),
+      autoApproveAgentPermissions: false
+    };
+
+    const baseTask = {
+      id: "task-1",
+      name: "Task",
+      status: "pending" as const,
+      workflowPath: path.join(root, "workflow.json"),
+      workspacePath: root,
+      artifactPath: path.join(root, "artifacts"),
+      createdAt: "now",
+      updatedAt: "now"
+    };
+
+    const job12b = await compileStepJob({
+      config,
+      task: { ...baseTask, steps: [{ id: "12b", status: "pending" as const }] },
+      step: {
+        id: "12b",
+        name: "Final delivery: docker deployment guide",
+        requiredOutput: "12b-final-delivery.md",
+        humanIntervention: "Review the generated docker deployment guide for accuracy."
+      }
+    });
+    expect(job12b.requiredContext.recommendedInputArtifacts).toContain("12-gui-acceptance.md");
+    expect(job12b.requiredContext.recommendedInputArtifacts).toContain("11-delivery.md");
+
+    const job13 = await compileStepJob({
+      config,
+      task: { ...baseTask, steps: [{ id: "13", status: "pending" as const }] },
+      step: {
+        id: "13",
+        name: "Agent improvement and playbook hardening",
+        requiredOutput: "13-agent-improvement.md",
+        humanIntervention: "Approve improvements"
+      }
+    });
+    expect(job13.requiredContext.recommendedInputArtifacts).toContain("12b-final-delivery.md");
+    expect(job13.requiredContext.recommendedInputArtifacts).not.toContain("12-gui-acceptance.md");
+  });
 });

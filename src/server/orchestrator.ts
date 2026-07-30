@@ -298,18 +298,26 @@ export class MigrationOrchestrator {
     const task = await this.store.updateStep(taskId, stepId, status, patch);
     const decisions = await this.store.listDecisions(taskId);
     await writeTaskStateLedger(task, decisions);
-    if (stepId === "12" && status === "completed") {
+    if (stepId === "12b" && status === "completed") {
       await this.archiveWorkflowIfAccepted(task);
     }
     // Second, later chance to archive: by Step 13 (the last step)
     // completing, the whole 00-13 pipeline is known to have finished. This
     // is a safety net, not the primary trigger -- archiveAcceptedWorkflowIfNeeded's
-    // own marker-file idempotency check makes it a no-op if Step 12's own
+    // own marker-file idempotency check makes it a no-op if Step 12b's own
     // trigger above already archived this task. Confirmed live: a real
     // task's GUI acceptance never made it into manual_result in time (a
-    // since-fixed resumeStep bug), the Step 12 trigger never fired, and by
+    // since-fixed resumeStep bug), the Step 12b trigger never fired, and by
     // the time anyone noticed, the task's workspace had already been wiped
     // by a later task's creation -- this narrows that window.
+    //
+    // The primary trigger was moved here from Step 12 (rather than left on
+    // Step 12's own completion) because Step 12b was inserted between 12 and
+    // 13 to render the richer, docker-oriented final deployment guide -- if
+    // archival still fired at bare Step 12 completion, the NFS-archived
+    // bundle would ship without 12b's content, and this Step 13 safety net's
+    // marker-file check would then treat the task as already archived and
+    // skip re-archiving it.
     if (stepId === "13" && status === "completed") {
       await this.archiveWorkflowIfAccepted(task);
     }
@@ -342,10 +350,11 @@ export class MigrationOrchestrator {
   }
 
   /**
-   * Best-effort: publish Step 12's delivery bundle to the shared NFS archive
-   * once GUI acceptance records manual_result=accepted. Never affects Step
-   * 12's own completion or task status — archiveAcceptedWorkflowIfNeeded()
-   * itself never throws.
+   * Best-effort: publish the delivery bundle to the shared NFS archive once
+   * Step 12 GUI acceptance records manual_result=accepted and Step 12b's own
+   * final delivery guide has been generated. Never affects Step 12b's own
+   * completion or task status — archiveAcceptedWorkflowIfNeeded() itself
+   * never throws.
    */
   private async archiveWorkflowIfAccepted(task: MigrationTask): Promise<void> {
     const result = await archiveAcceptedWorkflowIfNeeded({
@@ -365,7 +374,7 @@ export class MigrationOrchestrator {
     if (result.archived) {
       await this.emit({
         taskId: task.id,
-        stepId: "12",
+        stepId: "12b",
         type: "artifact_created",
         message: `Archived accepted delivery bundle to shared NFS: ${result.destination}`,
         data: { destination: result.destination }
@@ -373,7 +382,7 @@ export class MigrationOrchestrator {
     } else {
       await this.emit({
         taskId: task.id,
-        stepId: "12",
+        stepId: "12b",
         type: "progress",
         message: `Delivery bundle not archived to shared NFS: ${result.reason}`,
         data: { reason: result.reason }
@@ -4785,6 +4794,7 @@ function phase1DecisionContext(
 function phase1BlockingReasonForStep(stepId: string): HumanQuestion["blockingReason"] {
   if (stepId === "00" || stepId === "01" || stepId === "05") return "missing_asset";
   if (stepId === "12") return "quality_review";
+  if (stepId === "12b") return "quality_review";
   if (stepId === "13") return "quality_review";
   return "other";
 }

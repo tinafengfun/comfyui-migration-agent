@@ -20,6 +20,7 @@ describe("task workspace layout", () => {
     expect(layout.previewOutputDir).toBe(path.join(layout.root, "outputs", "previews"));
     expect(layout.validationRunsDir).toBe(path.join(layout.root, "outputs", "validation-runs"));
     expect(layout.guiAcceptanceDir).toBe(path.join(layout.root, "outputs", "gui-acceptance"));
+    expect(layout.finalDeliveryVerificationDir).toBe(path.join(layout.root, "outputs", "final-delivery-verification"));
     expect(layout.sdkLogPath).toBe(path.join(layout.root, "logs", "sdk-session.jsonl"));
     expect(layout.packageManifestPath).toBe(path.join(layout.root, "package", "manifest.json"));
     expect(layout.bundlePath).toBe(path.join(layout.root, "package", "migration-bundle.zip"));

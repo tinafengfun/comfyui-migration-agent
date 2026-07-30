@@ -113,6 +113,8 @@ export function expectedArtifactGroups(step: MigrationStepDefinition): string[][
       return [["11-delivery.md"], ["migration-result-report.md"]];
     case "12":
       return [["12-gui-acceptance.md"]];
+    case "12b":
+      return [["12b-final-delivery.md"]];
     case "13":
       return [
         [

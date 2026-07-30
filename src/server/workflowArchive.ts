@@ -22,10 +22,13 @@ const ARCHIVE_MARKER_FILE = ".nfs-archive-marker.json";
  * failure here must not affect the calling step's own completion or the
  * task's status.
  *
- * Called from TWO places in orchestrator.ts (Step 12 AND Step 13
+ * Called from TWO places in orchestrator.ts (Step 12b AND Step 13
  * completion -- see updateStepAndPersist) so a missed/delayed acceptance
- * signal at Step 12 still gets one more chance to archive by the time the
- * whole 00-13 pipeline finishes. Confirmed live: a task's real GUI
+ * signal at Step 12b still gets one more chance to archive by the time the
+ * whole 00-13 pipeline finishes. The primary trigger sits on Step 12b (not
+ * Step 12 itself) so the archived bundle includes Step 12b's own final
+ * docker deployment guide, added under 11-delivery/final-delivery/.
+ * Confirmed live: a task's real GUI
  * acceptance ("passed the test looks good") never made it into
  * manual_result in time due to a since-fixed resumeStep bug, and the
  * archive never fired at all -- by the time anyone noticed, the task's
