@@ -124,7 +124,11 @@ export class StateStore {
         artifactPath: input.artifactPath,
         createdAt: now,
         updatedAt: now,
-        steps: input.steps.map((step) => ({ id: step.id, status: "pending" })),
+        steps: input.steps.map((step) => ({
+          id: step.id,
+          status: "pending",
+          ...(step.optional ? { optional: true as const } : {})
+        })),
         ...(input.gpuNode ? { gpuNode: input.gpuNode } : {})
       };
       state.tasks.push(task);
@@ -252,16 +256,19 @@ export class StateStore {
 }
 
 function deriveTaskStatus(task: MigrationTask): StepStatus {
-  if (task.steps.every((step) => step.status === "completed")) {
+  // Optional steps (currently only Step 13) never gate or influence aggregate task
+  // status -- their own per-step status stays visible in the UI regardless.
+  const requiredSteps = task.steps.filter((step) => !step.optional);
+  if (requiredSteps.every((step) => step.status === "completed")) {
     return "completed";
   }
-  if (task.steps.some((step) => step.status === "running")) {
+  if (requiredSteps.some((step) => step.status === "running")) {
     return "running";
   }
-  if (task.steps.some((step) => step.status === "waiting_for_human")) {
+  if (requiredSteps.some((step) => step.status === "waiting_for_human")) {
     return "waiting_for_human";
   }
-  if (task.steps.some((step) => step.status === "paused")) {
+  if (requiredSteps.some((step) => step.status === "paused")) {
     return "paused";
   }
   return "pending";

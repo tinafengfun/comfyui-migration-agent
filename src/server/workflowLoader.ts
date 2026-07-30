@@ -125,7 +125,8 @@ const stepSeed: Array<Omit<MigrationStepDefinition, "promptPath" | "skillPath"> 
     prompt: "migration-workflow-v2/prompts/13-agent-improvement-prompt.md",
     skill: "migration-workflow-v2/skills/13-agent-improvement-skill.md",
     requiredOutput: "13-agent-improvement.* / 13-playbook-patch-plan.md / 13-phase3-readiness.json / 13-reflection.*",
-    humanIntervention: "Approve medium-risk prompt/skill changes and high-risk backend/tool behavior changes from the Step 13 patch plan."
+    humanIntervention: "Approve medium-risk prompt/skill changes and high-risk backend/tool behavior changes from the Step 13 patch plan.",
+    optional: true
   }
 ];
 
@@ -142,7 +143,8 @@ export async function loadStepDefinitions(config: AppConfig): Promise<MigrationS
         promptPath,
         skillPath,
         requiredOutput: step.requiredOutput,
-        humanIntervention: step.humanIntervention
+        humanIntervention: step.humanIntervention,
+        ...(step.optional ? { optional: true as const } : {})
       };
     })
   );

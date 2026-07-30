@@ -11,4 +11,10 @@ describe("workflow loader", () => {
     expect(steps.at(-1)?.id).toBe("13");
     expect(steps.every((step) => step.promptPath)).toBe(true);
   });
+
+  it("marks only Step 13 as optional (self-improvement should not gate overall migration completion)", async () => {
+    const steps = await loadStepDefinitions(loadConfig());
+    expect(steps.find((step) => step.id === "13")?.optional).toBe(true);
+    expect(steps.filter((step) => step.optional).map((step) => step.id)).toEqual(["13"]);
+  });
 });

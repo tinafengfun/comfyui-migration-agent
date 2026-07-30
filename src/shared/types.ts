@@ -30,6 +30,8 @@ export interface MigrationStepDefinition {
   skillPath?: string;
   requiredOutput: string;
   humanIntervention: string;
+  /** When true, this step's completion is not required for the task's aggregate status to become "completed". */
+  optional?: boolean;
 }
 
 export interface MigrationStepState {
@@ -39,6 +41,8 @@ export interface MigrationStepState {
   startedAt?: string;
   completedAt?: string;
   error?: string;
+  /** Copied from the step definition at task creation; see MigrationStepDefinition.optional. */
+  optional?: boolean;
 }
 
 export interface MigrationTask {

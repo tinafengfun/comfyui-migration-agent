@@ -141,9 +141,9 @@ function App() {
     [selectedTask, selectedStepIdFinal]
   );
   const stepStats = useMemo(() => {
-    const t = selectedTask;
-    const total = t?.steps.length ?? 0;
-    const completed = t?.steps.filter((s) => s.status === "completed").length ?? 0;
+    const requiredSteps = selectedTask?.steps.filter((s) => !s.optional) ?? [];
+    const total = requiredSteps.length;
+    const completed = requiredSteps.filter((s) => s.status === "completed").length;
     return { total, completed, percent: total === 0 ? 0 : Math.round((completed / total) * 100) };
   }, [selectedTask]);
 
@@ -984,6 +984,7 @@ function PipelineSteps({ steps, task, selectedStepId, onSelectStep }: {
                 <div className="node-content">
                   <span className="node-id">{step.id}</span>
                   <span className="node-name">{step.name}</span>
+                  {step.optional && <span className="status-badge badge-optional">可选</span>}
                   {duration && <span className="node-duration">{duration}</span>}
                 </div>
               </div>
@@ -1044,6 +1045,7 @@ function StepDetail({ step, state, activities, narrative, taskId, onRunStep, onR
         <div>
           <h2>Step {step.id}: {step.name}</h2>
           <p className="muted">{step.requiredOutput}</p>
+          {step.optional && <p className="muted">可选步骤，不影响整体迁移完成状态</p>}
         </div>
         <div className="step-detail-actions">
           <StatusBadge status={state?.status ?? "pending"} />

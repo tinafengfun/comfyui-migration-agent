@@ -292,6 +292,7 @@ button, input, select, textarea { font: inherit; }
 .badge-done { background: #dcfce7; color: #16a34a; }
 .badge-failed { background: #fef2f2; color: #dc2626; }
 .badge-waiting { background: #fef9c3; color: #a16207; }
+.badge-optional { background: #ede9fe; color: #7c3aed; text-transform: none; }
 
 @keyframes pulse {
   0%, 100% { opacity: 1; }
