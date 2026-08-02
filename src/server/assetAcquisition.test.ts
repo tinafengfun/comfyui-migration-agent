@@ -1,10 +1,27 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
 import type { MigrationTask } from "../shared/types";
-import { ensureAssetAcquisitionJob, generateAssetQueryVariants } from "./assetAcquisition";
+import { cloneCustomNodeIfAllowed, ensureAssetAcquisitionJob, generateAssetQueryVariants } from "./assetAcquisition";
 import { ensureDir } from "./fsUtils";
 import { demoModelRoot } from "./config";
+import { buildSourceProviderConfig } from "./assetSourceProviders";
+
+const execFileAsync = promisify(execFile);
+
+async function makeLocalGitRepo(root: string): Promise<string> {
+  const repoPath = path.join(root, "source-repo");
+  await ensureDir(repoPath);
+  await fs.writeFile(path.join(repoPath, "README.md"), "hello\n", "utf8");
+  await execFileAsync("git", ["init", "-q", "-b", "main"], { cwd: repoPath });
+  await execFileAsync("git", ["config", "user.email", "test@example.com"], { cwd: repoPath });
+  await execFileAsync("git", ["config", "user.name", "Test"], { cwd: repoPath });
+  await execFileAsync("git", ["add", "README.md"], { cwd: repoPath });
+  await execFileAsync("git", ["commit", "-q", "-m", "init"], { cwd: repoPath });
+  return repoPath;
+}
 
 describe("generateAssetQueryVariants", () => {
   it("strips a parenthetical strength-range hint and CJK descriptive words to find the real repo name (Klein LoRA)", () => {
@@ -1052,5 +1069,95 @@ describe("asset acquisition job", () => {
     expect(targetPathFor("whisper_large_v3_encoder_fp16.safetensors")).toBe(
       path.join(root, "models", "audio_encoders", "whisper_large_v3_encoder_fp16.safetensors")
     );
+  });
+});
+
+describe("cloneCustomNodeIfAllowed (shared NFS custom_nodes reuse)", () => {
+  it("clones into <nfsShareRoot>/custom_nodes/<name> and symlinks targetPath to it, when nfsShareRoot is set", async () => {
+    const root = path.join(process.cwd(), ".demo-state", "tests", `clone-nfs-${Date.now()}`);
+    await ensureDir(root);
+    const sourceRepo = await makeLocalGitRepo(root);
+    const nfsShareRoot = path.join(root, "nfs_share");
+    const targetPath = path.join(root, "ComfyUI", "custom_nodes", "some-node");
+
+    const result = await cloneCustomNodeIfAllowed({
+      repository: sourceRepo,
+      targetPath,
+      nfsShareRoot,
+      providerConfig: { ...buildSourceProviderConfig(), enableDownload: true }
+    });
+
+    expect(result.cloned).toBe(true);
+    const sharedClonePath = path.join(nfsShareRoot, "custom_nodes", "some-node");
+    await expect(fs.stat(path.join(sharedClonePath, ".git"))).resolves.toBeTruthy();
+    const stat = await fs.lstat(targetPath);
+    expect(stat.isSymbolicLink()).toBe(true);
+    expect(await fs.readlink(targetPath)).toBe(sharedClonePath);
+    await expect(fs.readFile(path.join(targetPath, "README.md"), "utf8")).resolves.toBe("hello\n");
+  });
+
+  it("reuses the existing shared clone instead of re-cloning when it's already on the shared tree", async () => {
+    const root = path.join(process.cwd(), ".demo-state", "tests", `clone-nfs-reuse-${Date.now()}`);
+    await ensureDir(root);
+    const sourceRepo = await makeLocalGitRepo(root);
+    const nfsShareRoot = path.join(root, "nfs_share");
+    const sharedClonePath = path.join(nfsShareRoot, "custom_nodes", "some-node");
+    await ensureDir(sharedClonePath);
+    // Pre-seed the shared tree with a marker file a fresh clone would never
+    // produce, so a re-clone (which would fail into an already-populated,
+    // non-empty, non-git directory) is unambiguously distinguishable from reuse.
+    await fs.writeFile(path.join(sharedClonePath, "PRE_EXISTING_MARKER"), "x", "utf8");
+
+    const targetPath = path.join(root, "ComfyUI", "custom_nodes", "some-node");
+    const result = await cloneCustomNodeIfAllowed({
+      repository: sourceRepo,
+      targetPath,
+      nfsShareRoot,
+      providerConfig: { ...buildSourceProviderConfig(), enableDownload: true }
+    });
+
+    expect(result.cloned).toBe(true);
+    await expect(fs.access(path.join(sharedClonePath, "PRE_EXISTING_MARKER"))).resolves.toBeUndefined();
+    expect(await fs.readlink(targetPath)).toBe(sharedClonePath);
+  });
+
+  it("never clobbers a real (non-symlink) local directory that might carry local edits", async () => {
+    const root = path.join(process.cwd(), ".demo-state", "tests", `clone-nfs-no-clobber-${Date.now()}`);
+    await ensureDir(root);
+    const sourceRepo = await makeLocalGitRepo(root);
+    const nfsShareRoot = path.join(root, "nfs_share");
+    const targetPath = path.join(root, "ComfyUI", "custom_nodes", "some-node");
+    await ensureDir(targetPath);
+    await fs.writeFile(path.join(targetPath, "local-edit.py"), "# local edit\n", "utf8");
+
+    const result = await cloneCustomNodeIfAllowed({
+      repository: sourceRepo,
+      targetPath,
+      nfsShareRoot,
+      providerConfig: { ...buildSourceProviderConfig(), enableDownload: true }
+    });
+
+    expect(result.cloned).toBe(true);
+    const stat = await fs.lstat(targetPath);
+    expect(stat.isSymbolicLink()).toBe(false);
+    await expect(fs.readFile(path.join(targetPath, "local-edit.py"), "utf8")).resolves.toBe("# local edit\n");
+  });
+
+  it("falls back to a direct clone at targetPath when nfsShareRoot is undefined (bare node, unchanged prior behavior)", async () => {
+    const root = path.join(process.cwd(), ".demo-state", "tests", `clone-no-nfs-${Date.now()}`);
+    await ensureDir(root);
+    const sourceRepo = await makeLocalGitRepo(root);
+    const targetPath = path.join(root, "ComfyUI", "custom_nodes", "some-node");
+
+    const result = await cloneCustomNodeIfAllowed({
+      repository: sourceRepo,
+      targetPath,
+      providerConfig: { ...buildSourceProviderConfig(), enableDownload: true }
+    });
+
+    expect(result.cloned).toBe(true);
+    const stat = await fs.lstat(targetPath);
+    expect(stat.isSymbolicLink()).toBe(false);
+    await expect(fs.readFile(path.join(targetPath, "README.md"), "utf8")).resolves.toBe("hello\n");
   });
 });

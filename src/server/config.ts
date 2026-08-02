@@ -26,6 +26,22 @@ export interface AppConfig {
   /** Shared NFS dir accepted (Step 12) migrated workflow delivery bundles are archived to. */
   workflowArchiveRoot: string;
   /**
+   * Shared NFS dir every task's raw snapshot (task-state.json, artifacts/, logs/,
+   * package/manifest.json) is archived to right before it would otherwise be
+   * destroyed by prepareExclusiveNewTask or a manual task delete -- regardless of
+   * final outcome (accepted, rejected, hard-stopped, or never finished). This is
+   * a separate, broader net than workflowArchiveRoot's curated "final deliverable"
+   * bundle, which only ever covers accepted tasks.
+   */
+  taskArchiveRoot: string;
+  /**
+   * Append-only JSONL ledger of asset-name -> resolved-file-path resolutions,
+   * shared across tasks so Step 01 doesn't have to re-search for an asset it has
+   * already resolved before. Never trusted blindly -- callers must confirm the
+   * resolved path still exists before reusing an entry.
+   */
+  assetResolutionLedgerPath: string;
+  /**
    * Absolute path to the CANONICAL comfyui-migration-agent git checkout used
    * for Step 13's draft/verify/fix/merge/push pipeline (agentImprovementPipeline.ts).
    * Deliberately never falls back to `projectRoot`: a live agent-demo deployment's
@@ -70,6 +86,10 @@ export function loadConfig(): AppConfig {
     copilotCliPath: process.env.COPILOT_CLI_PATH,
     autoApproveAgentPermissions: process.env.MIGRATION_AGENT_AUTO_APPROVE !== "0",
     workflowArchiveRoot: resolveFromProject(process.env.WORKFLOW_ARCHIVE_ROOT ?? "/nfs_share/workflows"),
+    taskArchiveRoot: resolveFromProject(process.env.TASK_ARCHIVE_ROOT ?? "/nfs_share/migration-tasks"),
+    assetResolutionLedgerPath: resolveFromProject(
+      process.env.ASSET_RESOLUTION_LEDGER_PATH ?? "/nfs_share/migration-knowledge/asset-resolutions.jsonl"
+    ),
     agentSelfImprovementRepoRoot: process.env.AGENT_SELF_IMPROVEMENT_REPO_ROOT
       ? resolveFromProject(process.env.AGENT_SELF_IMPROVEMENT_REPO_ROOT)
       : undefined

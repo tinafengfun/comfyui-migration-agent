@@ -21,6 +21,8 @@ function testConfig(root: string): AppConfig {
     modelRoots: [path.join(root, "models")],
     gpuNodesPath: path.join(root, "gpu-nodes.json"),
     workflowArchiveRoot: path.join(root, "nfs-workflows"),
+    taskArchiveRoot: path.join(root, "task-archive"),
+    assetResolutionLedgerPath: path.join(root, "asset-resolutions.jsonl"),
     autoApproveAgentPermissions: false
   };
 }

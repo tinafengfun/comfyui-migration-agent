@@ -91,15 +91,17 @@ import {
   checkPortOccupant,
   checkRecipeEnvironmentDrift,
   ensureDockerImageSynced,
+  syncCustomNodesFromNfs,
   getProcessElapsedSeconds,
   killProcessOnNode,
   loadGpuNodes,
   mergeModelRoots,
   pickNode,
+  resolveNfsShareRoot,
   type GpuNode
 } from "./gpuNodes";
 import { extractNodeModelPairs, findMatchingRecipes } from "./recipeInjector";
-import { archiveAcceptedWorkflowIfNeeded } from "./workflowArchive";
+import { archiveAcceptedWorkflowIfNeeded, archiveTaskSnapshot } from "./workflowArchive";
 import { syncGuiWorkflowToComfyUIServer } from "./guiWorkflowSync";
 import { checkHiddenAssetPrestageStatus, startHiddenAssetPrestage } from "./hiddenAssetPrestage";
 
@@ -574,6 +576,8 @@ export class MigrationOrchestrator {
             task,
             modelRoots: this.resolveModelRoots(task),
             comfyuiRoot: this.resolveComfyuiRoot(task),
+            nfsShareRoot: this.resolveNfsShareRootForTask(task),
+            assetResolutionLedgerPath: this.config.assetResolutionLedgerPath,
             humanContext: "",
             redactedHumanContext: "",
             stepId,
@@ -813,6 +817,22 @@ export class MigrationOrchestrator {
             ? `Docker image resynced from NFS before Step 05: ${syncResult.detail}`
             : `Docker image check before Step 05: ${syncResult.detail}`,
           data: syncResult
+        });
+
+        // Best-effort: pull in whatever custom nodes already live in the
+        // shared /nfs_share/custom_nodes tree before Step 05 needs them, so
+        // this task reuses prior migrations' already-acquired/patched nodes
+        // instead of Step 01 re-cloning them fresh. Never blocks Step 05.
+        const customNodeSyncResult = await syncCustomNodesFromNfs(node, this.config).catch((err) => ({
+          ok: false,
+          detail: `custom_nodes NFS sync failed: ${err instanceof Error ? err.message : String(err)}`
+        }));
+        await this.emit({
+          taskId,
+          stepId,
+          type: "progress",
+          message: `Shared custom_nodes sync before Step 05: ${customNodeSyncResult.detail}`,
+          data: customNodeSyncResult
         });
 
         // Same spirit, different gap: even a correctly-synced environment
@@ -2370,6 +2390,8 @@ export class MigrationOrchestrator {
         task,
         modelRoots: this.resolveModelRoots(task),
         comfyuiRoot: this.resolveComfyuiRoot(task),
+        nfsShareRoot: this.resolveNfsShareRootForTask(task),
+        assetResolutionLedgerPath: this.config.assetResolutionLedgerPath,
         humanContext: decision.answer,
         redactedHumanContext: redactedAnswer,
         modelRepoPath: path.resolve(this.config.projectRoot, "../model_repo"),
@@ -3458,6 +3480,7 @@ export class MigrationOrchestrator {
 
     const tasks = await this.store.listTasks();
     for (const task of tasks) {
+      await archiveTaskSnapshot({ task, taskArchiveRoot: this.config.taskArchiveRoot });
       await deleteTaskWorkspace(this.config.workspaceRoot, task.workspacePath);
       await this.store.deleteTask(task.id);
     }
@@ -3761,6 +3784,20 @@ export class MigrationOrchestrator {
   private resolveComfyuiRoot(task: MigrationTask): string {
     const node = this.lookupTaskNode(task);
     return node?.comfyui_root ?? this.config.comfyuiRoot;
+  }
+
+  /**
+   * The task's pinned GPU node's shared NFS custom_nodes root, if any --
+   * used so newly-acquired custom nodes get cloned into the shared tree and
+   * symlinked in (reusable by future tasks) instead of cloned directly into
+   * the node's own custom_nodes/, same convention install-enum-package.mts
+   * already follows. undefined when the node has no shared NFS tree
+   * configured (e.g. a bare local node) -- callers fall back to a direct
+   * clone in that case.
+   */
+  private resolveNfsShareRootForTask(task: MigrationTask): string | undefined {
+    const node = this.lookupTaskNode(task);
+    return node ? resolveNfsShareRoot(node) : undefined;
   }
 
   /**

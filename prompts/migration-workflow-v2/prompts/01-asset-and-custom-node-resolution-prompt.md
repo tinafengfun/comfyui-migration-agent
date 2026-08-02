@@ -101,6 +101,7 @@ Step 01 may not reach `resolved/staged` or `human gate` if any Step 00 node is m
 3. For every source node, extract model, LoRA, VAE, CLIP, UNet, checkpoint, image, mask, video, repository, service, and custom-node package references. If a node has no asset dependency, record `no asset dependency`.
 4. For every selected custom-node type, inspect the node wrapper source for hidden/default model assets, especially `from_pretrained()`, `hf_hub_download()`, `snapshot_download()`, `load_file()`, `torch.load()`, default `ckpt_name`, and package-specific cache directories. If source is unavailable, record `wrapper scan blocked` for the affected node/type.
 5. Search local roots first, then approved source registries/remotes/providers in this order. When the reusable asset tool pool is available, use it to keep search/download/clone logs out of the agent context:
+   - **cross-task asset-resolution ledger** — the backend checks `/nfs_share/migration-knowledge/asset-resolutions.jsonl` automatically for every row before any of the steps below run; a hit (file confirmed still present) shows up pre-resolved as `resolved_ledger_reuse` in `01-acquisition-job.json` with `source` starting `ledger reuse:` — treat it as already staged, do not re-search or re-report it as a gap.
    - explicit local roots and staged workflow cache
    - exact SSH/shared-disk filename search
    - explicit HuggingFace file/repo URLs, then HuggingFace-compatible mirrors such as `hf-mirror.com` and `huggingface.co`
@@ -139,6 +140,8 @@ For every `custom_node` work item:
 8. write `01-custom-node-provider-search.json`, `01-custom-node-github-verify.txt`, `01-custom-node-source-acquisition.json`, and update `01-custom-nodes.md` plus `01-node-dependency-scan.csv`.
 
 Do not human-gate a custom node solely because its public source is "reachable but not staged". Gate only for ambiguous candidates, private/archived/unreachable repositories, missing target path, non-empty target collision, clone/submodule failure after bounded retries, policy denial, credential needs, or hidden runtime assets that cannot be staged.
+
+**Shared-tree reuse is now automatic.** When the pinned GPU node has a shared NFS tree, the backend's own clone step clones into `<nfs_share_root>/custom_nodes/<name>` and symlinks it into `comfyuiRoot/custom_nodes/<name>` instead of cloning directly there — a future task needing the same node reuses that shared clone instead of re-cloning. If a custom node's local path already resolves as a symlink into `/nfs_share/custom_nodes/`, that's expected, not a problem to fix.
 
 Step 01 should not ask Step 00 to download. If Step 01 discovers a new concrete dependency that Step 00 could not know without wrapper-source inspection, record it as Step 01 hidden-runtime-asset evidence and add it to the Step 01 ledger.
 

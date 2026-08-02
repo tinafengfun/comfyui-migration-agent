@@ -20,6 +20,7 @@ import { buildProgressNarrative } from "./progressNarrative";
 import { StateStore } from "./state";
 import { SubJobManager } from "./subJobs";
 import { deleteTaskWorkspace } from "./taskWorkspaces";
+import { archiveTaskSnapshot } from "./workflowArchive";
 import {
   buildNodeFromRequest,
   loadGpuNodes,
@@ -272,6 +273,7 @@ app.delete("/api/tasks/history", async (_req, res, next) => {
     const historicalTasks = tasks.filter((task) => isDeletableTaskStatus(task.status));
     const deleted = [];
     for (const task of historicalTasks) {
+      await archiveTaskSnapshot({ task, taskArchiveRoot: config.taskArchiveRoot });
       await deleteTaskWorkspace(config.workspaceRoot, task.workspacePath);
       const deletedTask = await store.deleteTask(task.id);
       if (deletedTask) deleted.push({ id: deletedTask.id, name: deletedTask.name });
@@ -306,6 +308,7 @@ app.delete("/api/tasks/:taskId", async (req, res, next) => {
       });
       return;
     }
+    await archiveTaskSnapshot({ task, taskArchiveRoot: config.taskArchiveRoot });
     await deleteTaskWorkspace(config.workspaceRoot, task.workspacePath);
     const deletedTask = await store.deleteTask(task.id);
     res.json({

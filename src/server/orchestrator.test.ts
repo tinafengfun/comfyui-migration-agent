@@ -81,6 +81,8 @@ describe("migration orchestrator", () => {
       modelRoots: ["/home/intel/hf_models"],
       gpuNodesPath: path.join(root, "gpu-nodes.json"),
       workflowArchiveRoot: path.join(root, "nfs-workflows"),
+      taskArchiveRoot: path.join(root, "task-archive"),
+      assetResolutionLedgerPath: path.join(root, "asset-resolutions.jsonl"),
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -154,6 +156,8 @@ describe("migration orchestrator", () => {
       modelRoots: ["/home/intel/hf_models"],
       gpuNodesPath: path.join(root, "gpu-nodes.json"),
       workflowArchiveRoot: path.join(root, "nfs-workflows"),
+      taskArchiveRoot: path.join(root, "task-archive"),
+      assetResolutionLedgerPath: path.join(root, "asset-resolutions.jsonl"),
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -199,6 +203,8 @@ describe("migration orchestrator", () => {
       modelRoots: ["/home/intel/hf_models"],
       gpuNodesPath: path.join(root, "gpu-nodes.json"),
       workflowArchiveRoot: path.join(root, "nfs-workflows"),
+      taskArchiveRoot: path.join(root, "task-archive"),
+      assetResolutionLedgerPath: path.join(root, "asset-resolutions.jsonl"),
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -233,6 +239,8 @@ describe("migration orchestrator", () => {
       modelRoots: ["/home/intel/hf_models"],
       gpuNodesPath: path.join(root, "gpu-nodes.json"),
       workflowArchiveRoot: path.join(root, "nfs-workflows"),
+      taskArchiveRoot: path.join(root, "task-archive"),
+      assetResolutionLedgerPath: path.join(root, "asset-resolutions.jsonl"),
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -278,6 +286,8 @@ describe("migration orchestrator", () => {
       modelRoots: [modelRoot],
       gpuNodesPath: path.join(root, "gpu-nodes.json"),
       workflowArchiveRoot: path.join(root, "nfs-workflows"),
+      taskArchiveRoot: path.join(root, "task-archive"),
+      assetResolutionLedgerPath: path.join(root, "asset-resolutions.jsonl"),
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -355,6 +365,8 @@ describe("migration orchestrator", () => {
       modelRoots: [path.join(root, "models")],
       gpuNodesPath: path.join(root, "gpu-nodes.json"),
       workflowArchiveRoot: path.join(root, "nfs-workflows"),
+      taskArchiveRoot: path.join(root, "task-archive"),
+      assetResolutionLedgerPath: path.join(root, "asset-resolutions.jsonl"),
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -421,6 +433,8 @@ describe("migration orchestrator", () => {
       modelRoots: [globalModelsDir],
       gpuNodesPath: path.join(root, "gpu-nodes.json"),
       workflowArchiveRoot: path.join(root, "nfs-workflows"),
+      taskArchiveRoot: path.join(root, "task-archive"),
+      assetResolutionLedgerPath: path.join(root, "asset-resolutions.jsonl"),
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -503,6 +517,8 @@ describe("migration orchestrator", () => {
       modelRoots: [path.join(root, "models")],
       gpuNodesPath: path.join(root, "gpu-nodes.json"),
       workflowArchiveRoot: path.join(root, "nfs-workflows"),
+      taskArchiveRoot: path.join(root, "task-archive"),
+      assetResolutionLedgerPath: path.join(root, "asset-resolutions.jsonl"),
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -577,6 +593,8 @@ describe("migration orchestrator", () => {
       modelRoots: [path.join(root, "models")],
       gpuNodesPath: path.join(root, "gpu-nodes.json"),
       workflowArchiveRoot: path.join(root, "nfs-workflows"),
+      taskArchiveRoot: path.join(root, "task-archive"),
+      assetResolutionLedgerPath: path.join(root, "asset-resolutions.jsonl"),
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -645,6 +663,8 @@ describe("migration orchestrator", () => {
       modelRoots: [modelRoot],
       gpuNodesPath: path.join(root, "gpu-nodes.json"),
       workflowArchiveRoot: path.join(root, "nfs-workflows"),
+      taskArchiveRoot: path.join(root, "task-archive"),
+      assetResolutionLedgerPath: path.join(root, "asset-resolutions.jsonl"),
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -719,6 +739,8 @@ describe("migration orchestrator", () => {
       modelRoots: [path.join(root, "models")],
       gpuNodesPath: path.join(root, "gpu-nodes.json"),
       workflowArchiveRoot: path.join(root, "nfs-workflows"),
+      taskArchiveRoot: path.join(root, "task-archive"),
+      assetResolutionLedgerPath: path.join(root, "asset-resolutions.jsonl"),
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -780,6 +802,8 @@ describe("migration orchestrator", () => {
       modelRoots: [path.join(root, "models")],
       gpuNodesPath: path.join(root, "gpu-nodes.json"),
       workflowArchiveRoot: path.join(root, "nfs-workflows"),
+      taskArchiveRoot: path.join(root, "task-archive"),
+      assetResolutionLedgerPath: path.join(root, "asset-resolutions.jsonl"),
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -859,6 +883,8 @@ describe("migration orchestrator", () => {
       modelRoots: [initialModelRoot],
       gpuNodesPath: path.join(root, "gpu-nodes.json"),
       workflowArchiveRoot: path.join(root, "nfs-workflows"),
+      taskArchiveRoot: path.join(root, "task-archive"),
+      assetResolutionLedgerPath: path.join(root, "asset-resolutions.jsonl"),
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -925,6 +951,8 @@ describe("migration orchestrator", () => {
       modelRoots: [path.join(root, "models")],
       gpuNodesPath: path.join(root, "gpu-nodes.json"),
       workflowArchiveRoot: path.join(root, "nfs-workflows"),
+      taskArchiveRoot: path.join(root, "task-archive"),
+      assetResolutionLedgerPath: path.join(root, "asset-resolutions.jsonl"),
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -978,6 +1006,8 @@ describe("migration orchestrator", () => {
       modelRoots: ["/home/intel/hf_models"],
       gpuNodesPath: path.join(root, "gpu-nodes.json"),
       workflowArchiveRoot: path.join(root, "nfs-workflows"),
+      taskArchiveRoot: path.join(root, "task-archive"),
+      assetResolutionLedgerPath: path.join(root, "asset-resolutions.jsonl"),
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -1009,6 +1039,18 @@ describe("migration orchestrator", () => {
     expect(await store.listEvents(staleTask.id)).toHaveLength(0);
     await expect(fs.stat(staleTask.workspacePath)).rejects.toMatchObject({ code: "ENOENT" });
     expect((await store.listTasks()).map((task) => task.id)).toEqual([nextTask.id]);
+
+    // The real point of archiveTaskSnapshot: even though the workspace above
+    // is now gone, a durable NFS snapshot must have been taken BEFORE that
+    // deletion -- regardless of the deleted task's outcome (here: still
+    // "running", never finished).
+    const snapshotEntries = await fs.readdir(config.taskArchiveRoot);
+    expect(snapshotEntries).toHaveLength(1);
+    const snapshotDir = path.join(config.taskArchiveRoot, snapshotEntries[0]);
+    await expect(fs.readFile(path.join(snapshotDir, "artifacts", "stale.txt"), "utf8")).resolves.toBe("stale\n");
+    const manifest = JSON.parse(await fs.readFile(path.join(snapshotDir, "manifest.json"), "utf8"));
+    expect(manifest.taskId).toBe(staleTask.id);
+    expect(manifest.workflowName).toBe("Previous");
   });
 
   it("preserves waiting human gates during stale active-task reconciliation", async () => {
@@ -1023,6 +1065,8 @@ describe("migration orchestrator", () => {
       modelRoots: ["/home/intel/hf_models"],
       gpuNodesPath: path.join(root, "gpu-nodes.json"),
       workflowArchiveRoot: path.join(root, "nfs-workflows"),
+      taskArchiveRoot: path.join(root, "task-archive"),
+      assetResolutionLedgerPath: path.join(root, "asset-resolutions.jsonl"),
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -1065,6 +1109,8 @@ describe("migration orchestrator", () => {
       modelRoots: ["/home/intel/hf_models"],
       gpuNodesPath: path.join(root, "gpu-nodes.json"),
       workflowArchiveRoot: path.join(root, "nfs-workflows"),
+      taskArchiveRoot: path.join(root, "task-archive"),
+      assetResolutionLedgerPath: path.join(root, "asset-resolutions.jsonl"),
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -1127,6 +1173,8 @@ describe("migration orchestrator", () => {
       modelRoots: ["/home/intel/hf_models"],
       gpuNodesPath: path.join(root, "gpu-nodes.json"),
       workflowArchiveRoot: path.join(root, "nfs-workflows"),
+      taskArchiveRoot: path.join(root, "task-archive"),
+      assetResolutionLedgerPath: path.join(root, "asset-resolutions.jsonl"),
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -1191,6 +1239,8 @@ describe("migration orchestrator", () => {
       modelRoots: ["/home/intel/hf_models"],
       gpuNodesPath: path.join(root, "gpu-nodes.json"),
       workflowArchiveRoot: path.join(root, "nfs-workflows"),
+      taskArchiveRoot: path.join(root, "task-archive"),
+      assetResolutionLedgerPath: path.join(root, "asset-resolutions.jsonl"),
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -1271,6 +1321,8 @@ describe("migration orchestrator", () => {
       modelRoots: [path.join(root, "models")],
       gpuNodesPath: path.join(root, "gpu-nodes.json"),
       workflowArchiveRoot: path.join(root, "nfs-workflows"),
+      taskArchiveRoot: path.join(root, "task-archive"),
+      assetResolutionLedgerPath: path.join(root, "asset-resolutions.jsonl"),
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -1365,6 +1417,8 @@ describe("migration orchestrator", () => {
       modelRoots: [path.join(root, "models")],
       gpuNodesPath: path.join(root, "gpu-nodes.json"),
       workflowArchiveRoot: path.join(root, "nfs-workflows"),
+      taskArchiveRoot: path.join(root, "task-archive"),
+      assetResolutionLedgerPath: path.join(root, "asset-resolutions.jsonl"),
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -1459,6 +1513,8 @@ describe("migration orchestrator", () => {
       modelRoots: ["/home/intel/hf_models"],
       gpuNodesPath: path.join(root, "gpu-nodes.json"),
       workflowArchiveRoot: path.join(root, "nfs-workflows"),
+      taskArchiveRoot: path.join(root, "task-archive"),
+      assetResolutionLedgerPath: path.join(root, "asset-resolutions.jsonl"),
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -1522,6 +1578,8 @@ describe("migration orchestrator", () => {
       modelRoots: ["/home/intel/hf_models"],
       gpuNodesPath: path.join(root, "gpu-nodes.json"),
       workflowArchiveRoot: path.join(root, "nfs-workflows"),
+      taskArchiveRoot: path.join(root, "task-archive"),
+      assetResolutionLedgerPath: path.join(root, "asset-resolutions.jsonl"),
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -1573,6 +1631,8 @@ describe("migration orchestrator", () => {
       modelRoots: ["/home/intel/hf_models"],
       gpuNodesPath: path.join(root, "gpu-nodes.json"),
       workflowArchiveRoot: path.join(root, "nfs-workflows"),
+      taskArchiveRoot: path.join(root, "task-archive"),
+      assetResolutionLedgerPath: path.join(root, "asset-resolutions.jsonl"),
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -1650,6 +1710,8 @@ describe("migration orchestrator", () => {
       modelRoots: ["/home/intel/hf_models"],
       gpuNodesPath: path.join(root, "gpu-nodes.json"),
       workflowArchiveRoot: path.join(root, "nfs-workflows"),
+      taskArchiveRoot: path.join(root, "task-archive"),
+      assetResolutionLedgerPath: path.join(root, "asset-resolutions.jsonl"),
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -1703,6 +1765,8 @@ describe("migration orchestrator", () => {
       modelRoots: [path.join(root, "models")],
       gpuNodesPath: path.join(root, "gpu-nodes.json"),
       workflowArchiveRoot: path.join(root, "nfs-workflows"),
+      taskArchiveRoot: path.join(root, "task-archive"),
+      assetResolutionLedgerPath: path.join(root, "asset-resolutions.jsonl"),
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -1753,6 +1817,8 @@ describe("migration orchestrator", () => {
       modelRoots: [path.join(root, "models")],
       gpuNodesPath: path.join(root, "gpu-nodes.json"),
       workflowArchiveRoot: path.join(root, "nfs-workflows"),
+      taskArchiveRoot: path.join(root, "task-archive"),
+      assetResolutionLedgerPath: path.join(root, "asset-resolutions.jsonl"),
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -1802,6 +1868,8 @@ describe("migration orchestrator", () => {
       modelRoots: ["/home/intel/hf_models"],
       gpuNodesPath: path.join(root, "gpu-nodes.json"),
       workflowArchiveRoot: path.join(root, "nfs-workflows"),
+      taskArchiveRoot: path.join(root, "task-archive"),
+      assetResolutionLedgerPath: path.join(root, "asset-resolutions.jsonl"),
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -1848,6 +1916,8 @@ describe("migration orchestrator", () => {
       modelRoots: ["/home/intel/hf_models"],
       gpuNodesPath: path.join(root, "gpu-nodes.json"),
       workflowArchiveRoot: path.join(root, "nfs-workflows"),
+      taskArchiveRoot: path.join(root, "task-archive"),
+      assetResolutionLedgerPath: path.join(root, "asset-resolutions.jsonl"),
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -1911,6 +1981,8 @@ describe("migration orchestrator", () => {
       modelRoots: ["/home/intel/hf_models"],
       gpuNodesPath: path.join(root, "gpu-nodes.json"),
       workflowArchiveRoot: path.join(root, "nfs-workflows"),
+      taskArchiveRoot: path.join(root, "task-archive"),
+      assetResolutionLedgerPath: path.join(root, "asset-resolutions.jsonl"),
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -1968,6 +2040,8 @@ describe("migration orchestrator", () => {
         modelRoots: ["/home/intel/hf_models"],
         gpuNodesPath: path.join(root, "gpu-nodes.json"),
         workflowArchiveRoot: path.join(root, "nfs-workflows"),
+        taskArchiveRoot: path.join(root, "task-archive"),
+        assetResolutionLedgerPath: path.join(root, "asset-resolutions.jsonl"),
         autoApproveAgentPermissions: false
       };
       await ensureDir(config.workspaceRoot);
@@ -2106,6 +2180,8 @@ describe("migration orchestrator", () => {
         modelRoots: ["/home/intel/hf_models"],
         gpuNodesPath: path.join(root, "gpu-nodes.json"),
         workflowArchiveRoot: path.join(root, "nfs-workflows"),
+        taskArchiveRoot: path.join(root, "task-archive"),
+        assetResolutionLedgerPath: path.join(root, "asset-resolutions.jsonl"),
         autoApproveAgentPermissions: false
       };
       await ensureDir(config.workspaceRoot);
@@ -2206,6 +2282,8 @@ describe("migration orchestrator", () => {
         modelRoots: ["/home/intel/hf_models"],
         gpuNodesPath: path.join(root, "gpu-nodes.json"),
         workflowArchiveRoot: path.join(root, "nfs-workflows"),
+        taskArchiveRoot: path.join(root, "task-archive"),
+        assetResolutionLedgerPath: path.join(root, "asset-resolutions.jsonl"),
         autoApproveAgentPermissions: false
       };
       await ensureDir(config.workspaceRoot);
@@ -2296,6 +2374,8 @@ describe("migration orchestrator", () => {
         modelRoots: ["/home/intel/hf_models"],
         gpuNodesPath: path.join(root, "gpu-nodes.json"),
         workflowArchiveRoot: path.join(root, "nfs-workflows"),
+        taskArchiveRoot: path.join(root, "task-archive"),
+        assetResolutionLedgerPath: path.join(root, "asset-resolutions.jsonl"),
         autoApproveAgentPermissions: false
       };
       await ensureDir(config.workspaceRoot);
@@ -2377,6 +2457,8 @@ describe("migration orchestrator", () => {
         modelRoots: ["/home/intel/hf_models"],
         gpuNodesPath: path.join(root, "gpu-nodes.json"),
         workflowArchiveRoot: path.join(root, "nfs-workflows"),
+        taskArchiveRoot: path.join(root, "task-archive"),
+        assetResolutionLedgerPath: path.join(root, "asset-resolutions.jsonl"),
         autoApproveAgentPermissions: false
       };
       await ensureDir(config.workspaceRoot);
@@ -2465,6 +2547,8 @@ describe("SDK connection-error retry (real incident: NO_PROXY misrouted an inter
       modelRoots: [path.join(root, "models")],
       gpuNodesPath: path.join(root, "gpu-nodes.json"),
       workflowArchiveRoot: path.join(root, "nfs-workflows"),
+      taskArchiveRoot: path.join(root, "task-archive"),
+      assetResolutionLedgerPath: path.join(root, "asset-resolutions.jsonl"),
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -2600,6 +2684,8 @@ describe("hidden runtime asset prestage integration (real incident: IndexTTS2Run
         modelRoots: [modelRoot],
         gpuNodesPath: path.join(root, "gpu-nodes.json"),
         workflowArchiveRoot: path.join(root, "nfs-workflows"),
+        taskArchiveRoot: path.join(root, "task-archive"),
+        assetResolutionLedgerPath: path.join(root, "asset-resolutions.jsonl"),
         autoApproveAgentPermissions: false
       };
       await ensureDir(config.workspaceRoot);
@@ -2676,6 +2762,8 @@ describe("hidden runtime asset prestage integration (real incident: IndexTTS2Run
       modelRoots: [modelRoot],
       gpuNodesPath: path.join(root, "gpu-nodes.json"),
       workflowArchiveRoot: path.join(root, "nfs-workflows"),
+      taskArchiveRoot: path.join(root, "task-archive"),
+      assetResolutionLedgerPath: path.join(root, "asset-resolutions.jsonl"),
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -2765,6 +2853,8 @@ describe("hidden runtime asset prestage integration (real incident: IndexTTS2Run
       modelRoots: [modelRoot],
       gpuNodesPath: path.join(root, "gpu-nodes.json"),
       workflowArchiveRoot: path.join(root, "nfs-workflows"),
+      taskArchiveRoot: path.join(root, "task-archive"),
+      assetResolutionLedgerPath: path.join(root, "asset-resolutions.jsonl"),
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -2854,6 +2944,8 @@ describe("Step 12b completion always reports archive status (real incident: a no
       modelRoots: [path.join(root, "models")],
       gpuNodesPath: path.join(root, "gpu-nodes.json"),
       workflowArchiveRoot: path.join(root, "nfs-workflows"),
+      taskArchiveRoot: path.join(root, "task-archive"),
+      assetResolutionLedgerPath: path.join(root, "asset-resolutions.jsonl"),
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);

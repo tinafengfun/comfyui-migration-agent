@@ -17,6 +17,8 @@ import { demoModelRoot } from "./config";
 import type { FuzzyJudgment } from "./assetFuzzyMatch";
 import { findRecipesForNode, type Recipe } from "./recipeLibrary";
 import type { CoreNodeDiscoveryResult } from "./coreNodeRecipeDiscovery";
+import { appendAssetResolution, lookupAssetResolution } from "./assetResolutionLedger";
+import { computeWorkflowSha256 } from "./workflowKnowledge";
 
 const execFileAsync = promisify(execFile);
 
@@ -45,7 +47,7 @@ interface AssetJobItem {
   sourceNodeIds?: string[];
   sourceContext: string;
   previousState: string;
-  status: "already_staged" | "resolved_local_exact" | "pending_secure_download";
+  status: "already_staged" | "resolved_local_exact" | "resolved_ledger_reuse" | "pending_secure_download";
   resolvedPath?: string;
   plannedActions: string[];
   expectedTargetPath?: string;
@@ -157,6 +159,14 @@ export async function ensureAssetAcquisitionJob(input: {
   task: MigrationTask;
   modelRoots: string[];
   comfyuiRoot: string;
+  /**
+   * The pinned GPU node's shared NFS custom_nodes root, if any. When set,
+   * newly-acquired custom nodes are cloned into `<nfsShareRoot>/custom_nodes/<name>`
+   * and symlinked into comfyuiRoot's own custom_nodes/, so future tasks reuse
+   * them instead of re-cloning. Omit (or leave undefined) to clone directly
+   * into comfyuiRoot's custom_nodes/, unchanged from prior behavior.
+   */
+  nfsShareRoot?: string;
   humanContext: string;
   redactedHumanContext: string;
   stepId?: string;
@@ -210,6 +220,14 @@ export async function ensureAssetAcquisitionJob(input: {
   }) => Promise<{ verified: boolean; verificationDetail: string; validationCommand?: string }>;
   /** Override for findRecipesForNode's lookup dir; tests only. Defaults to the real recipes/ tree. */
   recipesRoot?: string;
+  /**
+   * Shared cross-task ledger of asset-name -> resolved-file-path
+   * resolutions (see assetResolutionLedger.ts). When set, checked before
+   * local/provider/remote search for each row needing resolution, and
+   * appended to whenever a row resolves. Omit to skip ledger reuse entirely
+   * (e.g. in tests).
+   */
+  assetResolutionLedgerPath?: string;
 }): Promise<AssetAcquisitionJobResult> {
   const stepId = input.stepId ?? "01";
   const assetsPath = path.join(input.task.artifactPath, `${stepId}-assets.csv`);
@@ -235,6 +253,22 @@ export async function ensureAssetAcquisitionJob(input: {
   const localIndex = await indexFilesByBasename(localSearchRoots);
   const remoteOrWebSources = extractRemoteOrWebSources(combinedRedactedContext);
   const providerConfig = sourceProviderConfigFromContext(combinedRedactedContext);
+  const workflowSha256 = input.assetResolutionLedgerPath
+    ? await computeWorkflowSha256(input.task.workflowPath).catch(() => undefined)
+    : undefined;
+  const recordAssetResolution = async (assetName: string, resolvedPath: string, source: string, sourceIdentical: boolean) => {
+    if (!input.assetResolutionLedgerPath) return;
+    await appendAssetResolution(input.assetResolutionLedgerPath, {
+      assetName,
+      resolvedPath,
+      source,
+      sourceIdentical,
+      workflowName: input.task.name,
+      workflowSha256,
+      taskId: input.task.id,
+      resolvedAt: new Date().toISOString()
+    }).catch(() => undefined);
+  };
   const items: AssetJobItem[] = [];
   const customNodeItems: CustomNodeJobItem[] = [];
   let resolvedCount = 0;
@@ -273,6 +307,37 @@ export async function ensureAssetAcquisitionJob(input: {
       continue;
     }
 
+    const requestedForLedger = row.requested_name || row.asset_name;
+    const ledgerHit = input.assetResolutionLedgerPath
+      ? await lookupAssetResolution(input.assetResolutionLedgerPath, requestedForLedger)
+      : undefined;
+    if (ledgerHit) {
+      row.resolved_path = ledgerHit.resolvedPath;
+      row.source = `ledger reuse: ${ledgerHit.source} (originally resolved for ${ledgerHit.workflowName})`;
+      row.state = "staged";
+      row.staged_path = ledgerHit.resolvedPath;
+      row.install_status = "present";
+      row.acquisition_status = "complete";
+      row.mirror_used = "none";
+      row.credential_recorded = "false";
+      row.gap = "";
+      items.push({
+        assetName: row.asset_name,
+        requestedName: requestedForLedger,
+        kind: assetKind(row),
+        sourceContext: row.wrapper_source_evidence,
+        previousState: "source-identical asset not staged",
+        status: "resolved_ledger_reuse",
+        resolvedPath: ledgerHit.resolvedPath,
+        expectedTargetPath: expectedTargetPath(row),
+        plannedActions: [
+          `Reused a prior resolution from the cross-task asset ledger (originally resolved for "${ledgerHit.workflowName}"); file confirmed present at ${ledgerHit.resolvedPath}, no fresh search needed.`
+        ]
+      });
+      resolvedCount += 1;
+      continue;
+    }
+
     const exact = localIndex.get(row.requested_name || row.asset_name)?.[0];
     if (exact) {
       row.resolved_path = exact;
@@ -284,6 +349,7 @@ export async function ensureAssetAcquisitionJob(input: {
       row.mirror_used = "none";
       row.credential_recorded = "false";
       row.gap = "";
+      await recordAssetResolution(row.asset_name, exact, "local source context exact match", true);
       items.push({
         assetName: row.asset_name,
         requestedName: row.requested_name || row.asset_name,
@@ -345,6 +411,12 @@ export async function ensureAssetAcquisitionJob(input: {
       row.mirror_used = downloaded.candidate.provider;
       row.credential_recorded = "false";
       row.gap = "";
+      await recordAssetResolution(
+        row.asset_name,
+        downloaded.targetPath,
+        downloaded.candidate.downloadUrl ?? downloaded.candidate.url,
+        true
+      );
       items.push({
         assetName: row.asset_name,
         requestedName: row.requested_name || row.asset_name,
@@ -407,6 +479,7 @@ export async function ensureAssetAcquisitionJob(input: {
       customNode,
       workspacePath: input.task.workspacePath,
       comfyuiRoot: input.comfyuiRoot,
+      nfsShareRoot: input.nfsShareRoot,
       providerConfig,
       sourceSearch,
       discoverCoreNodeRecipe: input.discoverCoreNodeRecipe,
@@ -851,6 +924,7 @@ async function ensureCustomNodeSource(input: {
   customNode: CustomNodeRow;
   workspacePath: string;
   comfyuiRoot: string;
+  nfsShareRoot?: string;
   providerConfig: SourceProviderConfig;
   sourceSearch: (queryInput: {
     query: string;
@@ -921,6 +995,7 @@ async function resolveCustomNodeSource(input: {
   customNode: CustomNodeRow;
   workspacePath: string;
   comfyuiRoot: string;
+  nfsShareRoot?: string;
   providerConfig: SourceProviderConfig;
   sourceSearch: (queryInput: {
     query: string;
@@ -951,6 +1026,7 @@ async function resolveCustomNodeSource(input: {
       repository: explicitRepo,
       commit: input.customNode.commit,
       targetPath,
+      nfsShareRoot: input.nfsShareRoot,
       providerConfig: input.providerConfig
     });
     return {
@@ -986,6 +1062,7 @@ async function resolveCustomNodeSource(input: {
     const cloned = await cloneCustomNodeIfAllowed({
       repository: cloneCandidate.url,
       targetPath,
+      nfsShareRoot: input.nfsShareRoot,
       providerConfig: input.providerConfig
     });
     return {
@@ -1053,24 +1130,56 @@ async function firstExistingCustomNodePath(
   return undefined;
 }
 
-async function cloneCustomNodeIfAllowed(input: {
+async function pathExists(target: string): Promise<boolean> {
+  try {
+    await fs.stat(target);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Clones into `<nfsShareRoot>/custom_nodes/<repoName>` and symlinks that into
+ * `targetPath` when `nfsShareRoot` is set (same "clone into the shared tree,
+ * then symlink" convention `scripts/install-enum-package.mts`'s installScript
+ * already implements for its own narrower enum-package case) so a
+ * newly-acquired custom node becomes reusable by future tasks instead of
+ * living only inside this task's own comfyuiRoot/custom_nodes/. Falls back to
+ * a direct clone at targetPath when nfsShareRoot is undefined (e.g. a bare
+ * local node with no shared NFS tree configured) -- unchanged prior behavior.
+ */
+export async function cloneCustomNodeIfAllowed(input: {
   repository: string;
   commit?: string;
   targetPath: string;
+  nfsShareRoot?: string;
   providerConfig: SourceProviderConfig;
 }): Promise<{ cloned: boolean; cloneAttempted: boolean; issue?: ProviderSearchIssue }> {
   if (!input.providerConfig.enableDownload) return { cloned: false, cloneAttempted: false };
+  const nfsClonePath = input.nfsShareRoot
+    ? path.join(input.nfsShareRoot, "custom_nodes", path.basename(input.targetPath))
+    : undefined;
+  const cloneDestination = nfsClonePath ?? input.targetPath;
   try {
-    await fs.mkdir(path.dirname(input.targetPath), { recursive: true });
-    await execFileAsync("git", gitCloneCommand(input.repository, input.targetPath).slice(1), {
-      timeout: 180_000,
-      maxBuffer: 1024 * 1024
-    });
-    if (input.commit) {
-      await execFileAsync("git", ["-C", input.targetPath, "checkout", "--detach", input.commit], {
-        timeout: 60_000,
+    const alreadyOnSharedTree = nfsClonePath ? await pathExists(nfsClonePath) : false;
+    if (!alreadyOnSharedTree) {
+      await fs.mkdir(path.dirname(cloneDestination), { recursive: true });
+      await execFileAsync("git", gitCloneCommand(input.repository, cloneDestination).slice(1), {
+        timeout: 180_000,
         maxBuffer: 1024 * 1024
       });
+      if (input.commit) {
+        await execFileAsync("git", ["-C", cloneDestination, "checkout", "--detach", input.commit], {
+          timeout: 60_000,
+          maxBuffer: 1024 * 1024
+        });
+      }
+    }
+    if (nfsClonePath && !(await pathExists(input.targetPath))) {
+      // Never clobber a real (non-symlink) local dir that might carry local edits.
+      await fs.mkdir(path.dirname(input.targetPath), { recursive: true });
+      await fs.symlink(nfsClonePath, input.targetPath, "dir");
     }
     return { cloned: true, cloneAttempted: true };
   } catch (error) {

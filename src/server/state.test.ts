@@ -15,6 +15,8 @@ function makeConfig(root: string): AppConfig {
     modelRoots: ["/home/intel/hf_models"],
     gpuNodesPath: path.join(root, "gpu-nodes.json"),
     workflowArchiveRoot: path.join(root, "nfs-workflows"),
+    taskArchiveRoot: path.join(root, "task-archive"),
+    assetResolutionLedgerPath: path.join(root, "asset-resolutions.jsonl"),
     autoApproveAgentPermissions: false
   };
 }

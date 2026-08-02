@@ -2,6 +2,8 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import type { MigrationTask } from "../shared/types";
 import { ensureDir, readJson, writeJson } from "./fsUtils";
+import { TASK_FILES, TASK_SUBDIRS } from "./paths";
+import { computeWorkflowSha256 } from "./workflowKnowledge";
 
 interface Step12AcceptanceSummary {
   manual_result?: string;
@@ -91,6 +93,76 @@ async function resolveDestination(nfsArchiveRoot: string, taskName: string): Pro
     suffix += 1;
   }
   return candidate;
+}
+
+/**
+ * Best-effort snapshot of a task's raw evidence trail (task-state.json,
+ * artifacts/, logs/, package/manifest.json -- deliberately excluding
+ * cache/custom_nodes, cache/comfyui-user, and outputs/ generated media to
+ * keep this cheap and bounded) to a shared NFS directory, regardless of the
+ * task's final outcome. Never throws -- a failure here must not block the
+ * deletion it's meant to precede.
+ *
+ * Unlike archiveAcceptedWorkflowIfNeeded (which only fires for an accepted
+ * task and only copies the curated 11-delivery/ bundle), this covers EVERY
+ * task -- accepted, rejected, hard-stopped, or never finished -- since
+ * prepareExclusiveNewTask and the manual task-delete endpoints destroy a
+ * task's entire workspace unconditionally on every outcome.
+ */
+export async function archiveTaskSnapshot(input: {
+  task: MigrationTask;
+  taskArchiveRoot: string;
+}): Promise<ArchiveResult> {
+  const { task, taskArchiveRoot } = input;
+  try {
+    await ensureDir(taskArchiveRoot);
+    const destination = await resolveDestination(taskArchiveRoot, task.name);
+    await ensureDir(destination);
+
+    const taskStatePath = path.join(task.workspacePath, TASK_FILES.taskState);
+    if (await pathExists(taskStatePath)) {
+      await fs.copyFile(taskStatePath, path.join(destination, TASK_FILES.taskState));
+    }
+
+    if (await pathExists(task.artifactPath)) {
+      await fs.cp(task.artifactPath, path.join(destination, TASK_SUBDIRS.artifacts), { recursive: true });
+    }
+
+    const logsDir = path.join(task.workspacePath, TASK_SUBDIRS.logs);
+    if (await pathExists(logsDir)) {
+      await fs.cp(logsDir, path.join(destination, TASK_SUBDIRS.logs), { recursive: true });
+    }
+
+    const packageManifestPath = path.join(task.workspacePath, TASK_SUBDIRS.package, TASK_FILES.packageManifest);
+    if (await pathExists(packageManifestPath)) {
+      await fs.cp(
+        path.dirname(packageManifestPath),
+        path.join(destination, TASK_SUBDIRS.package),
+        { recursive: true }
+      );
+    }
+
+    let workflowSha256: string | undefined;
+    try {
+      workflowSha256 = await computeWorkflowSha256(task.workflowPath);
+    } catch {
+      workflowSha256 = undefined;
+    }
+
+    await writeJson(path.join(destination, "manifest.json"), {
+      taskId: task.id,
+      workflowName: task.name,
+      workflowSha256,
+      finalStatus: task.status,
+      archivedAt: new Date().toISOString(),
+      steps: task.steps.map((step) => ({ id: step.id, status: step.status }))
+    });
+
+    return { archived: true, destination };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return { archived: false, reason: `task snapshot failed: ${message}` };
+  }
 }
 
 async function pathExists(target: string): Promise<boolean> {

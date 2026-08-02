@@ -3,7 +3,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { MigrationTask } from "../shared/types";
 import { ensureDir, writeJson } from "./fsUtils";
-import { archiveAcceptedWorkflowIfNeeded } from "./workflowArchive";
+import { archiveAcceptedWorkflowIfNeeded, archiveTaskSnapshot } from "./workflowArchive";
 
 async function makeTask(root: string, overrides: Partial<MigrationTask> = {}): Promise<MigrationTask> {
   const artifactPath = path.join(root, "artifacts");
@@ -170,5 +170,68 @@ describe("archiveAcceptedWorkflowIfNeeded", () => {
 
     expect(result.archived).toBe(false);
     expect(result.reason).toContain("not found");
+  });
+});
+
+describe("archiveTaskSnapshot", () => {
+  it("snapshots task-state.json, artifacts/, logs/, and package/manifest.json regardless of outcome", async () => {
+    const root = path.join(process.cwd(), ".demo-state", "tests", `task-snapshot-${Date.now()}`);
+    const taskArchiveRoot = path.join(root, "migration-tasks");
+    const task = await makeTask(root, { status: "hard_stopped", steps: [{ id: "08", status: "hard_stopped" }] });
+    await fs.writeFile(task.workflowPath, '{"nodes":[],"links":[]}\n', "utf8");
+    await fs.writeFile(path.join(task.workspacePath, "task-state.json"), '{"id":"task"}\n', "utf8");
+    await fs.writeFile(path.join(task.artifactPath, "08-full-validation-report.md"), "# hard stop\n", "utf8");
+    await ensureDir(path.join(task.workspacePath, "logs"));
+    await fs.writeFile(path.join(task.workspacePath, "logs", "sdk-session.jsonl"), '{"event":"x"}\n', "utf8");
+    await ensureDir(path.join(task.workspacePath, "package"));
+    await fs.writeFile(path.join(task.workspacePath, "package", "manifest.json"), '{"manifestVersion":"v1"}\n', "utf8");
+
+    const result = await archiveTaskSnapshot({ task, taskArchiveRoot });
+
+    expect(result.archived).toBe(true);
+    const destination = result.destination!;
+    await expect(fs.readFile(path.join(destination, "task-state.json"), "utf8")).resolves.toBe('{"id":"task"}\n');
+    await expect(
+      fs.readFile(path.join(destination, "artifacts", "08-full-validation-report.md"), "utf8")
+    ).resolves.toBe("# hard stop\n");
+    await expect(fs.readFile(path.join(destination, "logs", "sdk-session.jsonl"), "utf8")).resolves.toBe(
+      '{"event":"x"}\n'
+    );
+    await expect(fs.readFile(path.join(destination, "package", "manifest.json"), "utf8")).resolves.toBe(
+      '{"manifestVersion":"v1"}\n'
+    );
+
+    const manifest = JSON.parse(await fs.readFile(path.join(destination, "manifest.json"), "utf8"));
+    expect(manifest.taskId).toBe("task");
+    expect(manifest.finalStatus).toBe("hard_stopped");
+    expect(manifest.steps).toEqual([{ id: "08", status: "hard_stopped" }]);
+    expect(manifest.workflowSha256).toBeTruthy();
+  });
+
+  it("never throws when task-state.json/logs/package are all missing (best-effort)", async () => {
+    const root = path.join(process.cwd(), ".demo-state", "tests", `task-snapshot-${Date.now()}-sparse`);
+    const taskArchiveRoot = path.join(root, "migration-tasks");
+    const task = await makeTask(root);
+
+    const result = await archiveTaskSnapshot({ task, taskArchiveRoot });
+
+    expect(result.archived).toBe(true);
+    await expect(fs.access(path.join(result.destination!, "artifacts"))).resolves.toBeUndefined();
+  });
+
+  it("excludes cache/ and outputs/ from the snapshot", async () => {
+    const root = path.join(process.cwd(), ".demo-state", "tests", `task-snapshot-${Date.now()}-excludes`);
+    const taskArchiveRoot = path.join(root, "migration-tasks");
+    const task = await makeTask(root);
+    await ensureDir(path.join(task.workspacePath, "cache", "custom_nodes", "some-node"));
+    await fs.writeFile(path.join(task.workspacePath, "cache", "custom_nodes", "some-node", "x.py"), "x", "utf8");
+    await ensureDir(path.join(task.workspacePath, "outputs", "previews"));
+    await fs.writeFile(path.join(task.workspacePath, "outputs", "previews", "frame.png"), "x", "utf8");
+
+    const result = await archiveTaskSnapshot({ task, taskArchiveRoot });
+
+    expect(result.archived).toBe(true);
+    await expect(fs.access(path.join(result.destination!, "cache"))).rejects.toThrow();
+    await expect(fs.access(path.join(result.destination!, "outputs"))).rejects.toThrow();
   });
 });
