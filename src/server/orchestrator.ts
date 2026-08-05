@@ -96,10 +96,12 @@ import {
   killProcessOnNode,
   loadGpuNodes,
   mergeModelRoots,
+  nodeApiUrl,
   pickNode,
   resolveNfsShareRoot,
   type GpuNode
 } from "./gpuNodes";
+import { ensureComfyUiUp } from "./comfyuiLifecycle";
 import { extractNodeModelPairs, findMatchingRecipes } from "./recipeInjector";
 import { archiveAcceptedWorkflowIfNeeded, archiveTaskSnapshot } from "./workflowArchive";
 import { syncGuiWorkflowToComfyUIServer } from "./guiWorkflowSync";
@@ -927,6 +929,51 @@ export class MigrationOrchestrator {
             message: `ComfyUI core drift before Step 05: ${coreDrift.detail}`,
             data: coreDrift
           });
+        }
+      }
+    }
+
+    if (stepId === "07" || stepId === "08") {
+      // Automatic, deterministic pre-check -- don't rely on the SDK agent to
+      // read a skill doc and improvise the right relaunch command under time
+      // pressure. Ensure the endpoint is reachable (reusing an existing
+      // healthy server, restarting a stopped one, or launching a fresh one
+      // via the one correct pattern) BEFORE the SDK session even starts.
+      // Real incident this closes: an ad hoc `docker run` (no --entrypoint)
+      // ran the image's own outdated baked-in packages instead of the
+      // correctly configured shared venv -- see comfyuiLifecycle.ts's own
+      // doc comment. If even the correct launch pattern can't bring it up,
+      // hard-stop here instead of letting the SDK session spend time/cost
+      // on an environment already known to be broken.
+      // Skip entirely when no real gpu-nodes.json is configured (the synthesized
+      // "local-xpu" default -- used by dev/test setups with no real GPU
+      // infrastructure -- would otherwise make this block waitSec-long on a
+      // fake 127.0.0.1:8188 that nothing is ever going to serve).
+      const hasRealGpuNodesConfig = await fs.access(this.config.gpuNodesPath).then(() => true).catch(() => false);
+      const node = hasRealGpuNodesConfig ? this.lookupTaskNode(task) : undefined;
+      if (node) {
+        const apiUrl = nodeApiUrl(node);
+        const containerName = `comfyui-${taskId}`;
+        const ensureResult = await ensureComfyUiUp({ node, apiUrl, container: containerName, waitSec: 150 }).catch((err) => ({
+          ok: false as const,
+          action: "failed" as const,
+          detail: `ensureComfyUiUp threw: ${err instanceof Error ? err.message : String(err)}`
+        }));
+        await this.emit({
+          taskId,
+          stepId,
+          type: "progress",
+          message: `ComfyUI reachability check before Step ${stepId}: ${ensureResult.detail} (${ensureResult.action})`,
+          data: ensureResult
+        });
+        if (!ensureResult.ok) {
+          await this.terminateWithHardStop({
+            taskId,
+            stepId,
+            reason: `ComfyUI endpoint could not be reached before Step ${stepId}, even after an automatic relaunch attempt via the correct launch pattern: ${ensureResult.detail}. This is an infrastructure hard stop, not a workflow/capacity issue -- do not retry with an ad hoc docker/bare-metal command; check the pinned GPU node's docker image, shared venv, and NFS mount health first.`,
+            improvementStrategy: "Check the pinned GPU node's docker image, shared venv (--system-site-packages inheritance from the image), and NFS mount health; once fixed, resume this step."
+          });
+          return;
         }
       }
     }
