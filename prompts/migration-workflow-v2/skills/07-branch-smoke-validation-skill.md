@@ -30,6 +30,32 @@ Use after prompt validation and before full-size execution.
 10. Record runtime, placement, dependency fixes, cache behavior, and gaps.
 11. Preserve cold-start/cached-run differences. If `/free` or a server restart exposes OOM that did not appear in a cache-assisted run, keep both attempts and pass the boundary to Step 08/09.
 
+## Reachability: never improvise a new ComfyUI launch
+
+Before assuming the endpoint is down, check whether a server is already up and reuse it:
+
+- `runtime: docker` — `docker ps --filter "name=comfyui-${TASK_ID}"`; if it's running, poll `/system_stats` on the recorded `api_url` before touching anything.
+- `runtime: bare` — check the recorded PID and `/system_stats` before relaunching.
+
+A currently-running, still-healthy server must never be torn down and recreated just because the first health check attempt was slow — confirm it's genuinely unresponsive first.
+
+If the endpoint is genuinely down and must be (re)launched, **use the deterministic tool instead of hand-writing a docker command:**
+
+```bash
+npx tsx scripts/remote-comfyui.mts --node <gpu-node-name> --action restart \
+  --container "comfyui-${TASK_ID}" --api-url <api_url> --wait 150
+```
+
+(use `--action start` instead of `restart` when no container/process exists yet for this task). This is the single source of truth for the correct launch on a `runtime: docker` node — `--entrypoint <venv_python>` (never the image's own default entrypoint), `comfyui_root` bind-mounted at `/comfyui`, the shared NFS root bind-mounted at an identical path, `--net=host`. Never construct a new `docker run`/`docker create` command by hand, and never fall back to a bare-metal `python main.py` invocation for a `runtime: docker` node. Also reuse `05-environment-summary.json`'s own recorded `launch_command` as a cross-check if present.
+
+Confirmed live incident: before this tool supported `runtime: docker`, an SDK session hand-wrote its own `docker run` that skipped `--entrypoint "${VENV_PYTHON}"` and bind-mounted the workflow's own comfyui checkout over `/workspace/comfyui` (instead of `/comfyui` per Step 05's documented pattern) — that ran the *image's own baked-in, much older* `comfy_aimdo` (0.2.14, missing the `vram_buffer` submodule the current comfyui-core imports) instead of the correctly configured shared venv (which already had `comfy_aimdo` 0.4.5 with `vram_buffer` present, proven working by another container on the same node that had been running successfully for days using this exact `--entrypoint`-based launch). The environment was never broken — the ad hoc relaunch command was.
+
+When that first ad hoc attempt failed, the same incident then fell back to running ComfyUI directly on the bare host against the shared NFS venv (`/nfs_share/venv-container-xpu/bin/python3 main.py ...`, no container at all) — a second, independent way to fail. That venv is `--system-site-packages`, meaning it only gets `torch`/oneAPI/compiled-kernel packages *by inheriting them from the docker image's own system site-packages* when run inside a matching container; invoked directly on the bare host (no container at all), those packages simply do not exist anywhere on the host's own OS, so `import torch` fails outright regardless of Python version. (A second host was separately found with its own `/usr/bin/python3` upgraded to a version that doesn't even match the venv's pinned 3.12, an unrelated but equally real way the same bare-metal shortcut can fail.) **A `runtime: docker` node's ComfyUI must run inside a container, full stop — a bare-metal fallback for a docker-runtime node is not a valid recovery path, it is a second, different way to break, for a second, different reason.**
+
+Never `pip install` into a shared `--system-site-packages` venv (e.g. `/nfs_share/venv-container-xpu`) directly, even to "fix" an apparent missing module during Step 07 — that venv is shared across every task/host that mounts the same NFS tree, and an unlocked install can corrupt site-packages for everyone concurrently using it (see Step 05's shared-venv-lock note). If a package genuinely appears to be missing from the *correctly-invoked* environment, that is itself an environment hard-stop signal to report, not something to patch live mid-step.
+
+If the recorded `launch_command`, run exactly as documented, still fails to bring up a healthy endpoint, that is an infrastructure hard stop requiring a human decision (see Hard stops below) — do not keep improvising alternate execution paths.
+
 ## Reusable branch smoke tool
 
 Use the Step 07 harness when available:
@@ -61,6 +87,8 @@ It consumes `06-branch-prompts.csv`, applies bounded smoke settings, submits eac
 - history reports success but output file path is missing or empty
 - fixed-seed reduction replaces a linked seed node with a literal and silently removes the seed node from execution
 - clearing cache before every branch makes a cache-assisted suite fail as a cold-start capacity test, but the report does not distinguish that from branch logic failure
+- ComfyUI relaunch uses an ad hoc docker/bare-metal command instead of Step 05's recorded `launch_command`, silently running the image's own outdated baked-in packages (or a python-version-mismatched bare-metal venv) instead of the correctly configured environment
+- a shared NFS venv gets an unlocked `pip install` mid-step, risking corruption for every other concurrent task/host sharing that mount
 
 ## Evidence standard
 
@@ -104,6 +132,8 @@ If there are failed attempts, preserve them with an attempt suffix instead of ov
 ## Hard stops
 
 Stop full validation if a critical branch cannot smoke successfully.
+
+Stop and escalate to a human decision if `05-environment-summary.json`'s recorded `launch_command`, run exactly as documented (correct `--entrypoint`, correct mounts, no substitutions), still fails to bring up a reachable `/system_stats` endpoint. Do not attempt a bare-metal fallback for a `runtime: docker` node, do not fall back to the docker image's default entrypoint, and do not `pip install` into a shared venv to work around it — each of those is a documented way to fail differently, not a fix.
 
 ## Output schema
 

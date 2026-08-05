@@ -31,6 +31,17 @@ Use after branch smoke to test target fidelity or highest-fidelity reproducible 
 10. Reconcile every source node. Classify nodes as executed, cached, disconnected/reference, sink, or structural value nodes; do not let structural primitives become false uncovered-node failures.
 11. Preserve and label previous attempts: cold-start OOM, cache-assisted success, report/accounting recovery, and final accepted run may all be different evidence classes.
 
+## Reachability: never improvise a new ComfyUI launch
+
+Before assuming the endpoint is down, check whether a server matching the recorded launch is already running and healthy (`docker ps --filter "name=comfyui-${TASK_ID}"` for `runtime: docker`, or the recorded PID for `runtime: bare`) — poll `/system_stats` before tearing anything down. If it genuinely must be (re)launched, use the deterministic tool instead of hand-writing a docker command:
+
+```bash
+npx tsx scripts/remote-comfyui.mts --node <gpu-node-name> --action restart \
+  --container "comfyui-${TASK_ID}" --api-url <api_url> --wait 150
+```
+
+(`--action start` if no container/process exists yet). Never construct a new `docker run`/`docker create` command by hand, never fall back to the docker image's default entrypoint, and never fall back to a bare-metal `python main.py` invocation for a `runtime: docker` node — see Step 07's skill for the real incident this closes (an ad hoc relaunch ran the image's own outdated baked-in packages instead of the correctly configured shared venv, then a bare-metal fallback broke a second, different way: that venv only gets torch/oneAPI from the docker image's own system site-packages, which don't exist at all outside a container). Never `pip install` into a shared `--system-site-packages` venv directly, even mid-step — that's a hard-stop signal to report, not something to patch live. If the tool, run exactly as documented, still fails to bring up a reachable endpoint, that is an infrastructure hard stop for a human decision, not something to route around with a different execution path.
+
 ## Capacity decision matrix
 
 Use usable VRAM after reserves, not the marketing memory size.
@@ -96,6 +107,8 @@ Stop and classify as capacity hard stop when runtime and theory both exceed budg
 Stop and classify as capacity hard stop when the primary model requires block-swapping the bulk of its own weights (not just VAE/text-encoder/edge-block offload) to fit the target's usable VRAM at all -- even if the run completes -- see the block-swap note above. A completed-but-impractically-slow run is not tight success.
 
 Do not classify report/accounting defects as capacity hard stops. If history succeeded and outputs/telemetry exist, repair the report/accounting artifact without rerunning expensive GPU work unless the evidence is stale.
+
+Stop and escalate to a human decision if `05-environment-summary.json`'s recorded `launch_command`, run exactly as documented, still fails to bring up a reachable endpoint. This is an infrastructure hard stop, not a capacity one — do not attempt a bare-metal fallback for a `runtime: docker` node, do not fall back to the image's default entrypoint, and do not `pip install` into a shared venv to work around it.
 
 ## Output schema
 

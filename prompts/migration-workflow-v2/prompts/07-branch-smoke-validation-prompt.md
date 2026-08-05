@@ -13,6 +13,7 @@ Run the smallest faithful branch-level smoke tests before full workflow validati
 - target output nodes
 - reduced-resource settings
 - running ComfyUI endpoint
+- `05-environment-summary.json`'s `launch_command`, `docker_image`, `api_url`, and `node_kind` — the only source of truth for how to (re)launch ComfyUI if the endpoint isn't already up
 - Step 06 branch prompt manifest, including submission output node IDs and generated wrappers
 
 ## Copy/paste execution prompt
@@ -40,6 +41,7 @@ Use this prompt when asking an implementation agent to run Step 7:
 4. 使用 /prompt 和 partial_execution_targets 运行最小 faithful branch smoke。
 5. reduced settings 只能降低尺寸、步数、帧数、batch 或输出前缀，且必须逐项记录 old/new/reason。
 6. 如果固定 seed，而 sampler 的 seed/noise_seed 输入连接到 `Seed (rgthree)` 等 seed 节点，只能修改 seed 节点的值；不能把输入链接替换成常量从而断开/绕过 seed 节点。
+6a. 如果 endpoint 需要重新拉起，用确定性工具而不是手写 docker 命令：`npx tsx scripts/remote-comfyui.mts --node <gpu-node-name> --action restart --container "comfyui-${TASK_ID}" --api-url <api_url> --wait 150`（没有容器/进程时用 `--action start`）。不要自己拼一个新的 docker run/create 命令，不要用 image 自带的默认 entrypoint，`runtime: docker` 的节点不允许退回裸机直接跑 python。如果这个工具按文档跑出来还是起不来，这是基础设施 hard stop，交人工决定，不要继续尝试别的启动方式。
 7. 保存并检查实际输出文件；仅有 execution_success 不算通过。
 8. 记录 executed nodes 和 cached nodes。
 9. 如果后修复依赖后通过主要依赖缓存，必须标记 cache-assisted，并在可行时做 cache-bust 验证。
@@ -56,6 +58,7 @@ Use this prompt when asking an implementation agent to run Step 7:
 5. If Step 06 generated a wrapper for a terminal non-output branch, submit the wrapper output node and keep the wrapper provenance in the branch notes.
 6. Verify output file paths on disk, not only history JSON.
 7. Fixed-seed smoke prompts must keep seed nodes in the graph. When a sampler seed input is linked, edit the linked seed node value instead of replacing the link with a literal.
+8. Before assuming the ComfyUI endpoint is down, check whether a container/process matching the recorded launch is already running and healthy — reuse it instead of tearing it down. If it must be (re)launched, reuse `05-environment-summary.json`'s `launch_command` verbatim; never improvise a new docker/bare-metal invocation, and never `pip install` directly into a shared NFS venv to work around an apparent missing package.
 
 ## Steps
 
@@ -117,6 +120,8 @@ Stop full-size validation if a critical branch cannot produce a faithful smoke o
 
 If a branch variant is not tested, do not infer coverage from a neighboring variant. Mark it `untested variant` and ask whether it is in delivery scope.
 
+Stop and escalate to a human decision if `05-environment-summary.json`'s recorded `launch_command`, run exactly as documented, still fails to bring up a reachable `/system_stats` endpoint. Do not respond by improvising a bare-metal fallback for a `runtime: docker` node, falling back to the image's default entrypoint, or `pip install`-ing into a shared venv — each of those is a documented way to fail differently, not a fix, and each has already caused a real incident.
+
 ## Prior-migration lessons
 
 Dasiwa branch smoke proved reachability before expensive runs. It also showed that compatibility aliases must remain labeled smoke-only and cannot prove source-identical fidelity.
@@ -128,3 +133,5 @@ Zimage SeedVR2 smoke showed that Step 7 can complete multiple important branches
 Zimage v2 Step 07 showed that when a full branch suite is run sequentially, later branches can legitimately reuse cached upstream nodes while still executing branch-specific output, SeedVR2, or upscale nodes. Mark these as `cache_assisted_pass`, record executed and cached node IDs, and run with a changed fixed seed when practical to verify that critical sampler/downstream paths can recompute.
 
 Zimage v2 Step 08 repair showed a no-bypass edge inside reduced settings: changing `KSamplerAdvanced.noise_seed` from a linked `Seed (rgthree)` node to a literal fixed seed silently removes that seed node from runtime execution. Reduced branch prompts must preserve linked seed nodes by changing the seed node value. The same repair also showed that clearing ComfyUI cache can expose cold-start XPU capacity issues; preserve failed cold attempts and successful cache-assisted attempts separately.
+
+A real Step 07 timeout on a `runtime: docker` node was caused entirely by an improvised relaunch, not a broken environment. When the endpoint didn't respond, the agent built its own `docker run` (no `--entrypoint`, bind-mounted the task's comfyui checkout over the image's own `/workspace/comfyui`) instead of reusing Step 05's recorded `launch_command` — that ran the *image's own* baked-in `comfy_aimdo` (an old 0.2.14 namespace package missing the `vram_buffer` submodule comfyui-core now imports), not the correctly configured shared venv (which had 0.4.5, with `vram_buffer` present, and was already proven working by another container that had been running successfully on the same node for days via the documented `--entrypoint`-based launch). The agent then fell back to running ComfyUI directly on the bare host against that same shared venv — which only resolves correctly from *inside* a matching container (the host's own system Python had since been upgraded to a version the venv wasn't built for) — and along the way ran an unlocked `pip install` directly against a venv shared across every task/host on that NFS mount. None of this was necessary: the environment was healthy the whole time; the fix is to never construct a new launch command and to hard-stop for a human instead of chaining fallbacks.

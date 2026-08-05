@@ -63,6 +63,7 @@ Static model-file sums are an **upper-bound warning, not a measurement**. A summ
 - model memory estimates
 - runtime memory instrumentation
 - target hardware budget
+- `05-environment-summary.json`'s `launch_command`, `docker_image`, `api_url`, and `node_kind` — the only source of truth for how to (re)launch ComfyUI if the endpoint isn't already up
 
 ## Constraints
 
@@ -72,6 +73,7 @@ Static model-file sums are an **upper-bound warning, not a measurement**. A summ
 4. Preserve the highest-fidelity failure case if full success is impossible.
 5. Do not classify a run as source-identical if it uses a runtime-policy prompt variant. Report it as runtime-policy success or failure and keep the original source workflow boundary explicit.
 6. Do not declare a capacity hard stop from summed model file sizes alone. Model file sums are conservative; compare them with actual staged runtime telemetry before deciding.
+7. If the ComfyUI endpoint needs to be (re)launched, use `npx tsx scripts/remote-comfyui.mts --node <gpu-node-name> --action restart --container "comfyui-${TASK_ID}" --api-url <api_url> --wait 150` (`--action start` if nothing exists yet) — never improvise a new docker/bare-metal invocation by hand, and never `pip install` directly into a shared NFS venv to work around an apparent missing package.
 
 ## Steps
 
@@ -106,6 +108,8 @@ Create a full-validation report with:
 
 Stop tuning and escalate if runtime evidence shows required memory exceeds available budget and theoretical active-weight/activation analysis agrees.
 
+Stop and escalate to a human decision — as an infrastructure hard stop, not a capacity one — if `05-environment-summary.json`'s recorded `launch_command`, run exactly as documented, still fails to bring up a reachable endpoint. Do not respond by improvising a bare-metal fallback for a `runtime: docker` node, falling back to the image's default entrypoint, or `pip install`-ing into a shared venv (see Step 07's prior-migration lesson for the real incident this closes).
+
 Stop and escalate as capacity hard stop if the primary generative model itself requires block-swapping the bulk of its weights between host and device to fit the target's usable VRAM at all -- e.g. the model's active weight requirement alone leaves under roughly 2 GB of true headroom on the target card. This applies even if the run completes without OOM: a completed-but-impractically-slow block-swap run is not tight success. Small, targeted offload (VAE/text-encoder residency, a few edge blocks) is still an acceptable mitigation -- swapping the primary model's own main weight mass is not.
 
 ## Prior-migration lessons
@@ -115,6 +119,8 @@ Dasiwa full-size branch `54` was a structural capacity problem on a 24 GB-class 
 Zimage Step 8 showed the inverse case: a static model-file sum can exceed physical VRAM, while staged execution, low-VRAM policy, purge/offload behavior, and block swap keep the actual runtime peak inside budget. Treat this as tight success only when the full/high-fidelity run completes and telemetry proves the peak ratio -- and only when the swap/offload is a small, targeted portion (VAE/text-encoder/edge blocks), not the primary model's own bulk weight mass (see the LongCat lesson below).
 
 LongCat-Avatar-15 (bf16, ~30 GB active transformer) on a 30.3 GB-class XPU node needed `WanVideoBlockSwap` to hold half the transformer (~15 GB) on host, half on device, transferred synchronously (`Non-blocking memory transfer: False`) every step. The run completed -- no OOM -- but was impractically slow (the ComfyUI API itself went unresponsive for extended stretches while blocked on transfer) and is not a viable production delivery path. Unlike the Zimage case above, this was block-swapping the *primary model's own bulk weight mass*, not a small targeted offload -- classify this shape of result as capacity hard stop, not tight success, regardless of whether it eventually finishes.
+
+A real Step 07 (same risk applies here) timeout on a `runtime: docker` node turned out to be caused entirely by an improvised relaunch, not capacity or a broken environment -- an ad hoc `docker run` without `--entrypoint` ran the image's own outdated baked-in packages instead of the correctly configured shared venv, then a bare-metal fallback broke a second, different way. The environment was healthy the whole time. Always reuse `05-environment-summary.json`'s `launch_command` verbatim and hard-stop for a human instead of chaining fallback execution paths.
 
 Zimage v2 Step 8 added two tooling rules. First, reduced full-path prompts must not bypass linked seed nodes while fixing seeds. Second, a run can complete successfully but be misclassified as failed if the accounting tool treats structural primitive value nodes as missing runtime work. Step 8 reports must distinguish runtime failure from report/accounting recovery, and must carry cache-assisted versus cold-start boundaries into Step 9.
 
