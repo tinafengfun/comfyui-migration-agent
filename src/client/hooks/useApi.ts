@@ -104,6 +104,56 @@ export function useApi() {
     if (!res.ok) throw new Error(await res.text());
   }, []);
 
+  const fetchAnswerSuggestion = useCallback(async (
+    taskId: string,
+    questionEventId: string
+  ): Promise<{
+    signature?: string;
+    neverAuto: boolean;
+    default?: { answer: string; tier: "confirm" | "auto"; enabled: boolean };
+    history: { count: number; lastAnswer?: string; allSame: boolean };
+  }> => {
+    const res = await fetch(`/api/tasks/${taskId}/questions/${questionEventId}/suggestion`);
+    if (!res.ok) throw new Error(await res.text());
+    return res.json();
+  }, []);
+
+  const saveAnswerDefault = useCallback(async (
+    taskId: string,
+    questionEventId: string,
+    tier: "confirm" | "auto"
+  ): Promise<void> => {
+    const res = await fetch(`/api/tasks/${taskId}/questions/${questionEventId}/save-default`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ tier })
+    });
+    if (!res.ok) throw new Error(await res.text());
+  }, []);
+
+  const fetchAnswerDefaults = useCallback(async (): Promise<Array<{
+    signature: string; label: string; stepId?: string; blockingReason: string;
+    defaultAnswer: string; tier: "confirm" | "auto"; enabled: boolean;
+  }>> => {
+    const res = await fetch(`/api/answer-defaults`);
+    if (!res.ok) throw new Error(await res.text());
+    return (await res.json()).defaults ?? [];
+  }, []);
+
+  const setAnswerDefaultEnabled = useCallback(async (signature: string, enabled: boolean): Promise<void> => {
+    const res = await fetch(`/api/answer-defaults/${signature}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled })
+    });
+    if (!res.ok) throw new Error(await res.text());
+  }, []);
+
+  const deleteAnswerDefault = useCallback(async (signature: string): Promise<void> => {
+    const res = await fetch(`/api/answer-defaults/${signature}`, { method: "DELETE" });
+    if (!res.ok) throw new Error(await res.text());
+  }, []);
+
   const fetchArtifacts = useCallback(async (taskId: string): Promise<ArtifactListItem[]> => {
     const res = await fetch(`/api/tasks/${taskId}/artifacts`);
     const data = await res.json();
@@ -336,7 +386,8 @@ export function useApi() {
   return {
     fetchSteps, fetchTasks, createTask, deleteTask,
     runUntilGate, runStep, resumeStep, rerunStep, hardStop,
-    answerQuestion, uploadMedia, fetchArtifacts, fetchArtifactContent,
+    answerQuestion, fetchAnswerSuggestion, saveAnswerDefault, fetchAnswerDefaults, setAnswerDefaultEnabled, deleteAnswerDefault,
+    uploadMedia, fetchArtifacts, fetchArtifactContent,
     fetchDecisions, fetchSubJobs, startSubJob, downloadSuggestedSource, adoptCoreNodeRecipeDraft, fetchProgressNarrative,
     fetchHealth, runPreflight, generateRunReport, fetchGateSignal, fetchGpuNodes,
     createGpuNode, updateGpuNode, deleteGpuNode, verifyGpuNode, syncGpuNodeDockerImage, syncGpuNodeComfyUiCore

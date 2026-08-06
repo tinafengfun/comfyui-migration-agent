@@ -82,6 +82,15 @@ export interface HumanQuestion {
     | "permission"
     | "other";
   decisionContext?: HumanDecisionContext;
+  /**
+   * Tier-B answer-defaults surfacing (see answerDefaults.ts): a suggested
+   * answer the UI should pre-fill/pre-select for one-click confirmation, with
+   * a human-readable reason (e.g. "saved default" / "you answered this way N
+   * times"). Optional and advisory only -- never auto-submitted client-side;
+   * Tier-A fully-auto answering happens server-side at the gate-wait chokepoint.
+   */
+  suggestedAnswer?: string;
+  suggestedReason?: string;
 }
 
 export interface HumanDecisionContext {

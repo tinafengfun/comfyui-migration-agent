@@ -42,6 +42,21 @@ export interface AppConfig {
    */
   assetResolutionLedgerPath: string;
   /**
+   * Append-only JSONL log of every human gate-answer, shared across tasks so
+   * "you always answer this the same way" can be detected past per-task
+   * state.json wipes. Companion to answerDefaultsPath.
+   */
+  answerLogPath: string;
+  /**
+   * Append-only JSONL store of saved default-answer templates keyed by a
+   * stable question signature (latest-wins). Lets recurring gate-questions be
+   * pre-filled (tier "confirm") or auto-answered (tier "auto") without muting
+   * the agent -- see answerDefaults.ts.
+   */
+  answerDefaultsPath: string;
+  /** Master switch for the answer-defaults feature (MIGRATION_AGENT_ANSWER_DEFAULTS !== "0", default on). */
+  answerDefaultsEnabled: boolean;
+  /**
    * Absolute path to the CANONICAL comfyui-migration-agent git checkout used
    * for Step 13's draft/verify/fix/merge/push pipeline (agentImprovementPipeline.ts).
    * Deliberately never falls back to `projectRoot`: a live agent-demo deployment's
@@ -90,6 +105,13 @@ export function loadConfig(): AppConfig {
     assetResolutionLedgerPath: resolveFromProject(
       process.env.ASSET_RESOLUTION_LEDGER_PATH ?? "/nfs_share/migration-knowledge/asset-resolutions.jsonl"
     ),
+    answerLogPath: resolveFromProject(
+      process.env.ANSWER_LOG_PATH ?? "/nfs_share/migration-knowledge/answer-log.jsonl"
+    ),
+    answerDefaultsPath: resolveFromProject(
+      process.env.ANSWER_DEFAULTS_PATH ?? "/nfs_share/migration-knowledge/answer-defaults.jsonl"
+    ),
+    answerDefaultsEnabled: process.env.MIGRATION_AGENT_ANSWER_DEFAULTS !== "0",
     agentSelfImprovementRepoRoot: process.env.AGENT_SELF_IMPROVEMENT_REPO_ROOT
       ? resolveFromProject(process.env.AGENT_SELF_IMPROVEMENT_REPO_ROOT)
       : undefined

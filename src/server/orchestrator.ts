@@ -63,6 +63,19 @@ import { ensureStepArtifactScaffold } from "./stepArtifactScaffold";
 import { createTaskWorkspace, deleteTaskWorkspace, getLayoutForTask } from "./taskWorkspaces";
 import { writeTaskStateLedger } from "./taskStateLedger";
 import {
+  appendAnswerDefault,
+  appendAnswerLog,
+  computeQuestionSignature,
+  isAutoAnswerEligible,
+  isNeverAutoQuestion,
+  listAnswerDefaults,
+  lookupAnswerDefault,
+  summarizeHistory,
+  type AnswerDefaultEntry,
+  type BlockingReason,
+  type QuestionIdentity
+} from "./answerDefaults";
+import {
   applyItemPatches,
   applyItemStatusUpdates,
   parseApprovalAnswer,
@@ -1099,6 +1112,14 @@ export class MigrationOrchestrator {
           await this.updateStepAndPersist(taskId, stepId, "running");
           return replayResult;
         }
+        // Answer defaults: auto-answer a recurring structured question the
+        // operator saved a tier:"auto" default for (never for the push/deploy
+        // or hard-stop safety floor -- see answerDefaults.isNeverAutoQuestion).
+        const autoDecision = await this.tryAutoAnswerFromDefault(event);
+        if (autoDecision) {
+          await this.updateStepAndPersist(taskId, stepId, "running");
+          return autoDecision;
+        }
         if (options.pauseOnHumanGate) {
           // All steps support multi-round human-agent interaction.
           // Keep the SDK session alive so the agent can process the answer
@@ -1511,7 +1532,7 @@ export class MigrationOrchestrator {
         async (event) => {
           return this.emit(event);
         },
-        async (event) => this.approvalBroker.waitForDecision(event),
+        async (event) => (await this.tryAutoAnswerFromDefault(event)) ?? this.approvalBroker.waitForDecision(event),
         observePhase1SdkEvent
       );
       const synced = await this.syncPhase1TaskState(taskId);
@@ -1680,6 +1701,13 @@ export class MigrationOrchestrator {
         answer: redactSensitiveText(rawDecision.answer)
       };
       await this.store.appendDecision(decision);
+      // Cross-task answer log: record EVERY human answer to the shared NFS
+      // log (answerDefaults.ts) so "you always answer this the same way" can
+      // be detected past per-task state.json wipes. Best-effort; never blocks
+      // the decision. Uses the redacted answer -- the log is durable/shared.
+      await this.recordAnswerToLog(input.questionEventId, input.taskId, input.stepId, decision.answer, input.wasFreeform, "human").catch(
+        (err) => console.warn(`[answer-log] record failed: ${err instanceof Error ? err.message : String(err)}`)
+      );
       // §G.wire: record non-routine decisions as feedback. Routine approvals
       // (yes/ok/continue/approve/proceed/1) don't carry useful signal — skip
       // them to keep the feedback log focused on overrides and corrections.
@@ -1716,6 +1744,188 @@ export class MigrationOrchestrator {
     } finally {
       this.activeHumanDecisionSubmissions.delete(input.questionEventId);
     }
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Answer defaults (answerDefaults.ts): record every answer cross-task, and
+  // auto-answer / pre-fill recurring gate-questions without muting the agent.
+  // ─────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Derive the stable question identity (stepId + blockingReason + choices,
+   * plus the step-13 pipeline_phase discriminator) from a human_question
+   * event. Returns undefined if the event isn't a well-formed question.
+   */
+  async questionIdentityFromEvent(event: Pick<AgentEvent, "stepId" | "taskId" | "data">): Promise<QuestionIdentity | undefined> {
+    const q = event.data as HumanQuestion | undefined;
+    if (!q || typeof q.blockingReason !== "string") return undefined;
+    let phase: string | undefined;
+    if (event.stepId === "13") {
+      // Step-13's approve-improvements and push/deploy gates share
+      // blockingReason "quality_review"; only pipeline_phase tells them apart.
+      const task = await this.store.getTask(event.taskId);
+      if (task) {
+        const state = await readAgentImprovementFile(path.join(task.artifactPath, "13-agent-improvement.json")).catch(() => undefined);
+        phase = state?.pipeline_phase ?? undefined;
+      }
+    }
+    return {
+      stepId: event.stepId,
+      blockingReason: q.blockingReason as BlockingReason,
+      choices: q.choices,
+      phase
+    };
+  }
+
+  /** Append one answer to the cross-task answer log (best-effort). */
+  private async recordAnswerToLog(
+    questionEventId: string,
+    taskId: string,
+    stepId: string | undefined,
+    answer: string,
+    wasFreeform: boolean,
+    source: "human" | "auto-default"
+  ): Promise<void> {
+    if (!this.config.answerDefaultsEnabled) return;
+    const events = await this.store.listEvents(taskId);
+    const questionEvent = events.find((e) => e.id === questionEventId);
+    if (!questionEvent) return;
+    const identity = await this.questionIdentityFromEvent(questionEvent);
+    if (!identity) return;
+    const task = await this.store.getTask(taskId);
+    await appendAnswerLog(this.config.answerLogPath, {
+      ...identity,
+      signature: computeQuestionSignature(identity),
+      answer,
+      wasFreeform,
+      source,
+      workflowName: task?.name ?? "unknown",
+      taskId,
+      decidedAt: new Date().toISOString()
+    });
+  }
+
+  /**
+   * At a gate-wait chokepoint, before parking on the broker: if the operator
+   * saved a `tier:"auto"` default for this exact (structured, enumerated)
+   * question and it isn't on the never-auto safety floor, answer it
+   * immediately from the template. Records the decision + the answer-log entry
+   * (source "auto-default") and emits a visible progress event so the timeline
+   * shows the question was asked AND auto-answered. Returns the decision, or
+   * undefined to fall through to a normal human wait.
+   */
+  private async tryAutoAnswerFromDefault(event: AgentEvent): Promise<HumanDecision | undefined> {
+    if (!this.config.answerDefaultsEnabled) return undefined;
+    const identity = await this.questionIdentityFromEvent(event).catch(() => undefined);
+    if (!identity) return undefined;
+    if (isNeverAutoQuestion(identity) || !isAutoAnswerEligible(identity)) return undefined;
+    const template = await lookupAnswerDefault(this.config.answerDefaultsPath, computeQuestionSignature(identity)).catch(() => undefined);
+    if (!template || !template.enabled || template.tier !== "auto") return undefined;
+    const decision: HumanDecision = {
+      taskId: event.taskId,
+      stepId: event.stepId,
+      questionEventId: event.id,
+      answer: template.defaultAnswer,
+      wasFreeform: false,
+      decidedAt: new Date().toISOString()
+    };
+    await this.store.appendDecision(decision);
+    await this.recordAnswerToLog(event.id, event.taskId, event.stepId, template.defaultAnswer, false, "auto-default").catch(() => undefined);
+    await this.emit({
+      taskId: event.taskId,
+      stepId: event.stepId,
+      type: "progress",
+      message: `Auto-answered per your saved default: "${template.defaultAnswer}" (you can disable this default in the answer-defaults panel).`,
+      data: { questionEventId: event.id, answer: template.defaultAnswer, source: "auto-default", signature: template.signature }
+    });
+    return decision;
+  }
+
+  /**
+   * Tier-B surfacing: for a pending question, return its saved default (if any)
+   * and cross-task answer history, so the UI can pre-fill/pre-select the likely
+   * answer for one-click confirmation. `neverAuto` tells the UI to never
+   * pre-submit (push/deploy + hard-stop safety floor).
+   */
+  async getAnswerSuggestion(taskId: string, questionEventId: string): Promise<{
+    signature?: string;
+    neverAuto: boolean;
+    default?: { answer: string; tier: "confirm" | "auto"; enabled: boolean };
+    history: { count: number; lastAnswer?: string; allSame: boolean };
+  }> {
+    const events = await this.store.listEvents(taskId);
+    const questionEvent = events.find((e) => e.id === questionEventId);
+    const identity = questionEvent ? await this.questionIdentityFromEvent(questionEvent) : undefined;
+    if (!identity) return { neverAuto: false, history: { count: 0, allSame: false } };
+    const signature = computeQuestionSignature(identity);
+    const [template, history] = await Promise.all([
+      lookupAnswerDefault(this.config.answerDefaultsPath, signature).catch(() => undefined),
+      summarizeHistory(this.config.answerLogPath, signature).catch(
+        () => ({ count: 0, allSame: false }) as Awaited<ReturnType<typeof summarizeHistory>>
+      )
+    ]);
+    return {
+      signature,
+      neverAuto: isNeverAutoQuestion(identity),
+      default: template ? { answer: template.defaultAnswer, tier: template.tier, enabled: template.enabled } : undefined,
+      history: { count: history.count, lastAnswer: history.lastAnswer, allSame: history.allSame }
+    };
+  }
+
+  /**
+   * Save/upsert a default-answer template from a question the operator just
+   * answered. Derives the answer from the recorded decision. Rejects the
+   * never-auto safety floor for tier:"auto", and rejects tier:"auto" for
+   * freeform-only (unstructured) questions.
+   */
+  async saveAnswerDefault(taskId: string, questionEventId: string, tier: "confirm" | "auto"): Promise<AnswerDefaultEntry> {
+    const events = await this.store.listEvents(taskId);
+    const questionEvent = events.find((e) => e.id === questionEventId);
+    if (!questionEvent) throw new Error(`Question event not found: ${questionEventId}`);
+    const identity = await this.questionIdentityFromEvent(questionEvent);
+    if (!identity) throw new Error(`Event ${questionEventId} is not a well-formed question`);
+    if (tier === "auto" && (isNeverAutoQuestion(identity) || !isAutoAnswerEligible(identity))) {
+      throw new Error("This question cannot be set to fully-auto (it's on the never-auto safety floor or is a freeform question); use tier \"confirm\" instead.");
+    }
+    const decision = (await this.store.listDecisions(taskId)).filter((d) => d.questionEventId === questionEventId).at(-1);
+    if (!decision) throw new Error(`No recorded answer to save as a default for ${questionEventId}`);
+    const signature = computeQuestionSignature(identity);
+    const existing = await lookupAnswerDefault(this.config.answerDefaultsPath, signature).catch(() => undefined);
+    const now = new Date().toISOString();
+    const entry: AnswerDefaultEntry = {
+      ...identity,
+      signature,
+      label: (questionEvent.data as HumanQuestion | undefined)?.question ?? questionEvent.message,
+      defaultAnswer: decision.answer,
+      tier,
+      enabled: true,
+      createdAt: existing?.createdAt ?? now,
+      updatedAt: now
+    };
+    await appendAnswerDefault(this.config.answerDefaultsPath, entry);
+    return entry;
+  }
+
+  async listAnswerDefaultTemplates(): Promise<AnswerDefaultEntry[]> {
+    return listAnswerDefaults(this.config.answerDefaultsPath);
+  }
+
+  /** Toggle enabled / tombstone-delete an existing template (append-only). */
+  async updateAnswerDefault(
+    signature: string,
+    change: { enabled?: boolean; deleted?: boolean }
+  ): Promise<AnswerDefaultEntry | undefined> {
+    const existing = (await listAnswerDefaults(this.config.answerDefaultsPath)).find((e) => e.signature === signature)
+      ?? (await lookupAnswerDefault(this.config.answerDefaultsPath, signature).catch(() => undefined));
+    if (!existing) return undefined;
+    const updated: AnswerDefaultEntry = {
+      ...existing,
+      enabled: change.enabled ?? existing.enabled,
+      deleted: change.deleted ?? existing.deleted,
+      updatedAt: new Date().toISOString()
+    };
+    await appendAnswerDefault(this.config.answerDefaultsPath, updated);
+    return updated.deleted ? undefined : updated;
   }
 
   private firstPhase1StepToMarkRunning(task: MigrationTask): string | undefined {

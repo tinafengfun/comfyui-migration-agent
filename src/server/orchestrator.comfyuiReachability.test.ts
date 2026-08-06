@@ -30,6 +30,9 @@ function makeConfig(root: string, gpuNodesPath: string): AppConfig {
     workflowArchiveRoot: path.join(root, "nfs-workflows"),
     taskArchiveRoot: path.join(root, "task-archive"),
     assetResolutionLedgerPath: path.join(root, "asset-resolutions.jsonl"),
+    answerLogPath: path.join(root, "answer-log.jsonl"),
+    answerDefaultsPath: path.join(root, "answer-defaults.jsonl"),
+    answerDefaultsEnabled: false,
     autoApproveAgentPermissions: false
   };
 }

@@ -115,6 +115,7 @@ function App() {
   const [defaultGpuNode, setDefaultGpuNode] = useState<string | undefined>();
   const [selectedGpuNode, setSelectedGpuNode] = useState<string | undefined>();
   const [nodeManagerOpen, setNodeManagerOpen] = useState(false);
+  const [answerDefaultsOpen, setAnswerDefaultsOpen] = useState(false);
   const [questionDrafts, setQuestionDrafts] = useState<Record<string, string>>({});
   const [rightTab, setRightTab] = useState<"detail" | "artifacts" | "subjobs">("detail");
 
@@ -373,6 +374,13 @@ function App() {
               </button>
             </>
           )}
+          <button
+            className="btn btn-sm"
+            title="查看/管理已保存的回答默认值"
+            onClick={() => setAnswerDefaultsOpen(true)}
+          >
+            回答默认值
+          </button>
           <UploadButton onUpload={handleUpload} error={uploadError} success={uploadSuccess} onClearError={() => setUploadError(undefined)} onClearSuccess={() => setUploadSuccess(undefined)} />
           {selectedTask && (
             <>
@@ -474,6 +482,66 @@ function App() {
           onChanged={() => void refreshGpuNodes()}
         />
       )}
+      {answerDefaultsOpen && (
+        <AnswerDefaultsManager api={api} onClose={() => setAnswerDefaultsOpen(false)} />
+      )}
+    </div>
+  );
+}
+
+/* ── Answer Defaults Manager (list + enable/disable + delete) ── */
+function AnswerDefaultsManager({ api, onClose }: {
+  api: ReturnType<typeof useApi>;
+  onClose: () => void;
+}) {
+  type Row = { signature: string; label: string; stepId?: string; blockingReason: string; defaultAnswer: string; tier: "confirm" | "auto"; enabled: boolean };
+  const [rows, setRows] = useState<Row[]>([]);
+  const [error, setError] = useState<string>("");
+  const refresh = useCallback(() => {
+    void api.fetchAnswerDefaults().then((d) => setRows(d as Row[])).catch((e) => setError(e instanceof Error ? e.message : String(e)));
+  }, [api]);
+  useEffect(() => { refresh(); }, [refresh]);
+  return (
+    <div className="gpu-node-manager-overlay" onClick={onClose}>
+      <div className="gpu-node-manager answer-defaults-modal" onClick={(e) => e.stopPropagation()}>
+        <div className="gpu-node-manager-header">
+          <h2>回答默认值</h2>
+          <button className="link-btn" onClick={onClose}>✕ Close</button>
+        </div>
+        {error && <p className="error-text">{error}</p>}
+        {rows.length === 0 ? (
+          <p className="muted">还没有保存任何默认值。在回答某个问题后点“记住默认”即可创建。</p>
+        ) : (
+          <table className="answer-defaults-table">
+            <thead>
+              <tr><th>问题</th><th>Step</th><th>类型</th><th>默认答案</th><th>模式</th><th>启用</th><th></th></tr>
+            </thead>
+            <tbody>
+              {rows.map((r) => (
+                <tr key={r.signature} className={r.enabled ? "" : "row-disabled"}>
+                  <td title={r.label}>{r.label.length > 48 ? r.label.slice(0, 48) + "…" : r.label}</td>
+                  <td>{r.stepId ?? "-"}</td>
+                  <td>{r.blockingReason}</td>
+                  <td>{r.defaultAnswer}</td>
+                  <td>{r.tier === "auto" ? "自动" : "一键确认"}</td>
+                  <td>
+                    <input
+                      type="checkbox"
+                      checked={r.enabled}
+                      onChange={() => void api.setAnswerDefaultEnabled(r.signature, !r.enabled).then(refresh).catch((e) => setError(String(e)))}
+                    />
+                  </td>
+                  <td>
+                    <button className="btn btn-sm" onClick={() => void api.deleteAnswerDefault(r.signature).then(refresh).catch((e) => setError(String(e)))}>
+                      删除
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
     </div>
   );
 }
@@ -1657,6 +1725,54 @@ function HumanInteraction({ questions, drafts, onDraftChange, onAnswer, onOpenAr
   const [submittingIds, setSubmittingIds] = useState<Record<string, boolean>>({});
   const [submitErrors, setSubmitErrors] = useState<Record<string, string>>({});
 
+  // Answer-defaults (answerDefaults.ts): per-question suggestion (saved default
+  // or "you've answered this way N times"), and which questions the operator
+  // just saved a default for (so we show a confirmation and hide the buttons).
+  type AnswerSuggestion = {
+    signature?: string;
+    neverAuto: boolean;
+    default?: { answer: string; tier: "confirm" | "auto"; enabled: boolean };
+    history: { count: number; lastAnswer?: string; allSame: boolean };
+  };
+  const [suggestions, setSuggestions] = useState<Record<string, AnswerSuggestion>>({});
+  const [savedDefaultFor, setSavedDefaultFor] = useState<Record<string, "confirm" | "auto">>({});
+
+  useEffect(() => {
+    if (!taskId) return;
+    for (const event of questions) {
+      if (suggestions[event.id] !== undefined) continue;
+      void api
+        .fetchAnswerSuggestion(taskId, event.id)
+        .then((s) => setSuggestions((prev) => ({ ...prev, [event.id]: s })))
+        .catch(() => { /* suggestion is best-effort; absence just means no pre-fill */ });
+    }
+  }, [taskId, questions, suggestions, api]);
+
+  const suggestionFor = (event: AgentEvent): { answer: string; reason: string } | undefined => {
+    const s = suggestions[event.id];
+    if (!s || s.neverAuto) return undefined;
+    if (s.default?.enabled) {
+      return { answer: s.default.answer, reason: s.default.tier === "auto" ? "已保存为自动默认" : "已保存默认" };
+    }
+    if (s.history.allSame && s.history.count >= 2 && s.history.lastAnswer) {
+      return { answer: s.history.lastAnswer, reason: `你已这样回答 ${s.history.count} 次` };
+    }
+    return undefined;
+  };
+
+  const saveDefault = useCallback(
+    async (event: AgentEvent, tier: "confirm" | "auto") => {
+      if (!taskId) return;
+      try {
+        await api.saveAnswerDefault(taskId, event.id, tier);
+        setSavedDefaultFor((prev) => ({ ...prev, [event.id]: tier }));
+      } catch (err) {
+        setSubmitErrors((prev) => ({ ...prev, [event.id]: err instanceof Error ? err.message : String(err) }));
+      }
+    },
+    [taskId, api]
+  );
+
   const handleAnswer = useCallback(
     (event: AgentEvent, answer: string, freeform: boolean) => {
       if (submittingIds[event.id]) return;
@@ -1781,20 +1897,48 @@ function HumanInteraction({ questions, drafts, onDraftChange, onAnswer, onOpenAr
                 Open artifact: {relPath.split("/").pop()}
               </button>
             )}
+            {(() => {
+              const sug = suggestionFor(event);
+              return sug ? (
+                <p className="muted question-suggestion">💡 建议：<strong>{sug.answer}</strong>（{sug.reason}）</p>
+              ) : null;
+            })()}
             {isSubmitted ? (
-              <p className="muted question-submitted-note">✓ Sent — waiting for the agent…</p>
+              <div className="question-submitted-note">
+                <p className="muted">✓ Sent — waiting for the agent…</p>
+                {taskId && !suggestions[event.id]?.neverAuto && (
+                  savedDefaultFor[event.id] ? (
+                    <p className="muted">已记住默认（{savedDefaultFor[event.id] === "auto" ? "以后自动回答" : "下次帮你预选"}）。可在“回答默认值”面板里管理。</p>
+                  ) : (
+                    <div className="question-actions">
+                      <button className="btn btn-sm" onClick={() => void saveDefault(event, "confirm")}>
+                        记住这个默认（下次帮我预选）
+                      </button>
+                      {(question?.choices?.length ?? 0) > 0 && (
+                        <button className="btn btn-sm" onClick={() => void saveDefault(event, "auto")}>
+                          以后自动回答这类问题（不再问我）
+                        </button>
+                      )}
+                    </div>
+                  )
+                )}
+              </div>
             ) : (
               <div className="question-actions">
-                {(question?.choices ?? ["Approve and continue"]).map((choice) => (
+                {(question?.choices ?? ["Approve and continue"]).map((choice) => {
+                  const sug = suggestionFor(event);
+                  const isSuggested = sug?.answer === choice;
+                  return (
                   <button
                     key={choice}
-                    className="btn btn-primary"
+                    className={`btn ${isSuggested ? "btn-primary btn-suggested" : "btn-primary"}`}
                     disabled={isSubmitted}
                     onClick={() => handleAnswer(event, choice, false)}
                   >
-                    {choice}
+                    {choice}{isSuggested ? " · 建议" : ""}
                   </button>
-                ))}
+                  );
+                })}
                 {hasMissingMedia && (
                   <button className="btn" disabled={isSubmitted} onClick={() => handleFileSelect(event.id)}>
                     Upload missing file

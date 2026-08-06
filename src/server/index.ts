@@ -473,6 +473,66 @@ app.get("/api/tasks/:taskId/human-decisions", async (req, res, next) => {
   }
 });
 
+// ── Answer defaults (answerDefaults.ts): suggest / save / manage ──
+
+app.get("/api/tasks/:taskId/questions/:questionEventId/suggestion", async (req, res, next) => {
+  try {
+    res.json(await orchestrator.getAnswerSuggestion(req.params.taskId, req.params.questionEventId));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/tasks/:taskId/questions/:questionEventId/save-default", async (req, res, next) => {
+  try {
+    const tier = (req.body as { tier?: "confirm" | "auto" }).tier ?? "confirm";
+    if (tier !== "confirm" && tier !== "auto") {
+      res.status(400).json({ error: 'tier must be "confirm" or "auto"' });
+      return;
+    }
+    const entry = await orchestrator.saveAnswerDefault(req.params.taskId, req.params.questionEventId, tier);
+    res.status(201).json({ default: entry });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (message.includes("cannot be set to fully-auto") || message.includes("No recorded answer")) {
+      res.status(409).json({ error: message });
+      return;
+    }
+    next(error);
+  }
+});
+
+app.get("/api/answer-defaults", async (_req, res, next) => {
+  try {
+    res.json({ defaults: await orchestrator.listAnswerDefaultTemplates() });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.patch("/api/answer-defaults/:signature", async (req, res, next) => {
+  try {
+    const body = req.body as { enabled?: boolean; tier?: "confirm" | "auto" };
+    const updated = await orchestrator.updateAnswerDefault(req.params.signature, { enabled: body.enabled });
+    if (!updated) {
+      res.status(404).json({ error: "No such answer default" });
+      return;
+    }
+    res.json({ default: updated });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.delete("/api/answer-defaults/:signature", async (req, res, next) => {
+  try {
+    await orchestrator.updateAnswerDefault(req.params.signature, { deleted: true });
+    res.json({ deleted: req.params.signature });
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.post("/api/tasks/:taskId/hard-stop", async (req, res, next) => {
   try {
     const body = req.body as { stepId?: string; reason?: string; improvementStrategy?: string };

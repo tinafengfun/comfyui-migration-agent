@@ -83,6 +83,9 @@ describe("migration orchestrator", () => {
       workflowArchiveRoot: path.join(root, "nfs-workflows"),
       taskArchiveRoot: path.join(root, "task-archive"),
       assetResolutionLedgerPath: path.join(root, "asset-resolutions.jsonl"),
+      answerLogPath: path.join(root, "answer-log.jsonl"),
+      answerDefaultsPath: path.join(root, "answer-defaults.jsonl"),
+      answerDefaultsEnabled: false,
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -158,6 +161,9 @@ describe("migration orchestrator", () => {
       workflowArchiveRoot: path.join(root, "nfs-workflows"),
       taskArchiveRoot: path.join(root, "task-archive"),
       assetResolutionLedgerPath: path.join(root, "asset-resolutions.jsonl"),
+      answerLogPath: path.join(root, "answer-log.jsonl"),
+      answerDefaultsPath: path.join(root, "answer-defaults.jsonl"),
+      answerDefaultsEnabled: false,
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -205,6 +211,9 @@ describe("migration orchestrator", () => {
       workflowArchiveRoot: path.join(root, "nfs-workflows"),
       taskArchiveRoot: path.join(root, "task-archive"),
       assetResolutionLedgerPath: path.join(root, "asset-resolutions.jsonl"),
+      answerLogPath: path.join(root, "answer-log.jsonl"),
+      answerDefaultsPath: path.join(root, "answer-defaults.jsonl"),
+      answerDefaultsEnabled: false,
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -241,6 +250,9 @@ describe("migration orchestrator", () => {
       workflowArchiveRoot: path.join(root, "nfs-workflows"),
       taskArchiveRoot: path.join(root, "task-archive"),
       assetResolutionLedgerPath: path.join(root, "asset-resolutions.jsonl"),
+      answerLogPath: path.join(root, "answer-log.jsonl"),
+      answerDefaultsPath: path.join(root, "answer-defaults.jsonl"),
+      answerDefaultsEnabled: false,
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -288,6 +300,9 @@ describe("migration orchestrator", () => {
       workflowArchiveRoot: path.join(root, "nfs-workflows"),
       taskArchiveRoot: path.join(root, "task-archive"),
       assetResolutionLedgerPath: path.join(root, "asset-resolutions.jsonl"),
+      answerLogPath: path.join(root, "answer-log.jsonl"),
+      answerDefaultsPath: path.join(root, "answer-defaults.jsonl"),
+      answerDefaultsEnabled: false,
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -367,6 +382,9 @@ describe("migration orchestrator", () => {
       workflowArchiveRoot: path.join(root, "nfs-workflows"),
       taskArchiveRoot: path.join(root, "task-archive"),
       assetResolutionLedgerPath: path.join(root, "asset-resolutions.jsonl"),
+      answerLogPath: path.join(root, "answer-log.jsonl"),
+      answerDefaultsPath: path.join(root, "answer-defaults.jsonl"),
+      answerDefaultsEnabled: false,
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -435,6 +453,9 @@ describe("migration orchestrator", () => {
       workflowArchiveRoot: path.join(root, "nfs-workflows"),
       taskArchiveRoot: path.join(root, "task-archive"),
       assetResolutionLedgerPath: path.join(root, "asset-resolutions.jsonl"),
+      answerLogPath: path.join(root, "answer-log.jsonl"),
+      answerDefaultsPath: path.join(root, "answer-defaults.jsonl"),
+      answerDefaultsEnabled: false,
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -519,6 +540,9 @@ describe("migration orchestrator", () => {
       workflowArchiveRoot: path.join(root, "nfs-workflows"),
       taskArchiveRoot: path.join(root, "task-archive"),
       assetResolutionLedgerPath: path.join(root, "asset-resolutions.jsonl"),
+      answerLogPath: path.join(root, "answer-log.jsonl"),
+      answerDefaultsPath: path.join(root, "answer-defaults.jsonl"),
+      answerDefaultsEnabled: false,
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -595,6 +619,9 @@ describe("migration orchestrator", () => {
       workflowArchiveRoot: path.join(root, "nfs-workflows"),
       taskArchiveRoot: path.join(root, "task-archive"),
       assetResolutionLedgerPath: path.join(root, "asset-resolutions.jsonl"),
+      answerLogPath: path.join(root, "answer-log.jsonl"),
+      answerDefaultsPath: path.join(root, "answer-defaults.jsonl"),
+      answerDefaultsEnabled: false,
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -665,6 +692,9 @@ describe("migration orchestrator", () => {
       workflowArchiveRoot: path.join(root, "nfs-workflows"),
       taskArchiveRoot: path.join(root, "task-archive"),
       assetResolutionLedgerPath: path.join(root, "asset-resolutions.jsonl"),
+      answerLogPath: path.join(root, "answer-log.jsonl"),
+      answerDefaultsPath: path.join(root, "answer-defaults.jsonl"),
+      answerDefaultsEnabled: false,
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -741,6 +771,9 @@ describe("migration orchestrator", () => {
       workflowArchiveRoot: path.join(root, "nfs-workflows"),
       taskArchiveRoot: path.join(root, "task-archive"),
       assetResolutionLedgerPath: path.join(root, "asset-resolutions.jsonl"),
+      answerLogPath: path.join(root, "answer-log.jsonl"),
+      answerDefaultsPath: path.join(root, "answer-defaults.jsonl"),
+      answerDefaultsEnabled: false,
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -804,6 +837,9 @@ describe("migration orchestrator", () => {
       workflowArchiveRoot: path.join(root, "nfs-workflows"),
       taskArchiveRoot: path.join(root, "task-archive"),
       assetResolutionLedgerPath: path.join(root, "asset-resolutions.jsonl"),
+      answerLogPath: path.join(root, "answer-log.jsonl"),
+      answerDefaultsPath: path.join(root, "answer-defaults.jsonl"),
+      answerDefaultsEnabled: false,
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -885,6 +921,9 @@ describe("migration orchestrator", () => {
       workflowArchiveRoot: path.join(root, "nfs-workflows"),
       taskArchiveRoot: path.join(root, "task-archive"),
       assetResolutionLedgerPath: path.join(root, "asset-resolutions.jsonl"),
+      answerLogPath: path.join(root, "answer-log.jsonl"),
+      answerDefaultsPath: path.join(root, "answer-defaults.jsonl"),
+      answerDefaultsEnabled: false,
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -953,6 +992,9 @@ describe("migration orchestrator", () => {
       workflowArchiveRoot: path.join(root, "nfs-workflows"),
       taskArchiveRoot: path.join(root, "task-archive"),
       assetResolutionLedgerPath: path.join(root, "asset-resolutions.jsonl"),
+      answerLogPath: path.join(root, "answer-log.jsonl"),
+      answerDefaultsPath: path.join(root, "answer-defaults.jsonl"),
+      answerDefaultsEnabled: false,
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -1008,6 +1050,9 @@ describe("migration orchestrator", () => {
       workflowArchiveRoot: path.join(root, "nfs-workflows"),
       taskArchiveRoot: path.join(root, "task-archive"),
       assetResolutionLedgerPath: path.join(root, "asset-resolutions.jsonl"),
+      answerLogPath: path.join(root, "answer-log.jsonl"),
+      answerDefaultsPath: path.join(root, "answer-defaults.jsonl"),
+      answerDefaultsEnabled: false,
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -1067,6 +1112,9 @@ describe("migration orchestrator", () => {
       workflowArchiveRoot: path.join(root, "nfs-workflows"),
       taskArchiveRoot: path.join(root, "task-archive"),
       assetResolutionLedgerPath: path.join(root, "asset-resolutions.jsonl"),
+      answerLogPath: path.join(root, "answer-log.jsonl"),
+      answerDefaultsPath: path.join(root, "answer-defaults.jsonl"),
+      answerDefaultsEnabled: false,
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -1111,6 +1159,9 @@ describe("migration orchestrator", () => {
       workflowArchiveRoot: path.join(root, "nfs-workflows"),
       taskArchiveRoot: path.join(root, "task-archive"),
       assetResolutionLedgerPath: path.join(root, "asset-resolutions.jsonl"),
+      answerLogPath: path.join(root, "answer-log.jsonl"),
+      answerDefaultsPath: path.join(root, "answer-defaults.jsonl"),
+      answerDefaultsEnabled: false,
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -1175,6 +1226,9 @@ describe("migration orchestrator", () => {
       workflowArchiveRoot: path.join(root, "nfs-workflows"),
       taskArchiveRoot: path.join(root, "task-archive"),
       assetResolutionLedgerPath: path.join(root, "asset-resolutions.jsonl"),
+      answerLogPath: path.join(root, "answer-log.jsonl"),
+      answerDefaultsPath: path.join(root, "answer-defaults.jsonl"),
+      answerDefaultsEnabled: false,
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -1241,6 +1295,9 @@ describe("migration orchestrator", () => {
       workflowArchiveRoot: path.join(root, "nfs-workflows"),
       taskArchiveRoot: path.join(root, "task-archive"),
       assetResolutionLedgerPath: path.join(root, "asset-resolutions.jsonl"),
+      answerLogPath: path.join(root, "answer-log.jsonl"),
+      answerDefaultsPath: path.join(root, "answer-defaults.jsonl"),
+      answerDefaultsEnabled: false,
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -1323,6 +1380,9 @@ describe("migration orchestrator", () => {
       workflowArchiveRoot: path.join(root, "nfs-workflows"),
       taskArchiveRoot: path.join(root, "task-archive"),
       assetResolutionLedgerPath: path.join(root, "asset-resolutions.jsonl"),
+      answerLogPath: path.join(root, "answer-log.jsonl"),
+      answerDefaultsPath: path.join(root, "answer-defaults.jsonl"),
+      answerDefaultsEnabled: false,
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -1419,6 +1479,9 @@ describe("migration orchestrator", () => {
       workflowArchiveRoot: path.join(root, "nfs-workflows"),
       taskArchiveRoot: path.join(root, "task-archive"),
       assetResolutionLedgerPath: path.join(root, "asset-resolutions.jsonl"),
+      answerLogPath: path.join(root, "answer-log.jsonl"),
+      answerDefaultsPath: path.join(root, "answer-defaults.jsonl"),
+      answerDefaultsEnabled: false,
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -1515,6 +1578,9 @@ describe("migration orchestrator", () => {
       workflowArchiveRoot: path.join(root, "nfs-workflows"),
       taskArchiveRoot: path.join(root, "task-archive"),
       assetResolutionLedgerPath: path.join(root, "asset-resolutions.jsonl"),
+      answerLogPath: path.join(root, "answer-log.jsonl"),
+      answerDefaultsPath: path.join(root, "answer-defaults.jsonl"),
+      answerDefaultsEnabled: false,
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -1580,6 +1646,9 @@ describe("migration orchestrator", () => {
       workflowArchiveRoot: path.join(root, "nfs-workflows"),
       taskArchiveRoot: path.join(root, "task-archive"),
       assetResolutionLedgerPath: path.join(root, "asset-resolutions.jsonl"),
+      answerLogPath: path.join(root, "answer-log.jsonl"),
+      answerDefaultsPath: path.join(root, "answer-defaults.jsonl"),
+      answerDefaultsEnabled: false,
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -1633,6 +1702,9 @@ describe("migration orchestrator", () => {
       workflowArchiveRoot: path.join(root, "nfs-workflows"),
       taskArchiveRoot: path.join(root, "task-archive"),
       assetResolutionLedgerPath: path.join(root, "asset-resolutions.jsonl"),
+      answerLogPath: path.join(root, "answer-log.jsonl"),
+      answerDefaultsPath: path.join(root, "answer-defaults.jsonl"),
+      answerDefaultsEnabled: false,
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -1712,6 +1784,9 @@ describe("migration orchestrator", () => {
       workflowArchiveRoot: path.join(root, "nfs-workflows"),
       taskArchiveRoot: path.join(root, "task-archive"),
       assetResolutionLedgerPath: path.join(root, "asset-resolutions.jsonl"),
+      answerLogPath: path.join(root, "answer-log.jsonl"),
+      answerDefaultsPath: path.join(root, "answer-defaults.jsonl"),
+      answerDefaultsEnabled: false,
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -1767,6 +1842,9 @@ describe("migration orchestrator", () => {
       workflowArchiveRoot: path.join(root, "nfs-workflows"),
       taskArchiveRoot: path.join(root, "task-archive"),
       assetResolutionLedgerPath: path.join(root, "asset-resolutions.jsonl"),
+      answerLogPath: path.join(root, "answer-log.jsonl"),
+      answerDefaultsPath: path.join(root, "answer-defaults.jsonl"),
+      answerDefaultsEnabled: false,
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -1819,6 +1897,9 @@ describe("migration orchestrator", () => {
       workflowArchiveRoot: path.join(root, "nfs-workflows"),
       taskArchiveRoot: path.join(root, "task-archive"),
       assetResolutionLedgerPath: path.join(root, "asset-resolutions.jsonl"),
+      answerLogPath: path.join(root, "answer-log.jsonl"),
+      answerDefaultsPath: path.join(root, "answer-defaults.jsonl"),
+      answerDefaultsEnabled: false,
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -1870,6 +1951,9 @@ describe("migration orchestrator", () => {
       workflowArchiveRoot: path.join(root, "nfs-workflows"),
       taskArchiveRoot: path.join(root, "task-archive"),
       assetResolutionLedgerPath: path.join(root, "asset-resolutions.jsonl"),
+      answerLogPath: path.join(root, "answer-log.jsonl"),
+      answerDefaultsPath: path.join(root, "answer-defaults.jsonl"),
+      answerDefaultsEnabled: false,
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -1918,6 +2002,9 @@ describe("migration orchestrator", () => {
       workflowArchiveRoot: path.join(root, "nfs-workflows"),
       taskArchiveRoot: path.join(root, "task-archive"),
       assetResolutionLedgerPath: path.join(root, "asset-resolutions.jsonl"),
+      answerLogPath: path.join(root, "answer-log.jsonl"),
+      answerDefaultsPath: path.join(root, "answer-defaults.jsonl"),
+      answerDefaultsEnabled: false,
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -1983,6 +2070,9 @@ describe("migration orchestrator", () => {
       workflowArchiveRoot: path.join(root, "nfs-workflows"),
       taskArchiveRoot: path.join(root, "task-archive"),
       assetResolutionLedgerPath: path.join(root, "asset-resolutions.jsonl"),
+      answerLogPath: path.join(root, "answer-log.jsonl"),
+      answerDefaultsPath: path.join(root, "answer-defaults.jsonl"),
+      answerDefaultsEnabled: false,
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -2042,6 +2132,9 @@ describe("migration orchestrator", () => {
         workflowArchiveRoot: path.join(root, "nfs-workflows"),
         taskArchiveRoot: path.join(root, "task-archive"),
         assetResolutionLedgerPath: path.join(root, "asset-resolutions.jsonl"),
+        answerLogPath: path.join(root, "answer-log.jsonl"),
+        answerDefaultsPath: path.join(root, "answer-defaults.jsonl"),
+        answerDefaultsEnabled: false,
         autoApproveAgentPermissions: false
       };
       await ensureDir(config.workspaceRoot);
@@ -2182,6 +2275,9 @@ describe("migration orchestrator", () => {
         workflowArchiveRoot: path.join(root, "nfs-workflows"),
         taskArchiveRoot: path.join(root, "task-archive"),
         assetResolutionLedgerPath: path.join(root, "asset-resolutions.jsonl"),
+        answerLogPath: path.join(root, "answer-log.jsonl"),
+        answerDefaultsPath: path.join(root, "answer-defaults.jsonl"),
+        answerDefaultsEnabled: false,
         autoApproveAgentPermissions: false
       };
       await ensureDir(config.workspaceRoot);
@@ -2284,6 +2380,9 @@ describe("migration orchestrator", () => {
         workflowArchiveRoot: path.join(root, "nfs-workflows"),
         taskArchiveRoot: path.join(root, "task-archive"),
         assetResolutionLedgerPath: path.join(root, "asset-resolutions.jsonl"),
+        answerLogPath: path.join(root, "answer-log.jsonl"),
+        answerDefaultsPath: path.join(root, "answer-defaults.jsonl"),
+        answerDefaultsEnabled: false,
         autoApproveAgentPermissions: false
       };
       await ensureDir(config.workspaceRoot);
@@ -2376,6 +2475,9 @@ describe("migration orchestrator", () => {
         workflowArchiveRoot: path.join(root, "nfs-workflows"),
         taskArchiveRoot: path.join(root, "task-archive"),
         assetResolutionLedgerPath: path.join(root, "asset-resolutions.jsonl"),
+        answerLogPath: path.join(root, "answer-log.jsonl"),
+        answerDefaultsPath: path.join(root, "answer-defaults.jsonl"),
+        answerDefaultsEnabled: false,
         autoApproveAgentPermissions: false
       };
       await ensureDir(config.workspaceRoot);
@@ -2459,6 +2561,9 @@ describe("migration orchestrator", () => {
         workflowArchiveRoot: path.join(root, "nfs-workflows"),
         taskArchiveRoot: path.join(root, "task-archive"),
         assetResolutionLedgerPath: path.join(root, "asset-resolutions.jsonl"),
+        answerLogPath: path.join(root, "answer-log.jsonl"),
+        answerDefaultsPath: path.join(root, "answer-defaults.jsonl"),
+        answerDefaultsEnabled: false,
         autoApproveAgentPermissions: false
       };
       await ensureDir(config.workspaceRoot);
@@ -2549,6 +2654,9 @@ describe("SDK connection-error retry (real incident: NO_PROXY misrouted an inter
       workflowArchiveRoot: path.join(root, "nfs-workflows"),
       taskArchiveRoot: path.join(root, "task-archive"),
       assetResolutionLedgerPath: path.join(root, "asset-resolutions.jsonl"),
+      answerLogPath: path.join(root, "answer-log.jsonl"),
+      answerDefaultsPath: path.join(root, "answer-defaults.jsonl"),
+      answerDefaultsEnabled: false,
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -2686,6 +2794,9 @@ describe("hidden runtime asset prestage integration (real incident: IndexTTS2Run
         workflowArchiveRoot: path.join(root, "nfs-workflows"),
         taskArchiveRoot: path.join(root, "task-archive"),
         assetResolutionLedgerPath: path.join(root, "asset-resolutions.jsonl"),
+        answerLogPath: path.join(root, "answer-log.jsonl"),
+        answerDefaultsPath: path.join(root, "answer-defaults.jsonl"),
+        answerDefaultsEnabled: false,
         autoApproveAgentPermissions: false
       };
       await ensureDir(config.workspaceRoot);
@@ -2764,6 +2875,9 @@ describe("hidden runtime asset prestage integration (real incident: IndexTTS2Run
       workflowArchiveRoot: path.join(root, "nfs-workflows"),
       taskArchiveRoot: path.join(root, "task-archive"),
       assetResolutionLedgerPath: path.join(root, "asset-resolutions.jsonl"),
+      answerLogPath: path.join(root, "answer-log.jsonl"),
+      answerDefaultsPath: path.join(root, "answer-defaults.jsonl"),
+      answerDefaultsEnabled: false,
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -2855,6 +2969,9 @@ describe("hidden runtime asset prestage integration (real incident: IndexTTS2Run
       workflowArchiveRoot: path.join(root, "nfs-workflows"),
       taskArchiveRoot: path.join(root, "task-archive"),
       assetResolutionLedgerPath: path.join(root, "asset-resolutions.jsonl"),
+      answerLogPath: path.join(root, "answer-log.jsonl"),
+      answerDefaultsPath: path.join(root, "answer-defaults.jsonl"),
+      answerDefaultsEnabled: false,
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);
@@ -2946,6 +3063,9 @@ describe("Step 12b completion always reports archive status (real incident: a no
       workflowArchiveRoot: path.join(root, "nfs-workflows"),
       taskArchiveRoot: path.join(root, "task-archive"),
       assetResolutionLedgerPath: path.join(root, "asset-resolutions.jsonl"),
+      answerLogPath: path.join(root, "answer-log.jsonl"),
+      answerDefaultsPath: path.join(root, "answer-defaults.jsonl"),
+      answerDefaultsEnabled: false,
       autoApproveAgentPermissions: false
     };
     await ensureDir(config.workspaceRoot);

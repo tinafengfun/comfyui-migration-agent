@@ -568,3 +568,13 @@ button, input, select, textarea { font: inherit; }
   display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px;
   padding-top: 12px; border-top: 1px solid #fde68a;
 }
+
+/* ── Answer defaults ── */
+.question-suggestion { margin: 6px 0; font-size: 13px; }
+.btn-suggested { outline: 2px solid #7c3aed; outline-offset: 1px; }
+.answer-defaults-modal { max-width: 900px; }
+.answer-defaults-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.answer-defaults-table th, .answer-defaults-table td {
+  text-align: left; padding: 6px 8px; border-bottom: 1px solid #e5e7eb; vertical-align: top;
+}
+.answer-defaults-table tr.row-disabled { opacity: 0.5; }
