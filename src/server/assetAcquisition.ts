@@ -656,7 +656,7 @@ async function downloadExactAssetIfAllowed(
   }
 }
 
-function isExactDownloadCandidate(candidate: AssetSourceCandidate, assetName: string): boolean {
+export function isExactDownloadCandidate(candidate: AssetSourceCandidate, assetName: string): boolean {
   if (!candidate.downloadCommand?.length || !candidate.downloadUrl) return false;
   let fileName: string;
   try {
@@ -664,7 +664,12 @@ function isExactDownloadCandidate(candidate: AssetSourceCandidate, assetName: st
   } catch {
     fileName = path.basename(candidate.downloadUrl);
   }
-  if (decodeURIComponent(fileName) !== assetName) return false;
+  // Compare basenames: `assetName` is row.requested_name which can carry a
+  // subfolder prefix (e.g. "SD1.5/vae….safetensors"), while a download URL's
+  // filename is always bare. Comparing the full prefixed name here silently
+  // dropped operator-provided exact URLs (confirmed field incident). The
+  // on-disk destination still honors the subfolder via targetPathForRow.
+  if (decodeURIComponent(fileName) !== path.basename(assetName)) return false;
   return (
     candidate.notes.includes("exact filename") ||
     candidate.notes.includes("Exact") ||
@@ -1183,14 +1188,23 @@ export async function cloneCustomNodeIfAllowed(input: {
     }
     return { cloned: true, cloneAttempted: true };
   } catch (error) {
+    // Fix 5: classify permission / not-mounted failures clearly instead of a
+    // generic "clone failed" (confirmed field incident: EACCES creating the
+    // symlink under a root-owned /nfs_share, plus /nfs_share not mounted at
+    // all -> a bare, non-writable root dir). This tells the operator it's an
+    // environment/permission problem to fix (mount + writability), not a bad
+    // repo URL or a transient network error.
+    const raw = error instanceof Error ? error.message : String(error);
+    const firstLine = raw.split("\n")[0];
+    const envHint = /EACCES|EPERM|EROFS|ENOENT/i.test(raw)
+      ? ` — the clone/symlink target under '${input.nfsShareRoot ?? path.dirname(input.targetPath)}' is not writable (or the NFS share is not mounted). This is an environment/permission issue to fix (mount the share and grant write access), not a bad source URL.`
+      : "";
     return {
       cloned: false,
       cloneAttempted: true,
       issue: {
         provider: "github",
-        message: `Custom-node clone failed for ${input.repository}: ${
-          error instanceof Error ? error.message.split("\n")[0] : String(error)
-        }`
+        message: `Custom-node clone failed for ${input.repository}: ${firstLine}${envHint}`
       }
     };
   }

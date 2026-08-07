@@ -408,10 +408,17 @@ async function searchExplicitHuggingFaceFiles(
   httpJson: HttpJson
 ): Promise<AssetSourceCandidate[]> {
   if (!input.assetName) return [];
+  // Match by basename: an asset requested as "SD1.5/vaeFtMse840000Ema_v10.safetensors"
+  // (subfolder-prefixed requested_name) must still match a human-provided HF
+  // `resolve/main/vaeFtMse840000Ema_v10.safetensors` URL, whose source.filename is
+  // always the bare basename. Comparing the full prefixed name here was a real
+  // incident: the operator's exact URL was silently dropped. (See the matching
+  // basename fix in assetAcquisition.isExactDownloadCandidate.)
+  const wantBasename = path.basename(input.assetName);
   const sources = uniqueHuggingFaceFileSources([
     ...config.explicitHuggingFaceFiles,
     ...inferHuggingFaceFileSources(input, config)
-  ]).filter((source) => source.filename === input.assetName);
+  ]).filter((source) => source.filename === wantBasename);
   const candidates: AssetSourceCandidate[] = [];
   for (const source of sources) {
     const metadata = await huggingFaceFileMetadata(source, config, httpJson);

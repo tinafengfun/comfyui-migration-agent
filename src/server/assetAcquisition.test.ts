@@ -4,10 +4,10 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
 import type { MigrationTask } from "../shared/types";
-import { cloneCustomNodeIfAllowed, ensureAssetAcquisitionJob, generateAssetQueryVariants } from "./assetAcquisition";
+import { cloneCustomNodeIfAllowed, ensureAssetAcquisitionJob, generateAssetQueryVariants, isExactDownloadCandidate } from "./assetAcquisition";
 import { ensureDir } from "./fsUtils";
 import { demoModelRoot } from "./config";
-import { buildSourceProviderConfig } from "./assetSourceProviders";
+import { buildSourceProviderConfig, type AssetSourceCandidate } from "./assetSourceProviders";
 
 const execFileAsync = promisify(execFile);
 
@@ -22,6 +22,32 @@ async function makeLocalGitRepo(root: string): Promise<string> {
   await execFileAsync("git", ["commit", "-q", "-m", "init"], { cwd: repoPath });
   return repoPath;
 }
+
+describe("isExactDownloadCandidate (basename matching — Fix 1)", () => {
+  const hfCandidate = (url: string): AssetSourceCandidate => ({
+    provider: "huggingface",
+    title: "t",
+    url: "https://huggingface.co/x",
+    downloadUrl: url,
+    score: 120,
+    requiresToken: false,
+    notes: "Explicit HuggingFace file source from operator context.",
+    downloadCommand: ["curl", "-L", "--output", "/tmp/x", url]
+  });
+
+  it("matches a subfolder-prefixed asset name against a bare-basename HF resolve URL (the VAE incident)", () => {
+    const cand = hfCandidate("https://huggingface.co/Server9/VAE/resolve/main/vaeFtMse840000Ema_v10.safetensors");
+    // requested_name carried the "SD1.5/" prefix; the old full-string compare dropped this exact URL.
+    expect(isExactDownloadCandidate(cand, "SD1.5/vaeFtMse840000Ema_v10.safetensors")).toBe(true);
+    // and still works with no prefix (the dw-ll case that already worked).
+    expect(isExactDownloadCandidate(cand, "vaeFtMse840000Ema_v10.safetensors")).toBe(true);
+  });
+
+  it("still rejects a genuinely different filename", () => {
+    const cand = hfCandidate("https://huggingface.co/x/y/resolve/main/other_model.safetensors");
+    expect(isExactDownloadCandidate(cand, "SD1.5/vaeFtMse840000Ema_v10.safetensors")).toBe(false);
+  });
+});
 
 describe("generateAssetQueryVariants", () => {
   it("strips a parenthetical strength-range hint and CJK descriptive words to find the real repo name (Klein LoRA)", () => {

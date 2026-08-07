@@ -2578,6 +2578,128 @@ export class MigrationOrchestrator {
     );
   }
 
+  /**
+   * Fast path for a Step-01 human answer that pastes exact source URLs: route
+   * each URL, matched by BASENAME to a still-unresolved acquisition item, to an
+   * async download sub-job (startSubJobForSuggestedUrl) and return to the gate
+   * promptly. This replaces two prior failure modes (confirmed field incident):
+   *   - the old auto-download only fired for exactly 1 URL + 1 unresolved item,
+   *     so a real multi-URL answer was ignored and fell to a matcher that
+   *     couldn't associate a bare-basename URL with a subfolder-prefixed asset;
+   *   - re-running the full (minutes-long) synchronous provider search on every
+   *     answer wedged the step at "running" if the backend restarted mid-run.
+   * Returns true if it handled the answer (≥1 URL routed to a download); false
+   * to fall through to the legacy full-re-acquisition path (no URL matched a
+   * model item, e.g. a custom-node-repo-only or documented-risk answer).
+   */
+  /**
+   * Match human-provided URLs to still-unresolved acquisition items and start
+   * one async download sub-job per match. Matching: (1) by basename (an asset
+   * requested as `SD1.5/vae….safetensors` matches a bare `resolve/main/vae….safetensors`
+   * URL); (2) position fallback for the unambiguous 1-URL/1-item case, honoring
+   * an operator who says "use this URL for that asset" even when the URL's
+   * filename differs from the requested name (a renamed source). Returns the
+   * routed/ambiguous/unmatched breakdown; does not touch step status or emit.
+   */
+  private startHumanUrlDownloads(
+    task: MigrationTask,
+    stepId: string,
+    urls: string[],
+    unresolved: AssetAcquisitionUnresolvedItem[]
+  ): { routed: string[]; ambiguous: string[]; unmatched: string[]; stillUnresolved: string[] } {
+    const routed: string[] = [];
+    const routedAssets = new Set<string>();
+    const ambiguous: string[] = [];
+    const unmatched: string[] = [];
+    const basenameOf = (name: string): string => {
+      try {
+        return decodeURIComponent(path.basename(new URL(name).pathname));
+      } catch {
+        return path.basename(name.split(/[?#]/)[0]);
+      }
+    };
+    const start = (assetName: string, url: string): void => {
+      routed.push(`${assetName} ← ${url}`);
+      routedAssets.add(assetName);
+      void this.suggestedUrlDownloader!.startSubJobForSuggestedUrl(task, assetName, url).catch((error) => {
+        void this.emit({
+          taskId: task.id,
+          stepId,
+          type: "progress",
+          message: `Auto-triggered download of the human-provided source for ${assetName} failed to start: ${error instanceof Error ? error.message : error}`
+        });
+      });
+    };
+    for (const url of urls) {
+      const urlBase = basenameOf(url);
+      const matches = unresolved.filter((it) => path.basename(it.requestedName || it.assetName) === urlBase);
+      if (matches.length === 1) start(matches[0].assetName, url);
+      else if (matches.length > 1) ambiguous.push(url);
+      else unmatched.push(url);
+    }
+    // Position fallback: exactly one URL, exactly one unresolved item, no
+    // basename match -> the operator clearly means "use this URL for that one".
+    if (routed.length === 0 && urls.length === 1 && unresolved.length === 1) {
+      start(unresolved[0].assetName, urls[0]);
+      unmatched.length = 0;
+    }
+    const stillUnresolved = unresolved.filter((it) => !routedAssets.has(it.assetName)).map((it) => it.assetName);
+    return { routed, ambiguous, unmatched, stillUnresolved };
+  }
+
+  private async tryFastPathHumanUrlDownloads(task: MigrationTask, decision: HumanDecision): Promise<boolean> {
+    if (!this.suggestedUrlDownloader) return false;
+    const urls = extractHttpUrls(decision.answer);
+    if (urls.length === 0) return false;
+    const stepId = decision.stepId ?? "01";
+
+    // Read the prior acquisition job's still-unresolved items (do NOT re-run the
+    // heavy provider search).
+    let unresolved: AssetAcquisitionUnresolvedItem[] = [];
+    try {
+      const raw = await fs.readFile(path.join(task.artifactPath, "01-acquisition-job.json"), "utf8");
+      unresolved = (JSON.parse(raw).unresolvedItems ?? []) as AssetAcquisitionUnresolvedItem[];
+    } catch {
+      return false; // no prior job to map against -> let the full path run
+    }
+    if (unresolved.length === 0) return false;
+
+    const { routed, ambiguous, unmatched, stillUnresolved } = this.startHumanUrlDownloads(task, stepId, urls, unresolved);
+    if (routed.length === 0) return false; // nothing mapped -> legacy path (handles custom-node clones / documented risk)
+
+    await this.emit({
+      taskId: task.id,
+      stepId,
+      type: "progress",
+      message:
+        `Started ${routed.length} background download(s) from your links: ${routed.join("; ")}.` +
+        (ambiguous.length ? ` Ambiguous (basename matched >1 asset, left for you): ${ambiguous.join(", ")}.` : "") +
+        (unmatched.length ? ` No matching unresolved asset by filename (e.g. custom-node repos): ${unmatched.join(", ")}.` : ""),
+      data: { routed, ambiguous, unmatched, stillUnresolved }
+    });
+
+    const summary = `Step 01 started ${routed.length} background download(s) from operator-provided links; the gate re-evaluates as each completes. Still unresolved until then: ${stillUnresolved.join(", ") || "none"}.`;
+    await this.store.updateStep(task.id, stepId, "waiting_for_human", { summary, error: undefined });
+    await this.emit({
+      taskId: task.id,
+      stepId,
+      type: "human_question",
+      message: summary,
+      data: {
+        question:
+          `Downloads started for: ${routed.map((r) => r.split(" ← ")[0]).join(", ")}. Watch the sub-jobs panel; once they finish the gate clears. For anything still unresolved (${stillUnresolved.join(", ") || "none"}), provide more source URLs/local paths, approve continuing with documented gaps, or stop.`,
+        choices: [
+          "Provide more source URLs / local paths",
+          "Approve bounded smoke-only follow-up with documented gaps",
+          "Stop migration at Step 01"
+        ],
+        allowFreeform: true,
+        blockingReason: "missing_asset"
+      }
+    });
+    return true;
+  }
+
   private async acceptHumanGateContext(input: {
     task: MigrationTask;
     stepDefinition: MigrationStepDefinition;
@@ -2639,6 +2761,13 @@ export class MigrationOrchestrator {
         redacted: redactedAnswer !== decision.answer
       }
     });
+    // Fast path (Fix 2/3): if the operator pasted exact source URLs, route them
+    // to async download sub-jobs by basename and return to the gate promptly --
+    // instead of a minutes-long synchronous provider re-search that could wedge
+    // the step at "running" on a backend restart.
+    if (stepId === "01" && (await this.tryFastPathHumanUrlDownloads(task, decision))) {
+      return;
+    }
     let step01Acquisition:
       | Awaited<ReturnType<typeof ensureAssetAcquisitionJob>>
       | undefined;
@@ -2683,31 +2812,32 @@ export class MigrationOrchestrator {
         unresolvedItems: step01Acquisition.unresolvedItems
       }
     });
-    // See extractHttpUrls' comment for the incident this closes. Only acts
-    // in the unambiguous case (exactly one URL, exactly one still-unresolved
-    // item) -- anything more ambiguous falls back to the existing
-    // write-instructions-and-wait behavior rather than guessing which URL
-    // belongs to which asset.
-    if (this.suggestedUrlDownloader && step01Acquisition.status === "waiting_for_secure_download" && step01Acquisition.unresolvedItems.length === 1) {
+    // The operator-URL fast path (tryFastPathHumanUrlDownloads) already ran and
+    // returned false, meaning there was no prior acquisition job on disk to map
+    // against (edge/first-time). Now that this heavy re-run produced a fresh
+    // job, route any pasted URLs to async downloads using the same matcher, so
+    // the "operator provided a source URL" case still triggers a real download.
+    if (this.suggestedUrlDownloader && step01Acquisition.status === "waiting_for_secure_download") {
       const urls = extractHttpUrls(decision.answer);
-      if (urls.length === 1) {
-        const assetName = step01Acquisition.unresolvedItems[0].assetName;
-        const url = urls[0];
-        await this.emit({
-          taskId: decision.taskId,
+      if (urls.length > 0 && step01Acquisition.unresolvedItems.length > 0) {
+        const { routed, ambiguous, unmatched, stillUnresolved } = this.startHumanUrlDownloads(
+          task,
           stepId,
-          type: "progress",
-          message: `Detected a single URL in the human-provided source instructions for the one remaining unresolved asset (${assetName}) -- starting a real download instead of waiting for a repeat local-only check.`,
-          data: { assetName, url }
-        });
-        this.suggestedUrlDownloader.startSubJobForSuggestedUrl(task, assetName, url).catch((error) => {
-          void this.emit({
+          urls,
+          step01Acquisition.unresolvedItems
+        );
+        if (routed.length > 0) {
+          await this.emit({
             taskId: decision.taskId,
             stepId,
             type: "progress",
-            message: `Auto-triggered download of the human-provided source for ${assetName} failed to start: ${error instanceof Error ? error.message : error}`
+            message:
+              `Started ${routed.length} background download(s) from operator-provided links: ${routed.join("; ")}.` +
+              (ambiguous.length ? ` Ambiguous: ${ambiguous.join(", ")}.` : "") +
+              (unmatched.length ? ` Unmatched by filename: ${unmatched.join(", ")}.` : ""),
+            data: { routed, ambiguous, unmatched, stillUnresolved }
           });
-        });
+        }
       }
     }
   }
@@ -4392,15 +4522,34 @@ function parseCsvRecordLine(line: string): string[] {
 }
 
 function assetAcquisitionGateDetails(items: AssetAcquisitionUnresolvedItem[]): string[] {
-  return items.flatMap((item, index) => [
-    `${index + 1}. Missing ${item.kind}: ${item.assetName}`,
-    `   requested_name: ${item.requestedName}`,
-    `   source_node_ids: ${(item.sourceNodeIds ?? []).join(", ") || "not recorded"}`,
-    `   source_context: ${item.sourceContext || "not recorded"}`,
-    `   expected_target_path: ${item.expectedTargetPath ?? item.targetPath ?? "not recorded"}`,
-    `   candidate_sources_found: ${item.candidateCount}; search_issues: ${item.searchIssueCount}`,
-    `   human_action: provide the exact file/path or source URL for ${item.assetName}, approve secure download access, approve bounded gaps, or stop.`
-  ]);
+  return items.flatMap((item, index) => {
+    // Fix 4: an item reaching this gate is unresolved *because* no exact,
+    // downloadable source was confirmed -- so any candidate_sources_found are
+    // UNVERIFIED GUESSES (provider/fuzzy matches), not ready downloads. Say so
+    // plainly, and surface the fuzzy judgment's confidence + any extension
+    // mismatch, so the operator doesn't trust a wrong-type guess (e.g. an
+    // `.onnx` asset "matched" to a `.pth` file).
+    const requestedExt = path.extname(item.requestedName || item.assetName).toLowerCase();
+    const fuzzy = item.fuzzyJudgment;
+    const confidenceNote = fuzzy
+      ? `   candidate_confidence: ${fuzzy.confidence}${fuzzy.urlVerified === false ? " (suggested URL did NOT verify as reachable)" : ""}; reason: ${fuzzy.reason}`
+      : undefined;
+    const guessWarning =
+      item.candidateCount > 0
+        ? `   ⚠ the ${item.candidateCount} candidate source(s) are UNVERIFIED guesses, not confirmed downloads -- the agent could not confirm an exact, fetchable ${requestedExt || "file"} for this asset. Prefer providing an exact source URL/local path.`
+        : undefined;
+    return [
+      `${index + 1}. Missing ${item.kind}: ${item.assetName}`,
+      `   requested_name: ${item.requestedName}`,
+      `   source_node_ids: ${(item.sourceNodeIds ?? []).join(", ") || "not recorded"}`,
+      `   source_context: ${item.sourceContext || "not recorded"}`,
+      `   expected_target_path: ${item.expectedTargetPath ?? item.targetPath ?? "not recorded"}`,
+      `   candidate_sources_found: ${item.candidateCount}; search_issues: ${item.searchIssueCount}`,
+      ...(guessWarning ? [guessWarning] : []),
+      ...(confidenceNote ? [confidenceNote] : []),
+      `   human_action: provide the exact file/path or source URL for ${item.assetName}, approve secure download access, approve bounded gaps, or stop.`
+    ];
+  });
 }
 
 function phase1SyncIntervalMs(): number {

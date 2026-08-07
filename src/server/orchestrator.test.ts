@@ -1465,7 +1465,7 @@ describe("migration orchestrator", () => {
     expect(calls).toEqual([{ assetName: "definitely_missing_asset_for_test.safetensors", url: correctUrl }]);
   });
 
-  it("does NOT auto-trigger a download when more than one asset is still unresolved (ambiguous which URL belongs to which asset -- falls back to the existing write-instructions-and-wait behavior)", async () => {
+  it("routes a URL to the one asset its filename names even when other assets remain unresolved (basename matching -- Fix 2 generalized the old 1-URL/1-item limit)", async () => {
     const root = path.join(process.cwd(), ".demo-state", "tests", `orchestrator-auto-download-ambiguous-${Date.now()}`);
     const config: AppConfig = {
       port: 0,
@@ -1561,7 +1561,11 @@ describe("migration orchestrator", () => {
       wasFreeform: true
     });
 
-    expect(calls).toEqual([]);
+    // The URL's filename unambiguously names missing_one -> route just that
+    // one; missing_two (no URL provided) stays unresolved for the human.
+    expect(calls).toEqual([
+      { assetName: "missing_one.safetensors", url: "https://huggingface.co/owner/repo/resolve/main/missing_one.safetensors" }
+    ]);
   });
 
   it("accepts actionable human context for non-Step 01 gates without repeating the question", async () => {
