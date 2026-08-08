@@ -146,12 +146,21 @@ export function buildDockerStartScript(node: GpuNode, port: number, listen: stri
     `GROUP_ADD_FLAGS=""\n` +
     `for gid in $RENDER_GIDS; do GROUP_ADD_FLAGS="$GROUP_ADD_FLAGS --group-add $gid"; done\n` +
     `docker run -d --name '${containerName}' --device=/dev/dri $GROUP_ADD_FLAGS --net=host \\\n` +
-    `  -e ZE_AFFINITY_MASK=0 -e NO_PROXY -e no_proxy -e HTTP_PROXY -e HTTPS_PROXY -e http_proxy -e https_proxy \\\n` +
+    // OMNI_FP8_KEEP_ON_MOVE=1 activates the comfy/ops.py keep-fp8-on-move patch
+    // (see patches/xpu-fp8-keep-quantized-on-move.patch): fp8 QuantizedTensors move
+    // between XPU/CPU without dequant-to-bf16, so the HIGH->LOW model swap on large
+    // fp8 diffusion (WAN2.2 etc.) no longer doubles VRAM and OOMs. Harmless when the
+    // patch is absent or the model isn't fp8 (the env is only read inside that branch).
+    `  -e ZE_AFFINITY_MASK=0 -e OMNI_FP8_KEEP_ON_MOVE=1 -e NO_PROXY -e no_proxy -e HTTP_PROXY -e HTTPS_PROXY -e http_proxy -e https_proxy \\\n` +
     (nfsRoot ? `  -v '${nfsRoot}:${nfsRoot}' \\\n` : ``) +
     `  -v '${node.comfyui_root}:/comfyui' \\\n` +
     `  --entrypoint '${node.venv_python}' \\\n` +
     `  '${node.docker_image}' \\\n` +
-    `  /comfyui/main.py --port ${port} --listen ${listen} --reserve-vram 1 --disable-dynamic-vram\n` +
+    // Dynamic VRAM must stay ENABLED (do not pass --disable-dynamic-vram): the
+    // sequential fp8 offload recipe relies on ComfyUI offloading a model to make
+    // room for the next stage. --cpu-vae is intentionally NOT passed -- the VAE runs
+    // on XPU and ComfyUI auto-falls-back to tiled decode if a full decode would OOM.
+    `  /comfyui/main.py --port ${port} --listen ${listen} --reserve-vram 1\n` +
     `nohup docker logs -f '${containerName}' > /tmp/comfyui-${port}.log 2>&1 < /dev/null &\n`
   );
 }
@@ -181,6 +190,7 @@ async function startBareMetal(node: GpuNode, port: number, listen: string): Prom
     `pkill -f 'main.py' 2>/dev/null || true\n` +
     `sleep 4\n` +
     `cd '${node.comfyui_root}' || exit 3\n` +
+    `export OMNI_FP8_KEEP_ON_MOVE=1\n` +
     `exec '${node.venv_python}' main.py --port ${port} --listen ${listen} --reserve-vram 1 > /tmp/comfyui-${port}.log 2>&1 < /dev/null\n`;
   const b64 = Buffer.from(body).toString("base64");
   if (node.kind === "ssh") {

@@ -1,0 +1,29 @@
+diff --git a/comfy/ops.py b/comfy/ops.py
+--- a/comfy/ops.py
++++ b/comfy/ops.py
+@@ -16,6 +16,7 @@
+     along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ """
+
++import os
+ import torch
+ import logging
+ import contextlib
+@@ -1040,7 +1041,7 @@
+             except Exception:
+                 _probe_device = torch.device("cpu")
+
+-        if _probe_device is not None and _probe_device.type == "xpu" and _is_fp8_quantized_tensor(param):
++        if _probe_device is not None and _probe_device.type == "xpu" and os.environ.get("OMNI_FP8_KEEP_ON_MOVE") != "1" and _is_fp8_quantized_tensor(param):
+             # XPU stopgap for FP8 quantized tensors:
+             # avoid quantized clone() during Module.to("xpu") which can segfault on XPU.
+             # Dequantize to bf16 first, then move the dense tensor to target device.
+@@ -1065,7 +1066,7 @@
+
+     for key, buf in module._buffers.items():
+         if buf is not None:
+-            if _probe_device is not None and _probe_device.type == "xpu" and _is_fp8_quantized_tensor(buf):
++            if _probe_device is not None and _probe_device.type == "xpu" and os.environ.get("OMNI_FP8_KEEP_ON_MOVE") != "1" and _is_fp8_quantized_tensor(buf):
+                 dense = buf.dequantize()
+                 if dense.dtype != torch.bfloat16:
+                     dense = dense.to(dtype=torch.bfloat16)

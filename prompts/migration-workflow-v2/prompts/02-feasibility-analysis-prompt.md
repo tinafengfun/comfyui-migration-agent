@@ -345,7 +345,7 @@ Stop and write `hard_stop` when:
 
 - the requirement is not a ComfyUI workflow migration and cannot be reframed safely;
 - the user requires strict source-identical delivery but critical source-identical assets are unavailable or inaccessible;
-- the requested full-fidelity target exceeds measured hardware capacity and the user rejects reduced fidelity, CPU fallback, model offload, or hardware escalation;
+- the requested full-fidelity target exceeds measured hardware capacity and the user rejects reduced fidelity, CPU fallback, model offload, or hardware escalation. **Before declaring a capacity hard stop for an fp8 diffusion workflow, apply the native-fp8 keep-on-move path (Path C in the feasibility skill): with `comfy_kitchen ≥ 0.2.28` + the keep-on-move patch, fp8 models are NOT dequantized to bf16 and heavy aux models (VLM/CLIP) offload sequentially, so recompute capacity with the native fp8 footprint and a single resident heavy model. A model that fails the naive "bf16 doubles VRAM" math often fits under Path C — do not hard-stop until Path C has been evaluated.**;
 - a critical custom-node family is CUDA-only with no fallback or approved feature-development path;
 - continuation would require bypassing, deleting, replacing, or semantically changing nodes without approval.
 

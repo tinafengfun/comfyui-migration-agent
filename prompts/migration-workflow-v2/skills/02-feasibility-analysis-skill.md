@@ -181,14 +181,15 @@ Use `../templates/intel-xpu-hardware-reference.md` to fill the hardware side of 
 
 ### Background
 
-FP8 quantized text encoders (e.g. `qwen_2.5_vl_7b_fp8_scaled.safetensors`, Qwen3-VL FP8, HunyuanImage TE) hit a known segfault when ComfyUI moves them onto Intel XPU. Root cause: `comfy_kitchen`'s `QTensor.clone()` implementation segfaults during `Module.to("xpu")` while rewrapping FP8 weights. Verified on `comfy_kitchen` ≤ 0.2.8 on Intel Arc [0xe211] with torch 2.12.1+xpu.
+FP8 quantized weights (text encoders like `qwen_2.5_vl_7b_fp8_scaled.safetensors`, and fp8 diffusion UNets like WAN2.2 `*_fp8_e4m3fn_scaled.safetensors`) hit a known segfault when ComfyUI moves them onto Intel XPU. Root cause: `comfy_kitchen`'s `QTensor.clone()` segfaults during `Module.to("xpu")` while rewrapping FP8 weights, so ComfyUI's `_quantized_apply` has a stopgap that dequantizes FP8→bf16 on *every* device move — which doubles memory and, for a two-stage fp8 diffusion model, OOMs at the HIGH→LOW swap. **`comfy_kitchen ≥ 0.2.28` makes the `.to()` path safe**, so the dequant stopgap can be skipped entirely (Path C below) — keep fp8 fp8 on move. Verified: the segfault reproduces on `comfy_kitchen` ≤ 0.2.8; the keep-on-move fix is proven on 0.2.28 (Intel Arc B60, torch 2.10+xpu, task a35d64a4).
 
-### Two resolution paths
+### Resolution paths
 
 | Path | Mechanism | Cost |
 | --- | --- | --- |
-| **A. ops.py dequant patch** (preferred when VRAM allows) | Patch `comfy/ops.py::_quantized_apply` to dequantize FP8 → bf16 *before* moving to XPU. See `xpu-bug-investigation/0001-xpu-fp8-fallback-dequantize-before-move-to-xpu.patch` in the ComfyUI repo. | Doubles weight memory (FP8 → bf16). Precision verified: min cosine 0.99998 vs CPU native (see `clip_fp8_precision_report.md`). |
-| **B. CPU offload** (fallback when VRAM tight) | Set CLIPLoader widget `device=cpu`. Bypasses the XPU segfault entirely; text encode runs on CPU. | Slow text encoding (CPU). No memory pressure on XPU. This is the prior `XPU-CLIP-01` workaround. |
+| **C. Native fp8, keep-on-move** (PREFERRED when `comfy_kitchen ≥ 0.2.28`) | Upgrade `comfy_kitchen ≥ 0.2.28` (native `onednn_w8a16_fp8` GEMM) + apply `patches/xpu-fp8-keep-quantized-on-move.patch` to `comfy/ops.py::_quantized_apply` + launch with `OMNI_FP8_KEEP_ON_MOVE=1`. fp8 stays fp8 across device moves — no dequant. Run heavy aux models sequentially on XPU and free between stages (VLM `force_offload=True`, CLIP `device=default`, VAE on XPU). See recipe `CLIPLoader-qwen-fp8`. | **No memory doubling** — each fp8 UNet stays ~its fp8 size. Fastest (everything on XPU). Proven live (task a35d64a4: full 720×1280 × 81-frame WAN2.2, no OOM). |
+| **A. ops.py dequant-before-move patch** (legacy) | Patch `_quantized_apply` to dequantize FP8 → bf16 *before* moving to XPU. | Doubles weight memory (FP8 → bf16). Use only if `comfy_kitchen ≥ 0.2.28` is unavailable. |
+| **B. CPU offload** (last resort) | Set CLIPLoader widget `device=cpu`; text encode on CPU. | Slow text encoding; does not by itself fix a two-UNet swap OOM (that needs Path C). |
 
 ### Decision gate (MANDATORY for any FP8 TE in scope)
 
@@ -211,14 +212,18 @@ bf16_bytes_on_xpu += fp8_bytes * 0.05    # +5% for dequant scale/bias overhead
 free_xpu_vram_bytes = measured_total_xpu_vram - estimated_peak_vram - safety_margin
 
 # 4. Decide
-if bf16_bytes_on_xpu < free_xpu_vram_bytes:
-    → recommend Path A (apply ops.py patch, keep TE on XPU)
+if comfy_kitchen >= 0.2.28 available on the target:
+    → recommend Path C (native fp8 keep-on-move; NO dequant, so use the native fp8
+      footprint — NOT bf16_bytes_on_xpu — in the capacity check). The fp8 TE stays
+      ~fp8 size on XPU, and heavy models run sequentially with cheap offload, so a
+      single fp8 UNet + aux (offloaded) fits far more often than the bf16 math implies.
+elif bf16_bytes_on_xpu < free_xpu_vram_bytes:
+    → recommend Path A (legacy dequant-before-move patch, keep TE on XPU)
 else:
-    → recommend Path B (CLIPLoader device=cpu, document as XPU-CLIP-XX patch)
-    → OR run the strip-checkpoint optimization below and re-evaluate
+    → recommend Path B (CLIPLoader device=cpu) OR strip-checkpoint optimization below
 ```
 
-Apply the gate per FP8 TE in the workflow. A workflow with one FP8 TE and a large GGUF/Q6_K diffusion model will usually fail this gate on 22 GB-class XPU; the same workflow on 48 GB will usually pass.
+Apply the gate per FP8 TE in the workflow. **Under Path C the "bf16 doubles VRAM → capacity hard stop / cpu-pin CLIP" reasoning no longer applies** — recompute capacity with the native fp8 footprint and a *single* resident heavy model (aux offloaded), which is what actually runs. A two-UNet fp8 video model (WAN2.2 HIGH/LOW ~14.5 GB each) that "failed" the old bf16 gate on a 30 GB XPU passes under Path C because the models never co-reside and never dequant.
 
 ### Strip-checkpoint optimization (lowers both paths' cost)
 
@@ -243,7 +248,7 @@ Verify the stripped checkpoint produces bit-identical TE outputs to the original
 Whichever path is chosen, record in the `step03_context`:
 
 - `fp8_te_present: true/false`
-- `fp8_te_path_chosen: "ops_py_patch" | "cpu_offload" | "n/a"`
+- `fp8_te_path_chosen: "native_fp8_keep_on_move" | "ops_py_patch" | "cpu_offload" | "n/a"`
 - `fp8_te_vram_gate_passed: true/false`
 - `fp8_te_checkpoint_stripped: true/false`
 - `fp8_te_patch_file: "<path-to-patch-or-none>"` (Step 05 will apply this)

@@ -48,6 +48,17 @@ describe("buildDockerStartScript", () => {
     expect(script).not.toContain("/workspace/comfyui");
   });
 
+  it("enables the native-fp8 XPU recipe: OMNI_FP8_KEEP_ON_MOVE=1 env, dynamic VRAM on, no --cpu-vae", async () => {
+    const { buildDockerStartScript } = await import("./comfyuiLifecycle");
+    const script = buildDockerStartScript(dockerNode(), 8188, "127.0.0.1", "comfyui-task-1");
+    // fp8-keep-on-move patch gate must be passed into the container.
+    expect(script).toContain("-e OMNI_FP8_KEEP_ON_MOVE=1");
+    expect(script).toContain("--reserve-vram 1");
+    // Dynamic VRAM must stay enabled (offload/swap depends on it) and VAE stays on XPU.
+    expect(script).not.toContain("--disable-dynamic-vram");
+    expect(script).not.toContain("--cpu-vae");
+  });
+
   it("omits the nfs_share bind mount when the node has no shared NFS tree", async () => {
     const { buildDockerStartScript } = await import("./comfyuiLifecycle");
     const script = buildDockerStartScript(

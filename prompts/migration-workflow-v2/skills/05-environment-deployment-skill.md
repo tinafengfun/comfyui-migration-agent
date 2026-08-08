@@ -49,8 +49,9 @@ Use to create a reproducible Intel XPU ComfyUI baseline.
     - **For `runtime: docker` nodes, install through the shared-venv lock wrapper, not pip directly** — see the `runtime=docker` subsection below for why and the exact command.
 6. Configure model roots or symlink staged assets, and retain a source-to-destination mapping. Prefer a separate Step 05 extra-model-paths config over editing the canonical ComfyUI config when running an isolated validation.
 7. Apply required registration patches or workflow runtime policies only with explicit approval, and keep them separate from runtime validation claims.
-   - **If Step 02 decided `fp8_te_path_chosen: "ops_py_patch"`**, apply `xpu-bug-investigation/0001-xpu-fp8-fallback-dequantize-before-move-to-xpu.patch` to `comfy/ops.py` here (or carry the equivalent change from the upstream ComfyUI fork). Verify with `git diff comfy/ops.py` that `_quantized_apply` now contains the `_is_fp8_quantized_tensor` + `_probe_device` + `dequantize-before-move-to-xpu` block. The patch is the prerequisite for keeping FP8 TEs on XPU without segfault.
-   - **If Step 02 decided `fp8_te_path_chosen: "cpu_offload"`**, no `ops.py` patch is needed; the CLIPLoader widget `device=cpu` override is delivered as a runtime-policy JSON patch in Step 08 instead.
+   - **If Step 02 decided `fp8_te_path_chosen: "native_fp8_keep_on_move"` (PREFERRED for heavy fp8 diffusion on XPU)**: (a) ensure the shared venv has `comfy_kitchen >= 0.2.28` — `bash /nfs_share/bin/with-shared-venv-lock.sh "${VENV_PYTHON}" install -U 'comfy_kitchen>=0.2.28'` (never pip directly for `runtime: docker` nodes); (b) apply `patches/xpu-fp8-keep-quantized-on-move.patch` to `comfy/ops.py` (see the injected patch-adaptation protocol table) and verify with `git diff comfy/ops.py` that both XPU fp8 branches in `_quantized_apply` are now gated by `os.environ.get("OMNI_FP8_KEEP_ON_MOVE") != "1"` and that `import os` is present; (c) the launch must set `OMNI_FP8_KEEP_ON_MOVE=1` in the container/process env (the deterministic launcher `comfyuiLifecycle.ts` already passes `-e OMNI_FP8_KEEP_ON_MOVE=1`). This keeps fp8 models fp8 across device moves so the HIGH→LOW swap doesn't dequant-to-bf16 and OOM. Runtime placement (CLIP/UNet/VLM) is enforced by the Step-06 runtime-policy variant, not here.
+   - **If Step 02 decided `fp8_te_path_chosen: "ops_py_patch"` (legacy dequant-before-move)**, apply the equivalent dequant-before-move change to `comfy/ops.py` and verify `_quantized_apply` contains the `_is_fp8_quantized_tensor` + `_probe_device` + `dequantize-before-move-to-xpu` block. Prefer `native_fp8_keep_on_move` above when comfy_kitchen ≥ 0.2.28 is available — the dequant path doubles TE memory.
+   - **If Step 02 decided `fp8_te_path_chosen: "cpu_offload"` (last resort)**, no `ops.py` patch is needed; the CLIPLoader widget `device=cpu` override is delivered as a runtime-policy JSON patch instead. Only use when the keep-on-move patch cannot be applied.
    - **If Step 02 decided `fp8_te_checkpoint_stripped: true`**, ensure the stripped `<name>_text_only.safetensors` is the file referenced by the CLIPLoader widget, not the original.
 8. Launch ComfyUI from the ComfyUI root, **not** from the task workspace. The SDK session's working directory is the workspace, so an unqualified `python3 main.py` inherits the wrong CWD and Python's `sys.path[0]` will not contain the ComfyUI root. **Branch on the `## GPU node` block injected at the top of this step's prompt:**
 
@@ -63,7 +64,7 @@ Use to create a reproducible Intel XPU ComfyUI baseline.
      --listen 127.0.0.1 \
      --extra-model-paths-yaml "${WORKSPACE}/artifacts/05-extra-model-paths.yaml" \
      --output-directory "${WORKSPACE}/outputs" \
-     <conservative Intel XPU flags, e.g. --reserve-vram 1 --disable-dynamic-vram>
+     <Intel XPU flags: --reserve-vram 1 (keep dynamic VRAM ENABLED — do NOT pass --disable-dynamic-vram — so the sequential fp8 offload/swap can free models between stages; do NOT pass --cpu-vae, VAE runs on XPU with auto-tiled fallback)>
    ```
 
    Run in the background (`nohup ... &` or detached shell) and poll `http://127.0.0.1:${COMFYUI_PORT}/system_stats` until it responds.
@@ -114,12 +115,13 @@ Use to create a reproducible Intel XPU ComfyUI baseline.
      --entrypoint "${VENV_PYTHON}" \
      -e https_proxy=http://proxy.ims.intel.com:911 -e http_proxy=http://proxy.ims.intel.com:911 \
      -e no_proxy=localhost,127.0.0.1 \
+     -e OMNI_FP8_KEEP_ON_MOVE=1 \
      $(for m in "${MODEL_ROOTS[@]}"; do echo -n "-v ${m}:${m} "; done) \
      "${DOCKER_IMAGE}" /comfyui/main.py \
        --port "${COMFYUI_PORT:-8188}" --listen 127.0.0.1 \
        --extra-model-paths-yaml /comfyui/05-extra-model-paths.yaml \
        --output-directory /comfyui/outputs \
-       <conservative Intel XPU flags>
+       <Intel XPU flags: --reserve-vram 1 ; keep dynamic VRAM enabled (no --disable-dynamic-vram) ; no --cpu-vae>
 
    STAGING=$(mktemp -d)
    tar -C "${COMFYUI_ROOT}" \
@@ -149,8 +151,8 @@ Use to create a reproducible Intel XPU ComfyUI baseline.
    - `cd "${COMFYUI_ROOT}" &&` (local) or `cd '${REMOTE_COMFYUI_ROOT}' &&` (ssh) is load-bearing — without it, `from utils.install_util import ...` and other top-level imports can fail.
    - Record the exact launch command in `05-environment-summary.json` as `launch_command`, plus `api_url` (e.g. `http://172.16.114.200:8188`) and `node_kind` (`local` or `ssh`) so Steps 07/08 and the orchestrator's `killComfyUIForTask` know how to reach and tear down the server.
    - Subsequent steps (07, 08, 12) inherit this server; do not relaunch unless the process died.
-   - Conservative default flags: prefer `--reserve-vram 1` and `--disable-dynamic-vram` for smoke; widen only when Step 08 capacity evidence permits.
-   - If the workflow selected CPU-only placement (e.g. FP8 TE CPU-offload path), launch with `--cpu` and pin CLIPLoader `device=cpu` via runtime-policy JSON in Step 08 rather than relaunching.
+   - Default flags: `--reserve-vram 1`, and keep **dynamic VRAM enabled** (do NOT pass `--disable-dynamic-vram`) — the sequential fp8 offload/swap depends on ComfyUI being able to offload a model to make room for the next stage. Do NOT pass `--cpu-vae`; the VAE runs on XPU and ComfyUI auto-falls-back to tiled decode if a full decode would OOM. Always pass `-e OMNI_FP8_KEEP_ON_MOVE=1` (docker) / `export OMNI_FP8_KEEP_ON_MOVE=1` (bare) so the keep-on-move patch is active.
+   - Only if a workflow was explicitly downgraded to CPU-only placement (no XPU path at all) launch with `--cpu` — this is a last resort, not the fp8 path. For fp8 diffusion on XPU use `native_fp8_keep_on_move` (keep CLIP/UNet on XPU; the Step-06 runtime policy handles per-node placement).
    - The orchestrator's `killComfyUIForTask` routes on the node's `runtime` first, then `kind`: `runtime=docker` → `docker rm -f comfyui-${TASK_ID}` (local or via SSH); `runtime=bare` (default) → local `pgrep -f main.py.*${WORKSPACE}` or SSH `pkill -f 'main.py.*--port ${COMFYUI_PORT}'`. The agent does not need to tear down manually on rerun.
 9. Verify startup and backend node registration through `/system_stats` and `/object_info`.
 10. For frontend-only LiteGraph nodes, record source evidence from web extension registration code instead of requiring `/object_info`.

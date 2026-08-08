@@ -257,6 +257,22 @@ def bypass_human_in_the_loop_nodes(variant: dict[str, Any]) -> list[dict[str, An
     return changes
 
 
+def _is_fp8_pipeline(variant: dict[str, Any]) -> bool:
+    # A heavy fp8 pipeline is detected from any node input that names an fp8
+    # checkpoint or forces an fp8 weight dtype. The native-fp8 XPU offload policy
+    # (recipe CLIPLoader-qwen-fp8) only applies to these -- non-fp8 workflows are
+    # left untouched.
+    for node in variant.values():
+        for value in (node.get("inputs") or {}).values():
+            if isinstance(value, str):
+                low = value.lower()
+                if "fp8" in low and (low.endswith(".safetensors") or low.endswith(".gguf")):
+                    return True
+                if low in ("fp8_e4m3fn", "fp8_e5m2"):
+                    return True
+    return False
+
+
 def apply_runtime_policy_variant(source_prompt: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     # Widget-value-shaped changes only (device/schema fixes). Step 11/12 replay this
     # exact list onto the delivered GUI workflow, so it must never contain a
@@ -264,9 +280,53 @@ def apply_runtime_policy_variant(source_prompt: dict[str, Any]) -> tuple[dict[st
     # see bypass_human_in_the_loop_nodes + 06b-headless-test-bypasses.json).
     variant = json.loads(json.dumps(source_prompt, ensure_ascii=False))
     changes: list[dict[str, Any]] = []
+    # Native-fp8 XPU offload policy (see recipe CLIPLoader-qwen-fp8 + the
+    # OMNI_FP8_KEEP_ON_MOVE launch env). With keep-on-move, offloading is cheap, so
+    # the fastest config keeps everything on XPU and frees between stages: VLM
+    # force_offload, CLIP/TE on XPU (device=default, NOT cpu), UNet native fp8
+    # (weight_dtype=default). VAE stays on XPU via the launch flags (no --cpu-vae).
+    fp8_pipeline = _is_fp8_pipeline(variant)
     for node_id, node in variant.items():
         class_type = node.get("class_type")
         inputs = node.setdefault("inputs", {})
+        if fp8_pipeline and class_type == "CLIPLoader" and inputs.get("device") == "cpu":
+            changes.append(
+                {
+                    "node_id": node_id,
+                    "class_type": class_type,
+                    "input_name": "device",
+                    "old_value": "cpu",
+                    "new_value": "default",
+                    "reason": "native-fp8 XPU policy: keep-on-move patch lets the fp8 text encoder run on XPU (faster than cpu) and free before the UNet; cpu-pin is a pre-patch last resort only",
+                }
+            )
+            inputs["device"] = "default"
+        if fp8_pipeline and class_type == "UNETLoader" and inputs.get("weight_dtype") not in (None, "default"):
+            old_value = inputs.get("weight_dtype")
+            changes.append(
+                {
+                    "node_id": node_id,
+                    "class_type": class_type,
+                    "input_name": "weight_dtype",
+                    "old_value": old_value,
+                    "new_value": "default",
+                    "reason": "native-fp8 XPU policy: keep the UNet as native fp8 from the checkpoint (default) so the omni_xpu_kernel fp8 GEMM path is used, not a forced cast",
+                }
+            )
+            inputs["weight_dtype"] = "default"
+        if fp8_pipeline and isinstance(class_type, str) and class_type.startswith("llama_cpp") and ("force_offload" in inputs) and inputs.get("force_offload") is not True:
+            old_value = inputs.get("force_offload")
+            changes.append(
+                {
+                    "node_id": node_id,
+                    "class_type": class_type,
+                    "input_name": "force_offload",
+                    "old_value": old_value,
+                    "new_value": True,
+                    "reason": "native-fp8 XPU policy: free the heavy VLM from XPU after it produces conditioning so the fp8 diffusion UNet has the VRAM (offload is cheap under keep-on-move)",
+                }
+            )
+            inputs["force_offload"] = True
         if class_type in {"SeedVR2LoadVAEModel", "SeedVR2LoadDiTModel"} and inputs.get("device") == "cuda:0":
             changes.append(
                 {

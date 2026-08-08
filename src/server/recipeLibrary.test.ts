@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtemp, rm, writeFile, mkdir } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { loadAllRecipes, findRecipesForNode, findRecipeById } from "./recipeLibrary";
@@ -150,7 +151,11 @@ describe("recipeLibrary against the real recipes/ dir", () => {
     const ours = result.recipes.find((r) => r.recipeId === "CLIPLoader-qwen-fp8");
     expect(ours).toBeDefined();
     expect(ours?.xpuSupport).toBe("patched");
-    expect(ours?.patchFile).toMatch(/xpu-fp8-fallback/);
+    // v2: native-fp8 keep-on-move strategy (comfy_kitchen >= 0.2.28).
+    expect(ours?.patchFile).toMatch(/xpu-fp8-keep-quantized-on-move/);
     expect(ours?.workarounds?.length ?? 0).toBeGreaterThanOrEqual(2);
+    // The referenced patch file must actually exist on disk.
+    const patchAbs = path.resolve(realRoot, "..", ours!.patchFile!);
+    expect(existsSync(patchAbs)).toBe(true);
   });
 });
