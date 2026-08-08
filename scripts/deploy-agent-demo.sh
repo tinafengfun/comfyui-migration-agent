@@ -80,8 +80,8 @@ if [ "$CONFIRMED" -ne 1 ]; then
 fi
 
 echo ""
-echo "==> Syncing src/, scripts/, prompts/, recipes/, schemas/ (additive only, no deletes)..."
-for dir in src scripts prompts recipes schemas; do
+echo "==> Syncing src/, scripts/, prompts/, recipes/, schemas/, patches/ (additive only, no deletes)..."
+for dir in src scripts prompts recipes schemas patches; do
   if [ -d "$CMA_STAGING/$dir" ]; then
     mkdir -p "$AGENT_DEMO/$dir"
     cp -r "$CMA_STAGING/$dir/." "$AGENT_DEMO/$dir/"
@@ -91,7 +91,7 @@ done
 echo ""
 echo "==> Verifying sync (diff -rq, ignoring Python bytecode caches -- those are expected"
 echo "    to diverge locally in agent-demo from real tool runs, not sync artifacts)..."
-for dir in src scripts prompts recipes schemas; do
+for dir in src scripts prompts recipes schemas patches; do
   if [ -d "$CMA_STAGING/$dir" ]; then
     if diff -rq -x "__pycache__" -x "*.pyc" "$CMA_STAGING/$dir" "$AGENT_DEMO/$dir"; then
       echo "  OK: $dir"
