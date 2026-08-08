@@ -278,7 +278,7 @@ button, input, select, textarea { font: inherit; }
 }
 .summary-content {
   padding: 12px; border-top: 1px solid #e5e7eb; font-size: 13px;
-  max-height: 200px; overflow-y: auto; white-space: pre-wrap;
+  max-height: 320px; overflow-y: auto;
 }
 
 /* ── Status Badge ── */
@@ -389,18 +389,40 @@ button, input, select, textarea { font: inherit; }
 .chat-msg-role { font-size: 11px; font-weight: 700; margin-bottom: 2px; opacity: 0.7; }
 .chat-msg-time { font-size: 10px; opacity: 0.5; margin-top: 4px; text-align: right; }
 .chat-msg.human .chat-msg-time { color: rgba(255,255,255,0.7); }
-/* Markdown in chat messages */
-.chat-msg-text p { margin: 0 0 6px; }
-.chat-msg-text p:last-child { margin-bottom: 0; }
-.chat-msg-text h3 { font-size: 14px; font-weight: 700; margin: 10px 0 4px; }
-.chat-msg-text h4 { font-size: 13px; font-weight: 700; margin: 8px 0 3px; }
-.chat-msg-text ul { margin: 4px 0; padding-left: 18px; }
-.chat-msg-text li { margin: 2px 0; font-size: 13px; }
-.chat-msg-text code { background: rgba(0,0,0,0.06); padding: 1px 4px; border-radius: 3px; font-size: 12px; }
-.chat-msg-text pre { background: rgba(0,0,0,0.06); padding: 6px 8px; border-radius: 4px; overflow-x: auto; margin: 4px 0; }
-.chat-msg-text pre code { background: none; padding: 0; }
+/* ── Shared GFM markdown rendering (summaries, questions, chat) ── */
+.markdown-body { font-size: 13px; line-height: 1.5; word-break: break-word; }
+.markdown-body > :first-child { margin-top: 0; }
+.markdown-body > :last-child { margin-bottom: 0; }
+.markdown-body p { margin: 0 0 6px; }
+.markdown-body h1, .markdown-body h2, .markdown-body h3 { font-size: 14px; font-weight: 700; margin: 10px 0 4px; }
+.markdown-body h4, .markdown-body h5, .markdown-body h6 { font-size: 13px; font-weight: 700; margin: 8px 0 3px; }
+.markdown-body ul, .markdown-body ol { margin: 4px 0; padding-left: 20px; }
+.markdown-body li { margin: 2px 0; }
+.markdown-body a { color: #2563eb; text-decoration: underline; }
+.markdown-body code { background: rgba(0,0,0,0.06); padding: 1px 4px; border-radius: 3px; font-size: 12px; }
+.markdown-body pre { background: rgba(0,0,0,0.06); padding: 6px 8px; border-radius: 4px; overflow-x: auto; margin: 4px 0; }
+.markdown-body pre code { background: none; padding: 0; }
+.markdown-body table { border-collapse: collapse; margin: 6px 0; font-size: 12px; width: 100%; }
+.markdown-body th, .markdown-body td { border: 1px solid #d1d5db; padding: 4px 8px; text-align: left; }
+.markdown-body th { background: #f3f4f6; font-weight: 700; }
+.markdown-body blockquote { margin: 6px 0; padding: 2px 10px; border-left: 3px solid #d1d5db; color: #4b5563; }
+/* chat bubble tweaks: markdown-body handles the rest */
 .chat-msg.human .chat-msg-text code { background: rgba(255,255,255,0.2); }
 .chat-msg.human .chat-msg-text pre { background: rgba(255,255,255,0.15); }
+.chat-msg.human .chat-msg-text a { color: #dbeafe; }
+
+/* ── Step 12 GUI-acceptance card ── */
+.gui-acceptance-card { border-left: 3px solid #2563eb; }
+.btn-verify {
+  display: inline-block; margin: 4px 0 10px; padding: 10px 14px;
+  background: #2563eb; color: #fff; font-weight: 700; font-size: 14px;
+  border-radius: 6px; text-decoration: none; word-break: break-all;
+}
+.btn-verify:hover { background: #1d4ed8; }
+.gui-acceptance-guidance { margin: 6px 0 10px; }
+.gui-acceptance-actions { gap: 8px; flex-wrap: wrap; }
+.btn-pass { background: #16a34a; }
+.btn-pass:hover { background: #15803d; }
 .chat-input-area {
   display: flex; gap: 8px; padding: 10px 16px; border-top: 1px solid #e0e7ff; flex-shrink: 0;
   align-items: flex-end;

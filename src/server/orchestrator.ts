@@ -1068,6 +1068,12 @@ export class MigrationOrchestrator {
       await this.syncInputMediaToComfyUI(task);
     }
 
+    // Step 12 must never auto-complete on artifact presence alone: it requires
+    // an explicit human GUI-acceptance result (Pass/Not pass/Not validated).
+    // This pauses when 12-gui-acceptance-summary.json's manual_result is not
+    // yet "accepted", re-surfacing the gate on resume/restart too.
+    if (stepId === "12" && (await this.pauseIfStep12AcceptanceGate(task, step))) return;
+
     if (preRunArtifactCompletion.complete) {
       const summary = `Step ${stepId} completed from existing required artifact. ${preRunArtifactCompletion.reason}`;
       await this.updateStepAndPersist(taskId, stepId, "completed", { summary, error: undefined });
@@ -1169,6 +1175,7 @@ export class MigrationOrchestrator {
         return;
       }
       if (stepId === "13" && (await this.pauseIfAgentImprovementApprovalNeeded(task, step))) return;
+      if (stepId === "12" && (await this.pauseIfStep12AcceptanceGate(task, step))) return;
       await this.updateStepAndPersist(taskId, stepId, "completed", { summary });
       // §H: record recipe outcome for analytics (fire-and-forget).
       recordRecipeOutcome(taskId, stepId, "success");
@@ -2420,6 +2427,10 @@ export class MigrationOrchestrator {
       return true;
     }
 
+    if (decision.stepId === "12" && (await this.applyStep12AcceptanceDecision({ task, decision }))) {
+      return true;
+    }
+
     if (decision.stepId !== "00") {
       const artifactGate = await checkRequiredArtifactGate(task, stepDefinition);
       if (!artifactGate.gated) {
@@ -3185,6 +3196,185 @@ export class MigrationOrchestrator {
       }
     });
     return true;
+  }
+
+  /**
+   * Step 12 GUI-acceptance human gate (Pass / Not pass / Not validated).
+   *
+   * Real regression this restores: gating is authoritative only via a
+   * deterministic per-step signal, and Step 12 never had a writer, so it
+   * silently completed the moment 12-gui-acceptance.md existed -- the operator
+   * was never asked to sign off the generated outputs. This hook re-adds that
+   * decision point, keyed on 12-gui-acceptance-summary.json's `manual_result`
+   * (so it re-fires correctly on resume/restart, no gate-signal file needed),
+   * and hands the UI a clickable ComfyUI verification URL + a concise test
+   * checklist (structured, not buried in the markdown). Returns true when it
+   * paused (result not yet "accepted"), false when the step may complete.
+   */
+  private async pauseIfStep12AcceptanceGate(
+    task: MigrationTask,
+    step: MigrationStepDefinition
+  ): Promise<boolean> {
+    const summary = await this.readStep12Summary(task);
+    if (summary?.manual_result === "accepted") return false;
+
+    const url = this.resolveStep12VerificationUrl(task, summary);
+    const workflowName = path.basename(task.workflowPath).replace(/\.json$/i, "");
+    const verificationSteps = [
+      url ? `Open the ComfyUI verification link above (\`${url}\`) in a browser the tester can see.` : "Open the running ComfyUI GUI for this task in a tester-visible browser.",
+      "Load / confirm the migrated workflow is present (it is pushed into the ComfyUI *Workflows* sidebar automatically).",
+      "Run the workflow end-to-end and wait for it to finish without errors.",
+      "Compare the generated output(s) against the expected result for this workflow.",
+      "Choose a result: **Pass** if the outputs are correct; **Not pass** if they are wrong (the step will let you fix and re-run); **Not validated** if you did not / could not verify (delivery continues but is flagged NOT customer-ready). You can add notes in the text box."
+    ];
+
+    const question =
+      `**Step 12 — manual GUI acceptance for \`${workflowName}\`.**\n\n` +
+      (url ? `Verification link: ${url}\n\n` : "") +
+      `Please verify the migrated workflow in the ComfyUI GUI, then record the result:\n\n` +
+      verificationSteps.map((line, i) => `${i + 1}. ${line}`).join("\n");
+
+    await this.updateStepAndPersist(task.id, step.id, "waiting_for_human", {
+      summary: `Step 12 is waiting for manual GUI acceptance${url ? ` at ${url}` : ""}. Choose Pass / Not pass / Not validated.`,
+      error: undefined
+    });
+
+    const data: QuestionEventData = {
+      question,
+      choices: [
+        "Pass — outputs verified correct",
+        "Not pass — outputs are wrong",
+        "Not validated — did not verify"
+      ],
+      allowFreeform: true,
+      blockingReason: "quality_review",
+      verificationSteps,
+      ...(url ? { verificationUrl: url } : {})
+    };
+
+    await this.emit({
+      taskId: task.id,
+      stepId: step.id,
+      type: "human_question",
+      message: `Step 12 GUI acceptance: verify the workflow${url ? ` at ${url}` : ""} and record Pass / Not pass / Not validated.`,
+      data
+    });
+    return true;
+  }
+
+  private async readStep12Summary(task: MigrationTask): Promise<{ manual_result?: string; service?: { api_url?: string } } | undefined> {
+    const summaryPath = path.join(task.artifactPath, "12-gui-acceptance-summary.json");
+    try {
+      return JSON.parse(await fs.readFile(summaryPath, "utf8"));
+    } catch {
+      return undefined;
+    }
+  }
+
+  private resolveStep12VerificationUrl(
+    task: MigrationTask,
+    summary: { service?: { api_url?: string } } | undefined
+  ): string | undefined {
+    const fromSummary = summary?.service?.api_url;
+    if (typeof fromSummary === "string" && fromSummary.trim()) return fromSummary.trim();
+    const node = this.lookupTaskNode(task);
+    return node ? nodeApiUrl(node) : undefined;
+  }
+
+  /**
+   * Applies the operator's Step-12 GUI-acceptance answer. Returns false (fall
+   * through to generic gate handling) if the answer doesn't classify as one of
+   * the three verification results, so any unrelated Step-12 decision still
+   * works. Patches `manual_result` in 12-gui-acceptance-summary.json so the
+   * gate above (and downstream archival, which only fires on "accepted") sees
+   * the operator's decision.
+   */
+  private async applyStep12AcceptanceDecision(input: {
+    task: MigrationTask;
+    decision: HumanDecision;
+  }): Promise<boolean> {
+    const { task, decision } = input;
+    const raw = decision.answer ?? "";
+    // Classify on the FIRST line only (the chosen result); any following lines
+    // are operator notes and must not sway classification (e.g. a note that
+    // says "couldn't fully validate" under a Pass click).
+    const firstLine = raw.split("\n")[0];
+    const answer = firstLine.toLowerCase();
+    // Order matters: check the negatives before the bare "pass" substring
+    // (which is contained in neither, but "not pass" must not be read as pass).
+    let result: "accepted" | "rejected" | "not_validated" | undefined;
+    if (/not\s*validat|didn'?t\s*validat|could\s*not\s*validat|skip\s*validat|unvalidat/.test(answer)) {
+      result = "not_validated";
+    } else if (/not\s*pass|fail|reject|wrong|incorrect|bad\s*output/.test(answer)) {
+      result = "rejected";
+    } else if (/\bpass\b|verified\s*correct|accept|looks?\s*good|approve/.test(answer)) {
+      result = "accepted";
+    }
+    if (!result) return false;
+
+    const noteBody = raw.slice(firstLine.length).trim();
+    const notes = redactSensitiveText(noteBody || firstLine);
+    await this.patchStep12ManualResult(task, result, notes);
+
+    if (result === "accepted") {
+      const summary = `Step 12 GUI acceptance: operator PASSED. Outputs verified correct in the ComfyUI GUI.`;
+      await this.updateStepAndPersist(task.id, "12", "completed", { summary, error: undefined });
+      await this.emit({
+        taskId: task.id,
+        stepId: "12",
+        type: "step_completed",
+        message: summary,
+        data: { manual_result: result, notes }
+      });
+      return true;
+    }
+
+    if (result === "not_validated") {
+      const summary = `Step 12 completed WITHOUT GUI validation (operator chose "Not validated"). NOT customer-ready / not GUI-accepted; delivery continues with a downgraded claim boundary.`;
+      await this.updateStepAndPersist(task.id, "12", "completed", { summary, error: undefined });
+      await this.emit({
+        taskId: task.id,
+        stepId: "12",
+        type: "step_completed",
+        message: summary,
+        data: { manual_result: result, notes, boundary: "not customer-ready; not GUI-accepted" }
+      });
+      return true;
+    }
+
+    // rejected -> reject and allow re-run in place (paused surfaces the Re-run
+    // button; rerunStep regenerates the outputs and re-gates).
+    const summary = `Step 12 REJECTED by operator (outputs are wrong). Fix the workflow/environment and re-run Step 12. ${notes ? `Notes: ${notes}` : ""}`.trim();
+    await this.updateStepAndPersist(task.id, "12", "paused", { summary, error: undefined });
+    await this.emit({
+      taskId: task.id,
+      stepId: "12",
+      type: "progress",
+      message: summary,
+      data: { manual_result: result, notes }
+    });
+    return true;
+  }
+
+  private async patchStep12ManualResult(
+    task: MigrationTask,
+    manualResult: "accepted" | "rejected" | "not_validated",
+    notes: string
+  ): Promise<void> {
+    const summaryPath = path.join(task.artifactPath, "12-gui-acceptance-summary.json");
+    let summary: Record<string, unknown> = {};
+    try {
+      summary = JSON.parse(await fs.readFile(summaryPath, "utf8"));
+    } catch {
+      summary = {};
+    }
+    summary.manual_result = manualResult;
+    summary.manual_decision = {
+      result: manualResult,
+      notes,
+      decided_at: new Date().toISOString()
+    };
+    await fs.writeFile(summaryPath, JSON.stringify(summary, null, 2) + "\n", "utf8");
   }
 
   /**

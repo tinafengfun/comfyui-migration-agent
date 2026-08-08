@@ -91,6 +91,15 @@ export interface HumanQuestion {
    */
   suggestedAnswer?: string;
   suggestedReason?: string;
+  /**
+   * Step-12 GUI-acceptance gate only: a clickable ComfyUI verification URL and
+   * a concise operator test checklist. When `verificationUrl` is present the
+   * UI renders a dedicated verification card (prominent link + Pass/Not pass/
+   * Not validated buttons) instead of the generic gate card. See
+   * orchestrator.pauseIfStep12AcceptanceGate.
+   */
+  verificationUrl?: string;
+  verificationSteps?: string[];
 }
 
 export interface HumanDecisionContext {

@@ -2422,6 +2422,10 @@ describe("migration orchestrator", () => {
       // pausing for human review) and is sitting at waiting_for_human --
       // exactly the state a lost SDK session leaves behind.
       await fs.writeFile(path.join(task.artifactPath, "12-gui-acceptance.md"), "# prepared for GUI acceptance\n", "utf8");
+      // Seed an already-accepted acceptance summary so the Step-12 GUI-acceptance
+      // gate (covered in orchestrator.step12Acceptance.test.ts) doesn't intercept
+      // -- this test exercises the step-agnostic resume/fast-path mechanism.
+      await fs.writeFile(path.join(task.artifactPath, "12-gui-acceptance-summary.json"), JSON.stringify({ manual_result: "accepted" }), "utf8");
       await store.updateStep(task.id, "12", "waiting_for_human");
 
       // The human's real answer, recorded while no live SDK session existed
@@ -2454,6 +2458,9 @@ describe("migration orchestrator", () => {
         workflowJson: { nodes: [], links: [] }
       });
       await fs.writeFile(path.join(task.artifactPath, "12-gui-acceptance.md"), "# already done\n", "utf8");
+      // Already-accepted summary so the Step-12 acceptance gate lets the
+      // step-agnostic required-artifact fast path run (see the note above).
+      await fs.writeFile(path.join(task.artifactPath, "12-gui-acceptance-summary.json"), JSON.stringify({ manual_result: "accepted" }), "utf8");
 
       await orchestrator.runStep(task.id, "12");
 

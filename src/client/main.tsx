@@ -13,6 +13,7 @@ import type {
 } from "../shared/types";
 import { useApi, type ArtifactListItem } from "./hooks/useApi";
 import { useEventStream, type ActivityLine } from "./hooks/useEventStream";
+import { Markdown } from "./components/Markdown";
 import "./styles.css";
 
 type ArtifactKindFilter = ArtifactRecord["kind"] | "all";
@@ -50,35 +51,6 @@ function stringValue(v: unknown): string | undefined {
 }
 function isDeletableTask(task: MigrationTask) {
   return ["completed", "failed", "paused", "hard_stopped", "terminated", "pending"].includes(task.status);
-}
-
-/** Lightweight markdown → HTML for chat messages */
-function renderMarkdown(md: string): string {
-  let html = md
-    // Escape HTML (but preserve what we generate below)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
-  // Code blocks (``` ... ```)
-  html = html.replace(/```(\w*)\n?([\s\S]*?)```/g, "<pre><code>$2</code></pre>");
-  // Inline code
-  html = html.replace(/`([^`]+)`/g, "<code>$1</code>");
-  // Bold
-  html = html.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
-  // Italic
-  html = html.replace(/\*([^*]+)\*/g, "<em>$1</em>");
-  // Headers (## and ### only, within message context)
-  html = html.replace(/^### (.+)$/gm, "<h4>$1</h4>");
-  html = html.replace(/^## (.+)$/gm, "<h3>$1</h3>");
-  // Unordered list items (- or *)
-  html = html.replace(/^(\s*)[-*] (.+)$/gm, "$1<li>$2</li>");
-  // Ordered list items (1. 2. etc)
-  html = html.replace(/^(\s*)\d+\. (.+)$/gm, "$1<li>$2</li>");
-  // Wrap consecutive <li> in <ul>
-  html = html.replace(/((?:<li>.*?<\/li>\s*)+)/g, "<ul>$1</ul>");
-  // Line breaks (double newline → paragraph, single newline preserved by pre-wrap)
-  html = html.replace(/\n\n/g, "</p><p>");
-  return `<p>${html}</p>`;
 }
 
 function extractMissingFilename(event: AgentEvent): string | undefined {
@@ -1144,7 +1116,7 @@ function StepDetail({ step, state, activities, narrative, taskId, onRunStep, onR
       {state?.summary && (
         <details className="step-summary" open>
           <summary>Step summary</summary>
-          <div className="summary-content">{state.summary}</div>
+          <Markdown source={state.summary} className="summary-content" />
         </details>
       )}
 
@@ -1845,6 +1817,24 @@ function HumanInteraction({ questions, drafts, onDraftChange, onAnswer, onOpenAr
           );
         }
 
+        // Dedicated Step-12 GUI-acceptance verification card (clickable ComfyUI
+        // link + Pass / Not pass / Not validated). Detected by the structured
+        // verificationUrl the orchestrator attaches to the gate question.
+        if (question?.verificationUrl) {
+          return (
+            <GuiAcceptancePanel
+              key={event.id}
+              event={event}
+              question={question}
+              draft={drafts[event.id] ?? ""}
+              onDraftChange={(val) => onDraftChange(event.id, val)}
+              onAnswer={handleAnswer}
+              isSubmitted={isSubmitted}
+              submitError={submitError}
+            />
+          );
+        }
+
         if (isSdkChat) {
           // Chat-style interaction for SDK agent questions
           // Key by stepId so component persists across multi-round questions
@@ -1882,11 +1872,11 @@ function HumanInteraction({ questions, drafts, onDraftChange, onAnswer, onOpenAr
               <span className="question-badge">{question?.blockingReason ?? "question"}</span>
               <span className="muted">{stepId ? `Step ${stepId}` : ""}</span>
             </div>
-            <p className="question-text">{question?.question ?? event.message}</p>
+            <Markdown source={question?.question ?? event.message} className="question-text" />
             {question?.decisionContext && (
               <details className="question-context">
                 <summary>Decision context</summary>
-                <p>{question.decisionContext.backgroundReasonScene}</p>
+                <Markdown source={question.decisionContext.backgroundReasonScene} />
                 {question.decisionContext.consequencesAndFollowUp.map((c) => (
                   <div key={c.choice}><strong>{c.choice}:</strong> {c.consequence}</div>
                 ))}
@@ -1970,6 +1960,72 @@ function HumanInteraction({ questions, drafts, onDraftChange, onAnswer, onOpenAr
           </div>
         );
       })}
+    </div>
+  );
+}
+
+/* ── Step 12 GUI-acceptance panel: prominent ComfyUI link + Pass/Not pass/Not validated ── */
+function GuiAcceptancePanel({ event, question, draft, onDraftChange, onAnswer, isSubmitted, submitError }: {
+  event: AgentEvent;
+  question: HumanQuestion;
+  draft: string;
+  onDraftChange: (val: string) => void;
+  onAnswer: (event: AgentEvent, answer: string, wasFreeform: boolean) => void;
+  isSubmitted: boolean;
+  submitError?: string;
+}) {
+  const url = question.verificationUrl ?? "";
+  const choices = question.choices ?? [
+    "Pass — outputs verified correct",
+    "Not pass — outputs are wrong",
+    "Not validated — did not verify"
+  ];
+  const variantFor = (choice: string): string => {
+    const c = choice.toLowerCase();
+    if (/not\s*validat/.test(c)) return "btn";
+    if (/not\s*pass|fail|reject|wrong/.test(c)) return "btn btn-danger";
+    return "btn btn-primary btn-pass";
+  };
+  // Keep the choice as the first line so the backend classifies deterministically;
+  // operator notes (if any) follow on the next line and are recorded, not classified.
+  const submit = (choice: string) => onAnswer(event, draft.trim() ? `${choice}\n${draft.trim()}` : choice, false);
+
+  return (
+    <div className="question-card gui-acceptance-card">
+      <div className="question-header">
+        <span className="question-badge">Step 12 · manual GUI acceptance</span>
+      </div>
+      {url && (
+        <a className="btn btn-verify" href={url} target="_blank" rel="noopener noreferrer">
+          ↗ Open ComfyUI to verify — {url}
+        </a>
+      )}
+      <Markdown source={question.question} className="gui-acceptance-guidance" />
+      {isSubmitted ? (
+        <p className="muted question-submitted-note">✓ Result sent — updating…</p>
+      ) : (
+        <>
+          <div className="freeform-row">
+            <textarea
+              rows={2}
+              placeholder="Optional notes (operator, environment, what you observed)…"
+              value={draft}
+              disabled={isSubmitted}
+              onChange={(e) => onDraftChange(e.currentTarget.value)}
+            />
+          </div>
+          <div className="question-actions gui-acceptance-actions">
+            {choices.map((choice) => (
+              <button key={choice} className={variantFor(choice)} disabled={isSubmitted} onClick={() => submit(choice)}>
+                {choice}
+              </button>
+            ))}
+          </div>
+        </>
+      )}
+      {submitError && (
+        <p className="error-text question-submit-error">Failed to send: {submitError} — you can try again.</p>
+      )}
     </div>
   );
 }
@@ -2068,7 +2124,7 @@ function InteractiveChat({ event, stepId, decisions, allEvents, draft, onDraftCh
         {messages.map((msg, i) => (
           <div key={i} className={`chat-msg ${msg.role}`}>
             <div className="chat-msg-role">{msg.role === "agent" ? "Agent" : "You"}</div>
-            <div className="chat-msg-text" dangerouslySetInnerHTML={{ __html: renderMarkdown(msg.text) }} />
+            <Markdown source={msg.text} className="chat-msg-text" />
             <div className="chat-msg-time">{msg.time.slice(11, 19)}</div>
           </div>
         ))}
