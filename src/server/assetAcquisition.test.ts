@@ -4,7 +4,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
 import type { MigrationTask } from "../shared/types";
-import { cloneCustomNodeIfAllowed, ensureAssetAcquisitionJob, generateAssetQueryVariants, isExactDownloadCandidate } from "./assetAcquisition";
+import { cloneCustomNodeIfAllowed, ensureAssetAcquisitionJob, firstExistingCustomNodePath, generateAssetQueryVariants, isExactDownloadCandidate } from "./assetAcquisition";
 import { ensureDir } from "./fsUtils";
 import { demoModelRoot } from "./config";
 import { buildSourceProviderConfig, type AssetSourceCandidate } from "./assetSourceProviders";
@@ -1185,5 +1185,39 @@ describe("cloneCustomNodeIfAllowed (shared NFS custom_nodes reuse)", () => {
     const stat = await fs.lstat(targetPath);
     expect(stat.isSymbolicLink()).toBe(false);
     await expect(fs.readFile(path.join(targetPath, "README.md"), "utf8")).resolves.toBe("hello\n");
+  });
+});
+
+describe("firstExistingCustomNodePath (case-insensitive dedup — Duplicate VHS fix)", () => {
+  it("reuses an already-installed node whose folder name differs only in case", async () => {
+    const root = path.join(process.cwd(), ".demo-state", "tests", `vhs-dedup-${Date.now()}`);
+    const comfyuiRoot = path.join(root, "ComfyUI");
+    const customNodes = path.join(comfyuiRoot, "custom_nodes");
+    await ensureDir(customNodes);
+    // Pre-existing install under the repo-cased name.
+    await ensureDir(path.join(customNodes, "ComfyUI-VideoHelperSuite"));
+
+    // Workflow references it by its lowercase registry id -> lowercase target.
+    const existing = await firstExistingCustomNodePath(
+      { nodeType: "VHS_LoadVideo", packageHint: "comfyui-videohelpersuite", evidence: "package hint from workflow only" },
+      path.join(root, "workspace"),
+      comfyuiRoot
+    );
+
+    expect(existing).toBe(path.join(customNodes, "ComfyUI-VideoHelperSuite"));
+  });
+
+  it("returns undefined when no case-variant is present (still needs acquisition)", async () => {
+    const root = path.join(process.cwd(), ".demo-state", "tests", `vhs-none-${Date.now()}`);
+    const comfyuiRoot = path.join(root, "ComfyUI");
+    await ensureDir(path.join(comfyuiRoot, "custom_nodes"));
+
+    const existing = await firstExistingCustomNodePath(
+      { nodeType: "VHS_LoadVideo", packageHint: "comfyui-videohelpersuite", evidence: "package hint from workflow only" },
+      path.join(root, "workspace"),
+      comfyuiRoot
+    );
+
+    expect(existing).toBeUndefined();
   });
 });

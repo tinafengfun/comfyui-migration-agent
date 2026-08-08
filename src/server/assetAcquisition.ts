@@ -1116,7 +1116,7 @@ async function resolveCustomNodeSource(input: {
  * already-present package is recognized regardless of what the evidence
  * string happens to say.
  */
-async function firstExistingCustomNodePath(
+export async function firstExistingCustomNodePath(
   customNode: CustomNodeRow,
   workspacePath: string,
   comfyuiRoot: string
@@ -1131,6 +1131,37 @@ async function firstExistingCustomNodePath(
       throw error;
     });
     if (stat?.isDirectory() || stat?.isFile()) return candidate;
+    // Same node, different-case name (registry id vs repo name) already
+    // installed -- reuse it instead of creating a case-variant duplicate.
+    const sibling = await caseInsensitiveExistingSibling(candidate);
+    if (sibling) return sibling;
+  }
+  return undefined;
+}
+
+/**
+ * Real bug this closes (confirmed field incident, Step-12 GUI: "Duplicate VHS
+ * install detected"): a custom node gets referenced under two names that
+ * differ only in case -- e.g. the workflow's registry id
+ * `comfyui-videohelpersuite` vs the repo name `ComfyUI-VideoHelperSuite`. On a
+ * case-sensitive filesystem (Linux ext4/NFS) `fs.stat` treats them as
+ * distinct, so an already-installed case-variant is missed and a SECOND
+ * symlink to the same target gets created. ComfyUI then loads that folder
+ * twice and VideoHelperSuite's own guard aborts the whole GUI. Return an
+ * existing sibling whose name matches case-insensitively so the present
+ * install is reused. Uses lstat so a symlink (broken or not) still counts.
+ */
+async function caseInsensitiveExistingSibling(candidate: string): Promise<string | undefined> {
+  const dir = path.dirname(candidate);
+  const wanted = path.basename(candidate).toLowerCase();
+  const entries = await fs.readdir(dir).catch((error) => {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [] as string[];
+    throw error;
+  });
+  for (const entry of entries) {
+    if (entry !== path.basename(candidate) && entry.toLowerCase() === wanted) {
+      return path.join(dir, entry);
+    }
   }
   return undefined;
 }
@@ -1182,9 +1213,15 @@ export async function cloneCustomNodeIfAllowed(input: {
       }
     }
     if (nfsClonePath && !(await pathExists(input.targetPath))) {
-      // Never clobber a real (non-symlink) local dir that might carry local edits.
-      await fs.mkdir(path.dirname(input.targetPath), { recursive: true });
-      await fs.symlink(nfsClonePath, input.targetPath, "dir");
+      // Never clobber a real (non-symlink) local dir that might carry local edits,
+      // and never add a case-variant duplicate of an already-linked sibling
+      // (e.g. `comfyui-videohelpersuite` when `ComfyUI-VideoHelperSuite` already
+      // links to the same shared clone) -- that is exactly what makes ComfyUI
+      // load the node twice and trips VHS's "Duplicate install detected" guard.
+      if (!(await caseInsensitiveExistingSibling(input.targetPath))) {
+        await fs.mkdir(path.dirname(input.targetPath), { recursive: true });
+        await fs.symlink(nfsClonePath, input.targetPath, "dir");
+      }
     }
     return { cloned: true, cloneAttempted: true };
   } catch (error) {
