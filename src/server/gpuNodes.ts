@@ -64,6 +64,16 @@ export interface GpuNode {
    * docs/gpu-node-setup.md "Multi-person shared environment".
    */
   nfs_share_root?: string;
+  /**
+   * OmniXPU attention backend override, passed as -e OMNI_ATTN_BACKEND at launch:
+   * "auto"|"cute"|"esimd" (fused, fastest) or "torch" (stable PyTorch SDPA).
+   * Unset = the image default (auto/esimd). Set to "torch" on a node whose ESIMD
+   * attention kernel intermittently faults the XPU (UR_RESULT_ERROR_DEVICE_LOST at
+   * full-size attention). See docs — ESIMD is faster but can device-lost at very
+   * large sequence lengths; torch is slower but stable (may still need the
+   * reduced-size tier for full-size video). Confirmed live 2026-08-09.
+   */
+  attn_backend?: string;
 }
 
 export interface GpuNodeRegistry {
@@ -560,6 +570,34 @@ export async function syncComfyUiCoreFromNfs(
   });
 }
 
+/**
+ * Publish this node's local comfyui_root core commits back into the canonical
+ * /nfs_share/comfyui-core repo (a real `git merge` via
+ * scripts/publish-comfyui-core-patch.sh, serialized by an flock in the script).
+ * This is the "sync new patches back to the NFS master" half of the
+ * clone-from-NFS -> patch-local -> publish-back loop. Best-effort: the script
+ * refuses (non-zero) if the local root has uncommitted tracked changes or a
+ * merge conflict, which the caller treats as a soft failure (durable evidence),
+ * never a migration-breaking error.
+ */
+export async function publishComfyUiCoreToNfs(
+  node: GpuNode,
+  config: Pick<AppConfig, "projectRoot">
+): Promise<{ ok: boolean; detail: string }> {
+  const localScriptPath = path.join(config.projectRoot, "scripts", "publish-comfyui-core-patch.sh");
+  if (!fs.existsSync(localScriptPath)) {
+    return { ok: false, detail: `publish script not found at ${localScriptPath}` };
+  }
+  const nfsRoot = resolveNfsShareRoot(node) ?? "/nfs_share";
+  return runScriptOnNode(node, localScriptPath, {
+    remoteScriptName: "publish-comfyui-core-patch.sh",
+    scriptArgs: [node.comfyui_root],
+    env: { NFS_COMFYUI_CORE_ROOT: `${nfsRoot}/comfyui-core` },
+    timeoutMs: 5 * 60_000,
+    actionLabel: "ComfyUI core publish"
+  });
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Recipe environment-drift detection
 // ─────────────────────────────────────────────────────────────────────────────
@@ -971,6 +1009,7 @@ function normalizeNode(raw: unknown, index: number, sourcePath: string): GpuNode
     );
   }
   const nfs_share_root = typeof o.nfs_share_root === "string" ? o.nfs_share_root : undefined;
+  const attn_backend = typeof o.attn_backend === "string" ? o.attn_backend : undefined;
 
   let ssh: GpuNodeSsh | undefined;
   if (kind === "ssh") {
@@ -1006,6 +1045,7 @@ function normalizeNode(raw: unknown, index: number, sourcePath: string): GpuNode
     runtime,
     docker_image,
     nfs_share_root,
+    attn_backend,
     ssh
   };
 }

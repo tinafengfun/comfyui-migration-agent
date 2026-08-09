@@ -26,6 +26,13 @@ set -euo pipefail
 COMFYUI_ROOT="${1:-${COMFYUI_ROOT:-}}"
 NFS_COMFYUI_CORE="${NFS_COMFYUI_CORE_ROOT:-/nfs_share/comfyui-core}"
 
+# Serialize concurrent publishes into the shared canonical repo -- when several
+# migrations finish at once, two `git pull` merges into the same NFS repo would
+# race. Re-exec under an flock on a sibling lockfile (outside the git tree).
+if [[ "${_CORE_PUBLISH_LOCKED:-}" != "1" && -z "${NO_PUBLISH_LOCK:-}" ]]; then
+  exec env _CORE_PUBLISH_LOCKED=1 flock "${NFS_COMFYUI_CORE}.publish.lock" "$0" "$@"
+fi
+
 if [[ -z "$COMFYUI_ROOT" ]]; then
   echo "ERROR: comfyui_root not given and \$COMFYUI_ROOT is unset." >&2
   exit 1

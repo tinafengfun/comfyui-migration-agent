@@ -151,6 +151,9 @@ export function buildDockerStartScript(node: GpuNode, port: number, listen: stri
     // between XPU/CPU without dequant-to-bf16, so the HIGH->LOW model swap on large
     // fp8 diffusion (WAN2.2 etc.) no longer doubles VRAM and OOMs. Harmless when the
     // patch is absent or the model isn't fp8 (the env is only read inside that branch).
+    // Optional OMNI_ATTN_BACKEND=torch pins attention to stable PyTorch SDPA on a
+    // node whose ESIMD attention kernel device-losts at full-size attention.
+    (node.attn_backend ? `  -e OMNI_ATTN_BACKEND=${node.attn_backend} \\\n` : ``) +
     `  -e ZE_AFFINITY_MASK=0 -e OMNI_FP8_KEEP_ON_MOVE=1 -e NO_PROXY -e no_proxy -e HTTP_PROXY -e HTTPS_PROXY -e http_proxy -e https_proxy \\\n` +
     (nfsRoot ? `  -v '${nfsRoot}:${nfsRoot}' \\\n` : ``) +
     `  -v '${node.comfyui_root}:/comfyui' \\\n` +
@@ -191,6 +194,7 @@ async function startBareMetal(node: GpuNode, port: number, listen: string): Prom
     `sleep 4\n` +
     `cd '${node.comfyui_root}' || exit 3\n` +
     `export OMNI_FP8_KEEP_ON_MOVE=1\n` +
+    (node.attn_backend ? `export OMNI_ATTN_BACKEND=${shellQuote(node.attn_backend)}\n` : ``) +
     `exec '${node.venv_python}' main.py --port ${port} --listen ${listen} --reserve-vram 1 > /tmp/comfyui-${port}.log 2>&1 < /dev/null\n`;
   const b64 = Buffer.from(body).toString("base64");
   if (node.kind === "ssh") {

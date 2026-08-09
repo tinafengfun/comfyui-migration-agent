@@ -57,6 +57,14 @@ describe("buildDockerStartScript", () => {
     // Dynamic VRAM must stay enabled (offload/swap depends on it) and VAE stays on XPU.
     expect(script).not.toContain("--disable-dynamic-vram");
     expect(script).not.toContain("--cpu-vae");
+    // No attention override unless the node asks for one.
+    expect(script).not.toContain("OMNI_ATTN_BACKEND");
+  });
+
+  it("passes OMNI_ATTN_BACKEND only when the node sets attn_backend (ESIMD device-lost fallback)", async () => {
+    const { buildDockerStartScript } = await import("./comfyuiLifecycle");
+    const script = buildDockerStartScript(dockerNode({ attn_backend: "torch" }), 8188, "127.0.0.1", "c1");
+    expect(script).toContain("-e OMNI_ATTN_BACKEND=torch");
   });
 
   it("omits the nfs_share bind mount when the node has no shared NFS tree", async () => {

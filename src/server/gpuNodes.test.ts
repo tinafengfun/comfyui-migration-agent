@@ -20,6 +20,7 @@ import {
   ensureDockerImageSynced,
   checkComfyUiCoreDrift,
   syncComfyUiCoreFromNfs,
+  publishComfyUiCoreToNfs,
   checkRecipeEnvironmentDrift,
   checkPortOccupant,
   checkOmniXpuAcceleration,
@@ -633,6 +634,39 @@ describe("gpuNodes", () => {
       const result = await syncComfyUiCoreFromNfs(node, { projectRoot: root });
       expect(result.ok).toBe(false);
       expect(result.detail).toContain("sync script not found");
+    });
+  });
+
+  describe("publishComfyUiCoreToNfs", () => {
+    it("runs the publish script with the local comfyui_root arg + NFS canonical env", async () => {
+      const root = path.join(process.cwd(), ".demo-state", "tests", `gn-core-pub-ok-${Date.now()}`);
+      await fs.mkdir(path.join(root, "scripts"), { recursive: true });
+      await fs.writeFile(
+        path.join(root, "scripts", "publish-comfyui-core-patch.sh"),
+        "#!/usr/bin/env bash\necho \"NFS_COMFYUI_CORE_ROOT=$NFS_COMFYUI_CORE_ROOT\"\necho \"arg1=$1\"\necho published\n",
+        { mode: 0o755 }
+      );
+      const node: GpuNode = {
+        name: "d", kind: "local", comfyui_root: "/x/comfyui", venv_python: "/x/.venv/bin/python3",
+        model_roots: ["/m"], api_host: "127.0.0.1", api_port: 8188,
+        runtime: "docker", nfs_share_root: "/custom-share"
+      };
+      const result = await publishComfyUiCoreToNfs(node, { projectRoot: root });
+      expect(result.ok).toBe(true);
+      expect(result.detail).toContain("NFS_COMFYUI_CORE_ROOT=/custom-share/comfyui-core");
+      expect(result.detail).toContain("arg1=/x/comfyui");
+      expect(result.detail).toContain("published");
+    });
+
+    it("returns ok:false when the publish script isn't present", async () => {
+      const root = path.join(process.cwd(), ".demo-state", "tests", `gn-core-pub-missing-${Date.now()}`);
+      const node: GpuNode = {
+        name: "d", kind: "local", comfyui_root: "/x/comfyui", venv_python: "/x/.venv/bin/python3",
+        model_roots: ["/m"], api_host: "127.0.0.1", api_port: 8188
+      };
+      const result = await publishComfyUiCoreToNfs(node, { projectRoot: root });
+      expect(result.ok).toBe(false);
+      expect(result.detail).toContain("publish script not found");
     });
   });
 

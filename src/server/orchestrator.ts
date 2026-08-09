@@ -104,6 +104,8 @@ import {
   checkPortOccupant,
   checkRecipeEnvironmentDrift,
   ensureDockerImageSynced,
+  syncComfyUiCoreFromNfs,
+  publishComfyUiCoreToNfs,
   syncCustomNodesFromNfs,
   getProcessElapsedSeconds,
   killProcessOnNode,
@@ -337,11 +339,46 @@ export class MigrationOrchestrator {
     // skip re-archiving it.
     if (stepId === "13" && status === "completed") {
       await this.archiveWorkflowIfAccepted(task);
+      await this.publishComfyUiCoreAfterMigration(task);
     }
     if (stepId === "12" && status === "waiting_for_human") {
       await this.syncGuiWorkflowForAcceptance(task);
     }
     return task;
+  }
+
+  /**
+   * Best-effort: once a whole migration finishes (Step 13 completed), publish
+   * any ComfyUI-core patches this run applied on the node's local core back to
+   * the /nfs_share master (the "sync new patches back" half of the NFS-master
+   * loop; see publishComfyUiCoreToNfs). Serialized by an flock in the publish
+   * script. Never affects task status -- a soft failure (dirty local tree, no
+   * new commits, or a merge conflict) is durable evidence only. No-ops when the
+   * node isn't a real configured GPU node or its local core already matches the
+   * master.
+   */
+  private async publishComfyUiCoreAfterMigration(task: MigrationTask): Promise<void> {
+    const hasRealGpuNodesConfig = await fs.access(this.config.gpuNodesPath).then(() => true).catch(() => false);
+    if (!hasRealGpuNodesConfig) return;
+    const node = this.lookupTaskNode(task);
+    if (!node) return;
+    // Only publish when the local core is actually ahead of / diverged from the
+    // master; if already in sync there's nothing new to push.
+    const drift = await checkComfyUiCoreDrift(node).catch(() => ({ inSync: true, detail: "drift check failed" }));
+    if (drift.inSync) return;
+    const result = await publishComfyUiCoreToNfs(node, this.config).catch((err) => ({
+      ok: false,
+      detail: `core publish threw: ${err instanceof Error ? err.message : String(err)}`
+    }));
+    await this.emit({
+      taskId: task.id,
+      stepId: "13",
+      type: "progress",
+      message: result.ok
+        ? `Published this run's ComfyUI-core patches back to the /nfs_share master: ${result.detail}`
+        : `Did not publish ComfyUI-core patches to the /nfs_share master (non-fatal): ${result.detail}`,
+      data: { drift, publish: result }
+    });
   }
 
   /**
@@ -935,12 +972,24 @@ export class MigrationOrchestrator {
           kind: "json"
         });
         if (!coreDrift.inSync) {
+          // Auto-repair: clone/refresh the node's local core from the /nfs_share
+          // master before the migration runs anything (the "clone from NFS to
+          // local" half of the NFS-master loop). A `git merge` of the canonical
+          // into the local root -- keeps any unpublished local commits, adds the
+          // latest master + patches. Best-effort: a sync failure (e.g. dirty
+          // local tree) is durable evidence, never a migration-breaking error.
+          const synced = await syncComfyUiCoreFromNfs(node, this.config).catch((err) => ({
+            ok: false,
+            detail: `core auto-sync threw: ${err instanceof Error ? err.message : String(err)}`
+          }));
           await this.emit({
             taskId,
             stepId,
             type: "progress",
-            message: `ComfyUI core drift before Step 05: ${coreDrift.detail}`,
-            data: coreDrift
+            message: synced.ok
+              ? `ComfyUI core auto-synced from /nfs_share master before Step 05: ${synced.detail}`
+              : `ComfyUI core drift before Step 05 (auto-sync did not apply): ${coreDrift.detail} | ${synced.detail}`,
+            data: { coreDrift, synced }
           });
         }
       }

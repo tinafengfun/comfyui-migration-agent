@@ -10,6 +10,8 @@ Use as Step 01 immediately after Step 00 intake/preflight to make dependencies e
 
 Use this as the owner of broad source search and acquisition. Step 00 only performs local/static intake and must defer URL, repository, SSH, provider, download, and clone work here.
 
+**`/nfs_share` is the single master superset for models and custom nodes** — everything acquired must land there so future tasks (and all nodes) reuse it. This already happens automatically: downloaded models are staged under the node's `model_roots` (which are on `/nfs_share`, in the ComfyUI folder-paths layout `/nfs_share/models/<type>/…`), and custom nodes are cloned into `/nfs_share/custom_nodes/<name>` then symlinked into the run (`cloneCustomNodeIfAllowed`). Never stage a weight or clone a node into a node-local, non-`/nfs_share` path — that breaks the "NFS is the newest complete collection" invariant and forces re-downloads on the next task/node.
+
 ## Inputs
 
 - workflow JSON
