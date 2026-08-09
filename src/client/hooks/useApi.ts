@@ -7,7 +7,8 @@ import type {
   SubJob,
   ProgressNarrative,
   GpuNodeWriteRequest,
-  GpuNodeVerifyResult
+  GpuNodeVerifyResult,
+  XpuMemorySample
 } from "../../shared/types";
 
 export type ArtifactListItem = Pick<ArtifactRecord, "relativePath" | "kind" | "path">;
@@ -335,6 +336,12 @@ export function useApi() {
     return res.json();
   }, []);
 
+  const fetchXpuMemory = useCallback(async (nodeName: string): Promise<XpuMemorySample> => {
+    const res = await fetch(`/api/gpu-nodes/${encodeURIComponent(nodeName)}/xpu-memory`);
+    if (!res.ok) throw new Error(await res.text());
+    return res.json();
+  }, []);
+
   const createGpuNode = useCallback(async (node: GpuNodeWriteRequest): Promise<Awaited<ReturnType<typeof fetchGpuNodes>>> => {
     const res = await fetch("/api/gpu-nodes", {
       method: "POST",
@@ -390,6 +397,7 @@ export function useApi() {
     uploadMedia, fetchArtifacts, fetchArtifactContent,
     fetchDecisions, fetchSubJobs, startSubJob, downloadSuggestedSource, adoptCoreNodeRecipeDraft, fetchProgressNarrative,
     fetchHealth, runPreflight, generateRunReport, fetchGateSignal, fetchGpuNodes,
-    createGpuNode, updateGpuNode, deleteGpuNode, verifyGpuNode, syncGpuNodeDockerImage, syncGpuNodeComfyUiCore
+    createGpuNode, updateGpuNode, deleteGpuNode, verifyGpuNode, syncGpuNodeDockerImage, syncGpuNodeComfyUiCore,
+    fetchXpuMemory
   };
 }

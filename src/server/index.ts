@@ -27,6 +27,7 @@ import {
   maskNodeForPublic,
   pickNode,
   removeNode,
+  sampleXpuMemory,
   saveGpuNodes,
   syncComfyUiCoreFromNfs,
   syncDockerImageFromNfs,
@@ -245,6 +246,32 @@ app.post("/api/gpu-nodes/:name/sync-comfyui-core", async (req, res, next) => {
     }
     const result = await syncComfyUiCoreFromNfs(node, config);
     res.json(result);
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Live device-level XPU memory (via xpu-smi on the node). Polled by the web UI's
+// XPU memory monitor. Cached briefly so multiple clients / fast polls don't
+// hammer the node with ssh calls.
+const xpuMemoryCache = new Map<string, { at: number; sample: Awaited<ReturnType<typeof sampleXpuMemory>> }>();
+app.get("/api/gpu-nodes/:name/xpu-memory", async (req, res, next) => {
+  try {
+    const registry = loadGpuNodes(config);
+    const node = registry.nodes.find((n) => n.name === req.params.name);
+    if (!node) {
+      res.status(404).json({ error: `Node "${req.params.name}" not found` });
+      return;
+    }
+    const cached = xpuMemoryCache.get(node.name);
+    const now = Date.now();
+    if (cached && now - cached.at < 1500) {
+      res.json({ ...cached.sample, cached: true });
+      return;
+    }
+    const sample = await sampleXpuMemory(node, config);
+    xpuMemoryCache.set(node.name, { at: now, sample });
+    res.json(sample);
   } catch (error) {
     next(error);
   }

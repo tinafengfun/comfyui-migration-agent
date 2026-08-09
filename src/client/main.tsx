@@ -9,7 +9,8 @@ import type {
   MigrationStepDefinition,
   MigrationTask,
   ProgressNarrative,
-  SubJob
+  SubJob,
+  XpuMemorySample
 } from "../shared/types";
 import { useApi, type ArtifactListItem } from "./hooks/useApi";
 import { useEventStream, type ActivityLine } from "./hooks/useEventStream";
@@ -59,6 +60,70 @@ function extractMissingFilename(event: AgentEvent): string | undefined {
   // Match patterns like "z-image_00006_.png (input media)" or "filename.png"
   const match = text.match(/([a-zA-Z0-9_\-]+\.[a-zA-Z0-9]+)\s*\(/);
   return match?.[1];
+}
+
+/* ── Live device-level XPU memory monitor (polls xpu-smi on the GPU node) ── */
+function XpuMemoryMonitor({ nodeName, api }: { nodeName?: string; api: ReturnType<typeof useApi> }) {
+  const [sample, setSample] = useState<XpuMemorySample | null>(null);
+  const [resolvedNode, setResolvedNode] = useState<string | undefined>(nodeName);
+
+  useEffect(() => {
+    if (nodeName) { setResolvedNode(nodeName); return; }
+    let cancelled = false;
+    api.fetchGpuNodes()
+      .then((r) => { if (!cancelled) setResolvedNode(r.default || r.nodes[0]?.name); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [nodeName, api]);
+
+  useEffect(() => {
+    if (!resolvedNode) return;
+    let cancelled = false;
+    const poll = () =>
+      api.fetchXpuMemory(resolvedNode)
+        .then((s) => { if (!cancelled) setSample(s); })
+        .catch(() => { if (!cancelled) setSample({ ok: false, devices: [], error: "fetch failed" }); });
+    poll();
+    const id = window.setInterval(poll, 3000);
+    return () => { cancelled = true; window.clearInterval(id); };
+  }, [resolvedNode, api]);
+
+  if (!resolvedNode) return null;
+  const gb = (m?: number | null) => (m != null ? (m / 1024).toFixed(1) : "?");
+  const okDevices = sample?.ok ? sample.devices.filter((d) => d.ok) : [];
+  return (
+    <div className="xpu-monitor">
+      <div className="xpu-monitor-head">
+        <span className="xpu-monitor-title">XPU memory · {resolvedNode}</span>
+        {sample?.cached ? <span className="muted"> · cached</span> : null}
+      </div>
+      {!sample ? (
+        <div className="muted">sampling…</div>
+      ) : !sample.ok || okDevices.length === 0 ? (
+        <div className="muted xpu-monitor-err">unavailable{sample.error ? `: ${sample.error}` : ""}</div>
+      ) : (
+        <div className="xpu-monitor-devices">
+          {okDevices.map((d) => {
+            const total = d.mem_total_mib ?? 0;
+            const used = d.mem_used_mib ?? 0;
+            const pct = d.mem_used_pct ?? (total ? Math.round((used / total) * 1000) / 10 : 0);
+            const level = pct >= 90 ? "crit" : pct >= 75 ? "warn" : "ok";
+            return (
+              <div key={d.device_id} className="xpu-dev">
+                <div className="xpu-dev-row">
+                  <span title={d.device_name ?? undefined}>dev {d.device_id}{d.device_name ? ` · ${d.device_name.replace(/^Intel\(R\)\s*/, "")}` : ""}</span>
+                  <span className="muted">
+                    {gb(used)} / {gb(total)} GB · {pct}%{d.power_w != null ? ` · ${Math.round(d.power_w)}W` : ""}
+                  </span>
+                </div>
+                <div className="xpu-bar"><div className={`xpu-bar-fill ${level}`} style={{ width: `${Math.min(100, pct)}%` }} /></div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
 }
 
 function App() {
@@ -403,6 +468,9 @@ function App() {
                 api={api}
               />
             )}
+
+            {/* Live device-level XPU memory monitor for the run's GPU node */}
+            <XpuMemoryMonitor nodeName={selectedTask?.gpuNode} api={api} />
 
             {/* Tab bar */}
             <div className="tab-bar">

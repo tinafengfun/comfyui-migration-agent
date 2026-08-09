@@ -599,6 +599,61 @@ export async function publishComfyUiCoreToNfs(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Live XPU memory telemetry (device-level, via xpu-smi on the node)
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface XpuMemoryDevice {
+  device_id: number;
+  ok: boolean;
+  device_name?: string | null;
+  mem_used_mib?: number | null;
+  mem_total_mib?: number | null;
+  mem_used_pct?: number | null;
+  mem_util_pct?: number | null;
+  gpu_util_pct?: number | null;
+  power_w?: number | null;
+  temp_c?: number | null;
+}
+export interface XpuMemorySample {
+  ok: boolean;
+  timestamp?: number;
+  tool?: string;
+  devices: XpuMemoryDevice[];
+  error?: string;
+}
+
+/**
+ * Sample RAW device-level XPU memory on a node via `scripts/xpu-mem-sample.py`
+ * (xpu-smi under the hood) — the accurate source, unlike ComfyUI's /system_stats
+ * self-accounting. The script is piped over the wire (base64 → python3 -) so it
+ * needs no prior deployment and stays stateless for frequent polling. Degrades
+ * to ok:false (never throws) on a non-XPU node / missing xpu-smi / unreachable
+ * host, so the web UI can show "unavailable" cleanly. Backend GET
+ * /api/gpu-nodes/:name/xpu-memory wraps this; the frontend polls it live.
+ */
+export async function sampleXpuMemory(
+  node: GpuNode,
+  config: Pick<AppConfig, "projectRoot">
+): Promise<XpuMemorySample> {
+  const scriptPath = path.join(config.projectRoot, "scripts", "xpu-mem-sample.py");
+  if (!fs.existsSync(scriptPath)) {
+    return { ok: false, devices: [], error: `xpu-mem sampler not found at ${scriptPath}` };
+  }
+  const b64 = Buffer.from(fs.readFileSync(scriptPath, "utf8")).toString("base64");
+  const out = await runShellOnNode(node, `echo ${b64} | base64 -d | python3 -`, 12_000);
+  if (!out) {
+    return { ok: false, devices: [], error: "xpu-smi sampler produced no output (not an XPU node, xpu-smi unavailable, or node unreachable)" };
+  }
+  try {
+    const parsed = JSON.parse(out) as XpuMemorySample;
+    if (!Array.isArray(parsed.devices)) parsed.devices = [];
+    return parsed;
+  } catch {
+    return { ok: false, devices: [], error: `unparseable xpu-smi sampler output: ${out.slice(0, 200)}` };
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Recipe environment-drift detection
 // ─────────────────────────────────────────────────────────────────────────────
 

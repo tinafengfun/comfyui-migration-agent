@@ -59,6 +59,27 @@ export interface MigrationTask {
   gpuNode?: string;
 }
 
+export interface XpuMemoryDevice {
+  device_id: number;
+  ok: boolean;
+  device_name?: string | null;
+  mem_used_mib?: number | null;
+  mem_total_mib?: number | null;
+  mem_used_pct?: number | null;
+  mem_util_pct?: number | null;
+  gpu_util_pct?: number | null;
+  power_w?: number | null;
+  temp_c?: number | null;
+}
+export interface XpuMemorySample {
+  ok: boolean;
+  timestamp?: number;
+  tool?: string;
+  devices: XpuMemoryDevice[];
+  error?: string;
+  cached?: boolean;
+}
+
 export interface ArtifactRecord {
   id: string;
   taskId: string;

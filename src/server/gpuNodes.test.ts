@@ -21,6 +21,7 @@ import {
   checkComfyUiCoreDrift,
   syncComfyUiCoreFromNfs,
   publishComfyUiCoreToNfs,
+  sampleXpuMemory,
   checkRecipeEnvironmentDrift,
   checkPortOccupant,
   checkOmniXpuAcceleration,
@@ -667,6 +668,28 @@ describe("gpuNodes", () => {
       const result = await publishComfyUiCoreToNfs(node, { projectRoot: root });
       expect(result.ok).toBe(false);
       expect(result.detail).toContain("publish script not found");
+    });
+  });
+
+  describe("sampleXpuMemory", () => {
+    const node: GpuNode = {
+      name: "d", kind: "local", comfyui_root: "/x/comfyui", venv_python: "/x/.venv/bin/python3",
+      model_roots: ["/m"], api_host: "127.0.0.1", api_port: 8188
+    };
+
+    it("runs the real sampler and returns a well-formed sample (degrades to ok:false without xpu-smi)", async () => {
+      // Real script under the repo root; test host has no xpu-smi -> script prints
+      // {ok:false, devices:[]}. Exercises the base64->python3 pipe + JSON parse.
+      const result = await sampleXpuMemory(node, { projectRoot: process.cwd() });
+      expect(typeof result.ok).toBe("boolean");
+      expect(Array.isArray(result.devices)).toBe(true);
+    });
+
+    it("returns ok:false when the sampler script is missing", async () => {
+      const root = path.join(process.cwd(), ".demo-state", "tests", `gn-xpu-missing-${Date.now()}`);
+      const result = await sampleXpuMemory(node, { projectRoot: root });
+      expect(result.ok).toBe(false);
+      expect(result.error ?? "").toContain("not found");
     });
   });
 
