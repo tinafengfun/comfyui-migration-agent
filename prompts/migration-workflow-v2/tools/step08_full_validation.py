@@ -69,8 +69,24 @@ def set_input(
 
 
 def apply_reduced_full_path_settings(
-    prompt: dict[str, Any], output_prefix: str, seed: int
+    prompt: dict[str, Any], output_prefix: str, seed: int, reduce_resolution: bool = True
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Reduce Step-08 run cost while choosing what memory footprint to exercise.
+
+    Sampler steps are ALWAYS minimized (a cheap functional pass through the whole
+    graph). ``reduce_resolution`` controls the memory footprint:
+
+    - ``reduce_resolution=False`` (the ``capacity-probe`` run level, now the
+      default): spatial resolution and frame count are LEFT AT FULL SIZE, so the
+      true full-size per-forward peak VRAM is exercised. Peak memory is per-
+      forward and essentially step-count-independent, so a 1-step full-resolution
+      run reveals the same peak as the full run at a fraction of the wall-clock.
+      This is how Step 08 detects full-size OOM/capacity limits itself instead of
+      deferring them to the Step 12 human GUI run.
+    - ``reduce_resolution=True`` (the legacy ``reduced-full-path`` level): also
+      shrinks resolution/frames for the cheapest possible integration check; it
+      does NOT prove full-size capacity.
+    """
     prompt = json.loads(json.dumps(prompt, ensure_ascii=False))
     changes: list[dict[str, Any]] = []
 
@@ -121,7 +137,7 @@ def apply_reduced_full_path_settings(
         elif class_type == "UltimateSDUpscale":
             set_input(prompt, changes, node_id, "steps", 1, "Step 08 reduced full-path limits tile cost")
             set_input(prompt, changes, node_id, "batch_size", 1, "Step 08 reduced full-path keeps tile batch minimal")
-        elif class_type == "TTResolutionSelector":
+        elif class_type == "TTResolutionSelector" and reduce_resolution:
             set_input(
                 prompt,
                 changes,
@@ -138,14 +154,15 @@ def apply_reduced_full_path_settings(
                 "512x512 (1:1) (方形)",
                 "Step 08 reduced full-path reduces latent resolution",
             )
-        elif class_type == "ImageScaleToTotalPixels":
+        elif class_type == "ImageScaleToTotalPixels" and reduce_resolution:
             set_input(prompt, changes, node_id, "megapixels", 0.1, "Step 08 reduced full-path limits SeedVR2 input")
-        elif class_type == "ImageScaleBy":
+        elif class_type == "ImageScaleBy" and reduce_resolution:
             set_input(prompt, changes, node_id, "scale_by", 1.0, "Step 08 reduced full-path avoids pre-upscale cost")
         elif class_type == "SeedVR2VideoUpscaler":
             set_input(prompt, changes, node_id, "seed", seed, "Step 08 reduced full-path uses fixed seed")
-            set_input(prompt, changes, node_id, "resolution", 512, "Step 08 reduced full-path caps SeedVR2 output")
-            set_input(prompt, changes, node_id, "max_resolution", 512, "Step 08 reduced full-path caps SeedVR2 output")
+            if reduce_resolution:
+                set_input(prompt, changes, node_id, "resolution", 512, "Step 08 reduced full-path caps SeedVR2 output")
+                set_input(prompt, changes, node_id, "max_resolution", 512, "Step 08 reduced full-path caps SeedVR2 output")
             set_input(prompt, changes, node_id, "batch_size", 1, "Step 08 reduced full-path keeps SeedVR2 batch minimal")
         elif class_type == "Seed (rgthree)":
             set_input(
@@ -429,6 +446,128 @@ def preserve_previous_attempt(run_dir: Path, run_level: str) -> Path | None:
     return archive_dir
 
 
+# Level-Zero / oneDNN capacity-edge error signatures. At the capacity edge these
+# migrate across kernels (fp8 linear -> ESIMD attention -> fallback GEMM) but are
+# ONE signal: the graph does not fit at this footprint on this GPU. See the Step 08
+# skill "XPU capacity edge" note. Matched case-insensitively against runtime text.
+CAPACITY_ERROR_SIGNATURES = (
+    "out_of_device_memory",
+    "out of memory",
+    "device_lost",
+    "out_of_resources",
+    "could not create a primitive",
+    "level_zero backend failed",
+    "error: 39",
+    "error: 20",
+    "error: 40",
+    "cuda out of memory",
+    "xpu out of memory",
+    "allocation failed",
+)
+
+# Runtime peak / usable-budget ratios. usable_budget is already ~0.85 of physical
+# VRAM, so a peak near/over 1.0 means the run only survived via lowvram/offload
+# thrash and is not customer-ready at this footprint.
+CAPACITY_RATIO_OVER_BUDGET = 1.0
+CAPACITY_RATIO_TIGHT = 0.90
+
+
+def scan_capacity_signature(history_summary: dict[str, Any] | None) -> str | None:
+    """Return the first capacity-error signature found in the run history, if any.
+
+    ComfyUI records node failures as ``execution_error`` entries in
+    ``history.status.messages``; the exception text carries the Level-Zero/oneDNN
+    error. A crash-to-death (DEVICE_LOST kills the server) instead yields no
+    history at all -- that case is handled by the caller via run_status.
+    """
+    if not history_summary:
+        return None
+    status = history_summary.get("status", {})
+    haystack = json.dumps(status, ensure_ascii=False).lower() if isinstance(status, dict) else ""
+    for signature in CAPACITY_ERROR_SIGNATURES:
+        if signature in haystack:
+            return signature
+    return None
+
+
+def classify_capacity(
+    run_status: str,
+    run_level: str,
+    success: bool,
+    telemetry: dict[str, Any],
+    history_summary: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Deterministically classify full-size capacity from this Step-08 run.
+
+    The point of the default ``capacity-probe`` run level (full resolution/frames,
+    minimal sampler steps) is that the peak VRAM it measures IS the full-size peak,
+    so capacity can be gated here instead of surfacing as an OOM at the Step 12
+    human GUI run. Emits ``capacity_tier`` consumed by the Step 12 acceptance skill:
+
+      ok           -> full size fits with headroom; Step 12 may run full size
+      tight         -> fits but peak >= 90% of usable budget; recommend reduced tier
+      reduced       -> completed but over usable budget (survived via offload
+                       thrash); Step 12 MUST run the reduced tier for a clean claim
+      insufficient  -> hit a hard capacity error at full size; full size does not
+                       fit on this GPU; Step 12 runs the reduced tier
+    """
+    full_size_exercised = run_level in {"capacity-probe", "full-size"}
+    ratio = telemetry.get("peak_memory_budget_ratio")
+    signature = scan_capacity_signature(history_summary)
+    # A failure with a capacity signature -- or a failure/timeout on a full-size
+    # run (DEVICE_LOST crashes the server before history is written) -- is a hard
+    # capacity limit, not a generic node bug.
+    capacity_failure = bool(signature) or (
+        not success and full_size_exercised and run_status in {"history_timeout", "submit_failed"}
+    )
+
+    if capacity_failure:
+        tier = "insufficient"
+        headroom = "over_budget"
+    elif not full_size_exercised:
+        # Resolution-reduced legacy run: this run says nothing about full size.
+        tier = "unknown"
+        headroom = "not_exercised"
+    elif ratio is None:
+        tier = "unknown"
+        headroom = "unknown"
+    elif ratio >= CAPACITY_RATIO_OVER_BUDGET:
+        tier = "reduced"
+        headroom = "over_budget"
+    elif ratio >= CAPACITY_RATIO_TIGHT:
+        tier = "tight"
+        headroom = "tight"
+    else:
+        tier = "ok"
+        headroom = "comfortable"
+
+    full_size_supported = tier == "ok"
+    recommend_reduced = tier in {"tight", "reduced", "insufficient"}
+    return {
+        "capacity_tier": tier,
+        "capacity_headroom": headroom,
+        "full_size_exercised": full_size_exercised,
+        "full_size_supported": full_size_supported,
+        "peak_memory_budget_ratio": ratio,
+        "capacity_error_signature": signature,
+        "detected_at_step": "08",
+        "recommend_reduced_tier": recommend_reduced,
+        "recommended_reduced_setting": (
+            "Halve spatial dims and/or frame count until the token count drops well "
+            "under the failing point (e.g. 480x832 x 49 frames ran clean where "
+            "720x1280 x 81 failed on a 30 GB XPU). Step 12 runs GUI acceptance at "
+            "this reduced tier; full-size customer-ready needs a larger/multi-GPU node."
+            if recommend_reduced
+            else None
+        ),
+        "interpretation": (
+            f"Full-size capacity classified as '{tier}' from a "
+            f"{'full-resolution capacity probe' if full_size_exercised else 'resolution-reduced'} "
+            f"Step-08 run (peak/budget={ratio}, signature={signature})."
+        ),
+    }
+
+
 def completion_decision(
     run_status: str,
     history_summary: dict[str, Any] | None,
@@ -436,6 +575,7 @@ def completion_decision(
     node_accounting: dict[str, Any],
     run_level: str,
     telemetry: dict[str, Any],
+    capacity: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     status_obj = history_summary.get("status", {}) if history_summary else {}
     status_str = status_obj.get("status_str") if isinstance(status_obj, dict) else None
@@ -450,8 +590,23 @@ def completion_decision(
         and bool(non_empty_output_files)
         and node_accounting["all_source_nodes_accounted"]
     )
-    return {
+    if capacity is None:
+        capacity = classify_capacity(run_status, run_level, success, telemetry, history_summary)
+    capacity_tier = capacity.get("capacity_tier", "unknown")
+    # A capacity failure at a full-size footprint is a CLASSIFIED capacity hard
+    # stop (route to the reduced tier), not a generic "unresolved issue" -- this
+    # is what lets Step 08 catch full-size OOM instead of the Step 12 human run.
+    capacity_hard_stop = (not success) and capacity_tier == "insufficient"
+    # A run that functionally completes but only fits tightly/over-budget is still
+    # a "complete" run, but Step 12 must be told to run the reduced tier.
+    reduced_tier_required = success and capacity_tier in {"tight", "reduced"}
+
+    decision: dict[str, Any] = {
         "status": "complete" if success else "hard_stop",
+        "capacity": capacity,
+        "capacity_tier": capacity_tier,
+        "full_size_supported": capacity.get("full_size_supported"),
+        "reduced_tier_required": reduced_tier_required,
         "success_criteria_checked": {
             "step07_summary_consumed": True,
             "runtime_policy_prompt_consumed": True,
@@ -463,15 +618,74 @@ def completion_decision(
             "non_empty_output_files": len(non_empty_output_files),
             "xpu_telemetry_samples": telemetry.get("samples_total", 0),
             "all_source_nodes_accounted": node_accounting["all_source_nodes_accounted"],
-            "full_size_attempted": run_level == "full-size",
+            "full_size_footprint_exercised": capacity.get("full_size_exercised", False),
+            "peak_memory_budget_ratio": telemetry.get("peak_memory_budget_ratio"),
         },
-        "unresolved_gaps": []
-        if success
+        "next_step_allowed": success,
+        "next_step": "09-performance-tuning" if success else None,
+    }
+
+    if success and not reduced_tier_required:
+        decision["unresolved_gaps"] = []
+        decision["human_gate_prompt"] = None
+        return decision
+
+    if reduced_tier_required:
+        # Completed, but full size is capacity-marginal on this GPU. Not a failure;
+        # a boundary downgrade Step 12 must honor.
+        decision["unresolved_gaps"] = [
+            f"Step 08 completed but full-size capacity is '{capacity_tier}' "
+            f"(peak/budget={capacity.get('peak_memory_budget_ratio')}); "
+            "Step 12 must run GUI acceptance at the reduced tier, not full-size customer-ready."
+        ]
+        decision["human_gate_prompt"] = {
+            "problem_summary": (
+                f"Step 08 full-size capacity probe completed but is '{capacity_tier}' on this GPU "
+                f"(peak {capacity.get('peak_memory_budget_ratio')} of usable budget)."
+            ),
+            "required_human_action": (
+                "Approve running Step 12 GUI acceptance at the recommended reduced tier; do not claim "
+                "full-size customer-ready on this single GPU."
+            ),
+            "safe_reply_template": "Step 08 decision: accept-reduced-tier; recommended setting: <dims/frames>.",
+            "recommended_reduced_setting": capacity.get("recommended_reduced_setting"),
+            "continuation_edges": {
+                "reduced_tier_acceptance": "Step 12 runs GUI acceptance at the reduced tier and downgrades the claim boundary",
+                "full_size_customer_ready": "requires a larger/multi-GPU node",
+            },
+        }
+        return decision
+
+    # Failure path (success is False).
+    decision["unresolved_gaps"] = (
+        [
+            f"Step 08 hit a full-size capacity limit ({capacity.get('capacity_error_signature') or 'no history'}); "
+            "full size does not fit on this GPU. Route to the reduced tier."
+        ]
+        if capacity_hard_stop
         else [
             "Step 08 run did not complete with success history, output evidence, telemetry, and all-node accounting."
-        ],
-        "human_gate_prompt": None
-        if success
+        ]
+    )
+    decision["human_gate_prompt"] = (
+        {
+            "problem_summary": (
+                "Step 08 full-size capacity probe hit a hard XPU capacity limit "
+                f"({capacity.get('capacity_error_signature') or 'server did not return history'}). "
+                "At the capacity edge these errors move across kernels but are ONE signal: full size does not fit here."
+            ),
+            "required_human_action": (
+                "Approve routing to the reduced tier (Step 12 GUI acceptance at reduced dims/frames). "
+                "Do NOT chase the error kernel-by-kernel; full-size customer-ready needs a larger/multi-GPU node."
+            ),
+            "safe_reply_template": "Step 08 decision: route-reduced-tier; recommended setting: <dims/frames>.",
+            "recommended_reduced_setting": capacity.get("recommended_reduced_setting"),
+            "continuation_edges": {
+                "reduced_tier": "route to reduced-tier acceptance at Step 12",
+                "larger_node": "full-size customer-ready requires a larger/multi-GPU node",
+            },
+        }
+        if capacity_hard_stop
         else {
             "problem_summary": "Step 08 full-path validation failed or lacks required evidence.",
             "required_human_action": (
@@ -486,10 +700,9 @@ def completion_decision(
                 "after_runtime_repair": "rerun Step 08 and regenerate 08-output-manifest.json",
                 "if_capacity_issue": "route to Step 09 tuning with failing node and telemetry evidence",
             },
-        },
-        "next_step_allowed": success,
-        "next_step": "09-performance-tuning" if success else None,
-    }
+        }
+    )
+    return decision
 
 
 def make_report(summary: dict[str, Any], report_path: Path) -> None:
@@ -506,6 +719,10 @@ def make_report(summary: dict[str, Any], report_path: Path) -> None:
         f"- Output files retained: `{len(summary.get('output_files', []))}`",
         f"- Peak memory used MiB: `{summary['memory_runtime'].get('peak_memory_used_mib')}`",
         f"- Peak/budget ratio: `{summary['memory_runtime'].get('peak_memory_budget_ratio')}`",
+        f"- **Full-size capacity tier**: `{summary['capacity_classification'].get('capacity_tier')}`"
+        f" (full_size_supported=`{summary['capacity_classification'].get('full_size_supported')}`,"
+        f" signature=`{summary['capacity_classification'].get('capacity_error_signature')}`)",
+        f"- Recommend reduced tier at Step 12: `{summary['step12_context'].get('recommend_reduced_tier')}`",
         "",
         "## Human-approved run boundary",
         "",
@@ -564,7 +781,18 @@ def main() -> int:
     parser.add_argument("--workspace", type=Path, default=WORKSPACE_DEFAULT)
     parser.add_argument("--comfy-root", type=Path, default=COMFY_ROOT_DEFAULT)
     parser.add_argument("--api-url", required=True)
-    parser.add_argument("--run-level", choices=["reduced-full-path", "full-size"], default="reduced-full-path")
+    parser.add_argument(
+        "--run-level",
+        choices=["capacity-probe", "reduced-full-path", "full-size"],
+        default="capacity-probe",
+        help=(
+            "capacity-probe (default): full resolution/frames, minimal sampler steps -- "
+            "measures the true full-size peak VRAM cheaply so full-size capacity is gated "
+            "at Step 08 instead of at the Step 12 human run. reduced-full-path: also shrinks "
+            "resolution (cheap integration check, says nothing about full-size capacity). "
+            "full-size: unmodified full run."
+        ),
+    )
     parser.add_argument("--timeout-seconds", type=int, default=1800)
     parser.add_argument("--poll-interval-seconds", type=float, default=2.0)
     parser.add_argument("--seed", type=int, default=8)
@@ -586,9 +814,23 @@ def main() -> int:
 
     prompt_id = str(uuid.uuid4())
     client_id = str(uuid.uuid4())
-    output_prefix = "zimage_v2_step08/reduced_full" if args.run_level == "reduced-full-path" else "zimage_v2_step08/full_size"
+    output_prefix = {
+        "reduced-full-path": "zimage_v2_step08/reduced_full",
+        "capacity-probe": "zimage_v2_step08/capacity_probe",
+        "full-size": "zimage_v2_step08/full_size",
+    }[args.run_level]
     if args.run_level == "reduced-full-path":
-        prompt, setting_changes = apply_reduced_full_path_settings(source_prompt, output_prefix, args.seed)
+        prompt, setting_changes = apply_reduced_full_path_settings(
+            source_prompt, output_prefix, args.seed, reduce_resolution=True
+        )
+    elif args.run_level == "capacity-probe":
+        # Keep full resolution/frames; reduce only sampler steps. Peak VRAM is per-
+        # forward and step-count-independent, so this exercises the true full-size
+        # peak at a fraction of the wall-clock -- letting Step 08 detect full-size
+        # OOM/capacity limits itself instead of deferring them to the Step 12 run.
+        prompt, setting_changes = apply_reduced_full_path_settings(
+            source_prompt, output_prefix, args.seed, reduce_resolution=False
+        )
     else:
         prompt = json.loads(json.dumps(source_prompt, ensure_ascii=False))
         setting_changes = []
@@ -673,6 +915,7 @@ def main() -> int:
         args.run_level,
         telemetry,
     )
+    capacity = decision["capacity"]
     cache_assisted = bool(cached_nodes)
     result_class = (
         "restricted_reduced_full_path_runtime_policy_success"
@@ -707,8 +950,14 @@ def main() -> int:
         "run_level": args.run_level,
         "source_boundary": "runtime-policy variant from Step 06; source workflow unchanged",
         "human_approved_boundary": (
-            "User approved Step 08 reduced full-path validation first; full-size/original-resolution capacity "
+            "Step 08 capacity-probe runs at FULL resolution/frames with minimal sampler steps, so full-size "
+            "peak VRAM is exercised and full-size capacity is classified here (capacity_tier). Sampler steps "
+            "are reduced, so this is not a full-quality run; final quality/customer-ready remains a separate gate."
+            if args.run_level == "capacity-probe"
+            else "User approved Step 08 reduced full-path validation first; full-size/original-resolution capacity "
             "is not attempted in this run and remains a separate gate."
+            if args.run_level == "reduced-full-path"
+            else "Step 08 full-size run: unmodified source resolution, frames, and steps."
         ),
         "step07_context": {
             "summary": str(artifact_dir / "07-branch-smoke-summary.json"),
@@ -738,13 +987,21 @@ def main() -> int:
         "memory_runtime": telemetry,
         "memory_theory": memory_theory,
         "capacity_classification": {
-            "capacity_status": "reduced_full_path_runtime_telemetry_collected"
-            if decision["status"] == "complete"
-            else "unclassified_failure",
-            "full_size_capacity": "not_attempted_by_human_approved_boundary"
-            if args.run_level == "reduced-full-path"
-            else "attempted",
+            **capacity,
             "budget_ratio": telemetry.get("peak_memory_budget_ratio"),
+        },
+        "step12_context": {
+            "capacity_tier": capacity["capacity_tier"],
+            "full_size_supported": capacity["full_size_supported"],
+            "recommend_reduced_tier": capacity["recommend_reduced_tier"],
+            "recommended_reduced_setting": capacity["recommended_reduced_setting"],
+            "peak_memory_budget_ratio": telemetry.get("peak_memory_budget_ratio"),
+            "capacity_error_signature": capacity["capacity_error_signature"],
+            "note": (
+                "Step 08 measured full-size capacity via a full-resolution probe. If capacity_tier is "
+                "'tight'/'reduced'/'insufficient', run Step 12 GUI acceptance at recommended_reduced_setting "
+                "and downgrade the claim boundary (reduced-tier accepted, NOT full-size customer-ready)."
+            ),
         },
         "result_class": result_class,
         "non_source_identical_boundary": {
@@ -814,6 +1071,8 @@ def main() -> int:
         "status": decision["status"],
         "artifacts": [artifact_record(path) for path in manifest_paths if path.exists()],
         "completion_decision": decision,
+        "capacity_classification": summary["capacity_classification"],
+        "step12_context": summary["step12_context"],
         "step09_context": summary["step09_context"],
     }
     write_json(manifest_path, manifest)

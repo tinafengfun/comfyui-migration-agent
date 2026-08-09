@@ -78,7 +78,7 @@ def collect_candidates(artifact_dir: Path) -> list[dict[str, Any]]:
 
     attempts_root = artifact_dir / "08-full-validation" / "previous-attempts"
     if attempts_root.is_dir():
-        for run_summary in sorted(attempts_root.glob("*/08-reduced-full-path-run-summary.json")):
+        for run_summary in sorted(attempts_root.glob("*/08-*-run-summary.json")):
             summary = read_json(run_summary)
             candidates.append(candidate_from_summary(run_summary.parent.name, run_summary, summary))
     return candidates
