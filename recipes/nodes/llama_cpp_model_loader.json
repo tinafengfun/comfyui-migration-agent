@@ -1,0 +1,30 @@
+{
+  "recipeId": "llama-cpp-vlm-cpu-native",
+  "version": "1.0.0",
+  "nodeType": "llama_cpp_model_loader",
+  "modelPattern": "*.gguf",
+  "packageRepo": "https://github.com/lihaoyun6/ComfyUI-llama-cpp_vlm",
+  "xpuSupport": "cpu_offload",
+  "patchClass": "none",
+  "knownIssues": [
+    "ComfyUI-llama-cpp_vlm (node types llama_cpp_model_loader / llama_cpp_parameters / llama_cpp_instruct_adv) is a llama.cpp LLM/VLM node that delegates to llama-cpp-python. It is device-agnostic: it only passes n_gpu_layers to llama.cpp, so the runtime device is decided entirely by the installed llama-cpp-python binary's compiled backend.",
+    "The node's requirements.txt pins CUDA (+cu128) and Metal wheels only -- there is NO Intel XPU/SYCL wheel. On this Intel XPU/CPU environment the installed binary is CPU-only (only libggml-cpu.so; no libggml-cuda.so / libggml-sycl.so), so n_gpu_layers=-1 is a no-op and the VLM runs on CPU. This is intentional and correct here: CPU inference uses host RAM, NOT the 30 GB XPU VRAM, leaving the XPU free for the fp8 diffusion model.",
+    "This node is auto-provisioned by the migration agent's known-custom-node registry (src/server/knownCustomNodes.ts): it is source-known at Step 00, auto-cloned at Step 01, and its GGUF + mmproj weights route to models/LLM/ (NOT text_encoders). It must therefore NOT be treated as source-unknown or as a CUDA-only blocker in Step 02 feasibility -- do not open an ask_user gate for it.",
+    "For heavy fp8 diffusion pipelines, step06_prompt_validation.py already sets force_offload=True on llama_cpp* nodes so the ~14 GB VLM is freed after producing conditioning; keep that policy."
+  ],
+  "workarounds": [
+    {
+      "action": "No node change needed. Ensure a CPU-built llama-cpp-python is installed into the shared XPU venv via bash /nfs_share/bin/with-shared-venv-lock.sh <venv_python> install <cpu-wheel>; do NOT pip install -r the node's requirements.txt (it pins CUDA wheels). Place the model .gguf and the mmproj .gguf under models/LLM/.",
+      "rationale": "The node works out of the box once a portable CPU llama-cpp-python is present and the GGUF/mmproj live in models/LLM/; the only failure modes are (a) installing the CUDA requirements.txt, or (b) the models landing in text_encoders where the loader cannot find them -- both are handled automatically by the registry + Step 05 policy.",
+      "tradeoff": "CPU inference for the VLM description stage is slower than a GPU build, but it runs once per generation and keeps the XPU VRAM free for the fp8 diffusion model. XPU acceleration would require a SYCL-built llama-cpp-python (no ready wheel) and would compete for XPU VRAM."
+    }
+  ],
+  "validationEvidence": "ComfyUI-llama-cpp_vlm installed at /nfs_share/custom_nodes/ComfyUI-llama-cpp_vlm (remote lihaoyun6/ComfyUI-llama-cpp_vlm, commit c3a6314). Installed llama_cpp_python-0.3.40 in /nfs_share/venv-container-xpu confirmed CPU-only via bundled backend libs (only libggml-cpu.so present; no libggml-cuda.so / libggml-sycl.so). Workflow Video_Edit_Multimodal_Generator loads Qwen3.5-27B-heretic.Q4_K_M.gguf + mmproj-Q8_0.gguf via llama_cpp_model_loader (2026-08-10).",
+  "validatedOnWorkflows": [],
+  "provenance": {
+    "taskOrigin": "Video_Edit_Multimodal_Generator migration -- Step 02 was asking the human to manually supply the ComfyUI-llama-cpp_vlm node; made it auto-resolved (CPU backend).",
+    "createdAt": "2026-08-10",
+    "approvedBy": "tinafengfun"
+  },
+  "retireCondition": "A SYCL/XPU-accelerated llama-cpp-python becomes the chosen backend, or the base package ships an Intel-XPU wheel, at which point xpuSupport moves off cpu_offload."
+}

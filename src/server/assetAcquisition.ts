@@ -16,13 +16,14 @@ import {
 import { demoModelRoot } from "./config";
 import type { FuzzyJudgment } from "./assetFuzzyMatch";
 import { findRecipesForNode, type Recipe } from "./recipeLibrary";
+import { knownCustomNodeForType, knownCustomNodeForEvidence } from "./knownCustomNodes";
 import type { CoreNodeDiscoveryResult } from "./coreNodeRecipeDiscovery";
 import { appendAssetResolution, lookupAssetResolution } from "./assetResolutionLedger";
 import { computeWorkflowSha256 } from "./workflowKnowledge";
 
 const execFileAsync = promisify(execFile);
 
-interface AssetRow {
+export interface AssetRow {
   asset_name: string;
   requested_name: string;
   resolved_path: string;
@@ -1025,7 +1026,12 @@ async function resolveCustomNodeSource(input: {
   }
 
   const targetPath = customNodeTargetPath(input.customNode, input.workspacePath, input.comfyuiRoot);
-  const explicitRepo = normalizedGitHubRepoUrl(input.customNode.repository);
+  // Prefer the workflow/Step-01 explicit repository; otherwise fall back to the
+  // deterministic known-custom-node registry so packages like ComfyUI-llama-cpp_vlm
+  // auto-clone without a human providing the URL (see src/server/knownCustomNodes.ts).
+  const explicitRepo =
+    normalizedGitHubRepoUrl(input.customNode.repository) ??
+    normalizedGitHubRepoUrl(knownCustomNodeForType(input.customNode.nodeType)?.repository);
   if (explicitRepo) {
     const cloned = await cloneCustomNodeIfAllowed({
       repository: explicitRepo,
@@ -1445,12 +1451,13 @@ function assetKind(row: AssetRow): string {
   }
   if (evidence.includes("lora") || name.includes("lora")) return "LoRA model";
   if (evidence.includes("vae") || name.includes("vae") || name === "ae.safetensors") return "VAE model";
+  if (knownCustomNodeForEvidence(evidence)?.modelSubdir) return "LLM/VLM model";
   if (evidence.includes("clip") || name.includes("qwen")) return "text encoder model";
   if (evidence.includes("upscale")) return "upscale model";
   return "model asset";
 }
 
-function targetSubdir(row: AssetRow): string {
+export function targetSubdir(row: AssetRow): string {
   const evidence = row.wrapper_source_evidence.toLowerCase();
   const name = (row.requested_name || row.asset_name).toLowerCase();
   if (evidence.includes("upscalemodelloader") || name.includes("ultrasharp")) return "upscale_models";
@@ -1463,6 +1470,12 @@ function targetSubdir(row: AssetRow): string {
   // generic "encoder" substring below, or every *_encoder*.safetensors name
   // (audio or text) gets misrouted to text_encoders.
   if (evidence.includes("whispermodelloader") || name.includes("whisper")) return "audio_encoders";
+  // Known custom-node LLM/VLM models (e.g. ComfyUI-llama-cpp_vlm's GGUF + mmproj,
+  // loaded by llama_cpp_model_loader) live under models/LLM/, NOT text_encoders --
+  // must precede the generic qwen/encoder branch below or a Qwen-VL GGUF / an
+  // *mmproj*.gguf gets misrouted to text_encoders where the node can't find it.
+  const knownLlmSubdir = knownCustomNodeForEvidence(evidence)?.modelSubdir;
+  if (knownLlmSubdir) return knownLlmSubdir;
   if (evidence.includes("clip") || name.includes("qwen") || name.includes("umt5") || name.includes("encoder")) return "text_encoders";
   if (evidence.includes("seedvr2") || name.includes("seedvr2")) return "SEEDVR2";
   if (evidence.includes("unet") || name.includes("z_image")) return "diffusion_models";

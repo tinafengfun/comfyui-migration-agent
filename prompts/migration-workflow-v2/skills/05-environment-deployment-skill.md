@@ -256,6 +256,13 @@ If Step 01 or Step 04 reports a custom-node package as "environment gap" (direct
 4. Verify registration via `/object_info` after server restart
 5. If clone or install fails, document it as a gap — do not hard-stop unless the node is on the critical execution path AND no workaround exists
 
+**Known custom-node pip overrides (do NOT install their CUDA `requirements.txt`).** Some packages pin CUDA/Metal wheels that are wrong for this XPU/CPU box; the known-custom-node registry (`src/server/knownCustomNodes.ts`) records the correct backend. For **`ComfyUI-llama-cpp_vlm`** (`llama_cpp_*` VLM nodes): do **not** `pip install -r` its `requirements.txt` (it pins `+cu128` CUDA / Metal `llama-cpp-python`). Instead install the **CPU-built** `llama-cpp-python` into the shared venv via the lock wrapper, from the staged wheel:
+```
+bash /nfs_share/bin/with-shared-venv-lock.sh <venv_python> install \
+  /nfs_share/wheels/llama-cpp-python/llama_cpp_python-0.3.40-cp312-cp312-linux_x86_64.whl
+```
+(the canonical CPU wheel is staged under `/nfs_share/wheels/llama-cpp-python/`; if absent, build once from the JamePeng fork with no GPU backend and stage it there — never install the CUDA wheel). The VLM then runs on **CPU** (host RAM, not XPU VRAM), which is intended: it leaves the XPU free for fp8 diffusion. Ensure this node's model `.gguf` **and** its `mmproj` `.gguf` resolve under **`models/LLM/`** (Step 01 routing places them there); if a prior run left them in `text_encoders/`, symlink/move them into `models/LLM/`.
+
 ### Hidden runtime asset pre-stage check (do this BEFORE downloading anything Step 02 flagged)
 
 If Step 02 identified a hidden runtime asset (a custom node's model suite loaded dynamically from its own code — e.g. IndexTTS2's ~14GB model suite) and got human sign-off to defer acquisition, the backend may have already started downloading it in the background as soon as Step 02 finished, specifically so Step 05 doesn't have to fetch a multi-GB model suite live inside its own session. Before you acquire any such asset yourself:

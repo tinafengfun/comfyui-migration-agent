@@ -163,4 +163,45 @@ describe("intake preflight custom-node detection", () => {
     expect(row?.state).toBe("source known");
     expect(row?.evidence).toContain("custom_nodes/ComfyUI-KJNodes");
   });
+
+  it("marks a known-registry custom node (llama_cpp_* / ComfyUI-llama-cpp_vlm) as 'source known' with NO local install, so Step 02 does not ask the human to provide the source", async () => {
+    resetBuiltinNodeCache();
+    const root = path.join(process.cwd(), ".demo-state", "tests", `intake-preflight-known-llama-${Date.now()}`);
+    const artifactPath = path.join(root, "artifacts");
+    const comfyuiRoot = path.join(root, "ComfyUI");
+    await ensureDir(artifactPath);
+    await writeComfyuiFixture(comfyuiRoot);
+    // Deliberately NO custom_nodes/ComfyUI-llama-cpp_vlm dir: source-known must come
+    // from the known-custom-node registry (inferPackageHint), not local evidence.
+
+    const workflowPath = path.join(root, "workflow.json");
+    await fs.writeFile(
+      workflowPath,
+      JSON.stringify({
+        nodes: [
+          { id: 1, type: "llama_cpp_model_loader", properties: {}, inputs: [], outputs: [], widgets_values: [] }
+        ],
+        links: []
+      }),
+      "utf8"
+    );
+    const task: MigrationTask = {
+      id: "task-intake-known-llama",
+      name: "Intake known llama node",
+      status: "pending",
+      workflowPath,
+      workspacePath: root,
+      artifactPath,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      steps: [{ id: "00", status: "pending" }]
+    };
+
+    const result = await ensureIntakePreflight({ task, modelRoots: [path.join(root, "models")], comfyuiRoot });
+
+    const row = result.customNodeRows.find((r) => r.nodeType === "llama_cpp_model_loader");
+    expect(row?.state).toBe("source known");
+    expect(row?.sourcePackage).toBe("ComfyUI-llama-cpp_vlm");
+    expect(row?.humanAction).toBe("none");
+  });
 });

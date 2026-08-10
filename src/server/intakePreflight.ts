@@ -8,6 +8,7 @@ import {
   type ObjectInfo
 } from "./enumDependencies";
 import { loadBuiltinNodeTypes } from "./builtinNodes";
+import { knownCustomNodeForType } from "./knownCustomNodes";
 
 export interface IntakePreflightResult {
   artifactPath: string;
@@ -381,6 +382,11 @@ function isCustomNode(type: string, packageHint: string, builtinTypes: Set<strin
 }
 
 function inferPackageHint(type: string): string {
+  // Known third-party packages the agent auto-handles (deterministic node->package
+  // map). A non-empty hint makes Step 00 mark the node "source known" so it does not
+  // ask the human to provide the source. See src/server/knownCustomNodes.ts.
+  const known = knownCustomNodeForType(type);
+  if (known) return known.packageName;
   if (type.toLowerCase().includes("rgthree")) return "rgthree-comfy";
   return "";
 }
