@@ -1123,6 +1123,10 @@ export class MigrationOrchestrator {
     // yet "accepted", re-surfacing the gate on resume/restart too.
     if (stepId === "12" && (await this.pauseIfStep12AcceptanceGate(task, step))) return;
 
+    // Step 08 full-size capacity gate: re-surface the reduced/insufficient
+    // capacity decision panel on resume/restart, and never auto-complete past it.
+    if (stepId === "08" && (await this.pauseIfStep08CapacityGate(task, step))) return;
+
     if (preRunArtifactCompletion.complete) {
       const summary = `Step ${stepId} completed from existing required artifact. ${preRunArtifactCompletion.reason}`;
       await this.updateStepAndPersist(taskId, stepId, "completed", { summary, error: undefined });
@@ -1225,6 +1229,10 @@ export class MigrationOrchestrator {
       }
       if (stepId === "13" && (await this.pauseIfAgentImprovementApprovalNeeded(task, step))) return;
       if (stepId === "12" && (await this.pauseIfStep12AcceptanceGate(task, step))) return;
+      // Never let a Step 08 capacity hard stop silently complete: if the 08 summary
+      // classifies full-size capacity as reduced/insufficient, present the operator
+      // decision panel instead of marking the step completed.
+      if (stepId === "08" && (await this.pauseIfStep08CapacityGate(task, step))) return;
       await this.updateStepAndPersist(taskId, stepId, "completed", { summary });
       // §H: record recipe outcome for analytics (fire-and-forget).
       recordRecipeOutcome(taskId, stepId, "success");
@@ -2480,6 +2488,10 @@ export class MigrationOrchestrator {
       return true;
     }
 
+    if (decision.stepId === "08" && (await this.applyStep08CapacityDecision({ task, decision }))) {
+      return true;
+    }
+
     if (decision.stepId !== "00") {
       const artifactGate = await checkRequiredArtifactGate(task, stepDefinition);
       if (!artifactGate.gated) {
@@ -3424,6 +3436,172 @@ export class MigrationOrchestrator {
       decided_at: new Date().toISOString()
     };
     await fs.writeFile(summaryPath, JSON.stringify(summary, null, 2) + "\n", "utf8");
+  }
+
+  private async readStep08Summary(
+    task: MigrationTask
+  ): Promise<Record<string, any> | undefined> {
+    const summaryPath = path.join(task.artifactPath, "08-full-validation-summary.json");
+    try {
+      return JSON.parse(await fs.readFile(summaryPath, "utf8"));
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * Step 08 full-size capacity decision gate. The step08 tool classifies full-size
+   * capacity (capacity_tier) from a full-resolution probe; when it is 'reduced' or
+   * 'insufficient', full size does not fit reliably on this GPU and the operator
+   * must choose. Deterministic (mirrors pauseIfStep12AcceptanceGate) so the panel
+   * is system-controlled and cannot be skipped by SDK-agent behavior -- the real
+   * bug this closes: the agent wrote a capacity hard-stop into the 08 summary but
+   * neither called ask_user nor triggered a hard_stop, so the step silently
+   * completed and advanced past the capacity limit.
+   */
+  private async pauseIfStep08CapacityGate(
+    task: MigrationTask,
+    step: MigrationStepDefinition
+  ): Promise<boolean> {
+    const summary = await this.readStep08Summary(task);
+    if (!summary) return false;
+    // Re-gate guard: don't re-present once the operator has decided.
+    if (summary.capacity_decision) return false;
+
+    const decision = (summary.completion_decision ?? {}) as Record<string, any>;
+    const capacity = (decision.capacity ?? summary.capacity_classification ?? {}) as Record<string, any>;
+    const tier = decision.capacity_tier ?? capacity.capacity_tier;
+    if (tier !== "reduced" && tier !== "insufficient") return false;
+
+    const ratio =
+      typeof capacity.peak_memory_budget_ratio === "number"
+        ? capacity.peak_memory_budget_ratio
+        : summary.memory_runtime?.peak_memory_budget_ratio;
+    const signature = capacity.capacity_error_signature;
+    const recommended =
+      capacity.recommended_reduced_setting ??
+      summary.step12_context?.recommended_reduced_setting ??
+      "halve spatial dims and/or frames (e.g. 480x832 x 49 frames)";
+    const workflowName = path.basename(task.workflowPath).replace(/\.json$/i, "");
+    const ratioPct = typeof ratio === "number" ? `${Math.round(ratio * 100)}%` : undefined;
+
+    const choices = [
+      "Accept reduced tier — run GUI acceptance at the recommended reduced setting",
+      "Hardware escalation — full size needs a larger / multi-GPU node",
+      "Hard stop — stop the migration here"
+    ];
+    const question =
+      `**Step 08 — full-size capacity decision for \`${workflowName}\`.**\n\n` +
+      `The full-size capacity probe classified this workflow as **\`${tier}\`** on this GPU` +
+      (ratioPct ? ` (peak VRAM ≈ ${ratioPct} of usable budget${signature ? `, ${signature}` : ""})` : "") +
+      `.\n\nFull size does not fit reliably here. Choose how to proceed:\n\n` +
+      `1. **Accept reduced tier** — Step 12 GUI acceptance runs at the recommended reduced setting (${recommended}); delivered as reduced-tier, **NOT full-size customer-ready**.\n` +
+      `2. **Hardware escalation** — stop here; full-size customer-ready needs a larger / multi-GPU node.\n` +
+      `3. **Hard stop** — stop the migration.`;
+
+    await this.updateStepAndPersist(task.id, step.id, "waiting_for_human", {
+      summary: `Step 08 full-size capacity is '${tier}'. Choose: accept reduced tier / hardware escalation / hard stop.`,
+      error: undefined
+    });
+
+    const data: QuestionEventData = {
+      question,
+      choices,
+      allowFreeform: true,
+      blockingReason: "capacity_policy",
+      capacityTier: tier,
+      ...(typeof ratio === "number" ? { peakMemoryBudgetRatio: ratio } : {}),
+      ...(recommended ? { recommendedReducedSetting: recommended } : {})
+    };
+    await this.emit({
+      taskId: task.id,
+      stepId: step.id,
+      type: "human_question",
+      message: `Step 08 capacity decision: full size is '${tier}' on this GPU — choose reduced tier / hardware escalation / hard stop.`,
+      data
+    });
+    return true;
+  }
+
+  private async patchStep08CapacityDecision(
+    task: MigrationTask,
+    outcome: "reduced" | "escalation" | "hard_stop",
+    notes: string
+  ): Promise<void> {
+    const summaryPath = path.join(task.artifactPath, "08-full-validation-summary.json");
+    let summary: Record<string, unknown> = {};
+    try {
+      summary = JSON.parse(await fs.readFile(summaryPath, "utf8"));
+    } catch {
+      summary = {};
+    }
+    summary.capacity_decision = {
+      outcome,
+      notes,
+      decided_at: new Date().toISOString()
+    };
+    await fs.writeFile(summaryPath, JSON.stringify(summary, null, 2) + "\n", "utf8");
+  }
+
+  /**
+   * Routes the operator's Step 08 capacity decision. Reduced-tier acceptance
+   * completes Step 08 and lets the migration proceed (Step 12 runs the reduced
+   * tier via 08's step12_context); hardware escalation / hard stop terminate the
+   * task as a classified capacity hard stop. Mirrors applyStep12AcceptanceDecision.
+   */
+  private async applyStep08CapacityDecision(input: {
+    task: MigrationTask;
+    decision: HumanDecision;
+  }): Promise<boolean> {
+    const { task, decision } = input;
+    const raw = decision.answer ?? "";
+    const firstLine = raw.split("\n")[0];
+    const answer = firstLine.toLowerCase();
+    // Order matters: escalation/stop before the bare "reduced/accept" so a
+    // "escalate to bigger node" note isn't misread as acceptance.
+    let outcome: "reduced" | "escalation" | "hard_stop" | undefined;
+    if (/escalat|larger|multi.?gpu|bigger|hardware|more\s*vram/.test(answer)) {
+      outcome = "escalation";
+    } else if (/hard\s*stop|\bstop\b|abort|halt|cancel/.test(answer)) {
+      outcome = "hard_stop";
+    } else if (/reduced|accept|proceed|480|lower|smaller/.test(answer)) {
+      outcome = "reduced";
+    }
+    if (!outcome) return false;
+
+    const noteBody = raw.slice(firstLine.length).trim();
+    const notes = redactSensitiveText(noteBody || firstLine);
+    await this.patchStep08CapacityDecision(task, outcome, notes);
+
+    if (outcome === "reduced") {
+      const summary =
+        `Step 08 capacity: operator ACCEPTED the reduced tier. Step 12 will run GUI acceptance at the ` +
+        `recommended reduced setting; delivery is reduced-tier, NOT full-size customer-ready.` +
+        (notes ? ` Notes: ${notes}` : "");
+      await this.updateStepAndPersist(task.id, "08", "completed", { summary, error: undefined });
+      await this.emit({
+        taskId: task.id,
+        stepId: "08",
+        type: "step_completed",
+        message: summary,
+        data: { capacity_decision: outcome, notes, boundary: "reduced-tier; not full-size customer-ready" }
+      });
+      return true;
+    }
+
+    const reason =
+      outcome === "escalation"
+        ? `Step 08 capacity HARD STOP: operator chose hardware escalation. Full-size customer-ready requires a larger / multi-GPU node.${notes ? ` Notes: ${notes}` : ""}`
+        : `Step 08 capacity HARD STOP: operator stopped the migration.${notes ? ` Notes: ${notes}` : ""}`;
+    await this.updateStepAndPersist(task.id, "08", "hard_stopped", { summary: reason, error: reason });
+    await this.emit({
+      taskId: task.id,
+      stepId: "08",
+      type: "hard_stop",
+      message: reason,
+      data: { capacity_decision: outcome, notes }
+    });
+    return true;
   }
 
   /**
