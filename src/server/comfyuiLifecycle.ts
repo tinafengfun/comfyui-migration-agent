@@ -133,10 +133,45 @@ export async function stopComfyUi(node: GpuNode): Promise<void> {
  * days-long-running container (docker inspect: --entrypoint venv_python,
  * comfyui_root bind-mounted at /comfyui, --net=host).
  */
-export function buildDockerStartScript(node: GpuNode, port: number, listen: string, containerName: string): string {
+/**
+ * Default ComfyUI VRAM launch flags (level 0 of the escalation ladder). Kept as
+ * the historical `--reserve-vram 1`.
+ */
+export const DEFAULT_VRAM_FLAGS: readonly string[] = ["--reserve-vram", "1"];
+
+/**
+ * Lossless VRAM-reduction escalation ladder. Each level only changes model
+ * placement/scheduling (sequential offload), never the computation, so the
+ * output is identical -- just slower. The orchestrator escalates a step through
+ * these on a capacity OOM BEFORE asking the operator for the lossy reduced tier
+ * (resolution/frames). See skills/capacity-vram-mitigation-ladder.md.
+ *   L0: default (reserve-vram only)
+ *   L1: --lowvram  (sequential load + offload-after-use)
+ *   L2: --novram   (maximal offload; everything streamed)
+ */
+export const VRAM_ESCALATION_LADDER: readonly (readonly string[])[] = [
+  DEFAULT_VRAM_FLAGS,
+  [...DEFAULT_VRAM_FLAGS, "--lowvram"],
+  [...DEFAULT_VRAM_FLAGS, "--novram"]
+];
+
+/** Resolve the launch flags to use: explicit override → node config → default. */
+function resolveVramFlags(node: GpuNode, vramFlags?: readonly string[]): string[] {
+  const flags = vramFlags ?? node.launch_flags ?? DEFAULT_VRAM_FLAGS;
+  return [...flags];
+}
+
+export function buildDockerStartScript(
+  node: GpuNode,
+  port: number,
+  listen: string,
+  containerName: string,
+  vramFlags?: readonly string[]
+): string {
   if (!node.docker_image) throw new Error(`runtime=docker but node ${node.name} has no docker_image configured`);
   if (!node.venv_python) throw new Error(`runtime=docker but node ${node.name} has no venv_python configured`);
   const nfsRoot = resolveNfsShareRoot(node);
+  const flags = resolveVramFlags(node, vramFlags).join(" ");
   return (
     `#!/usr/bin/env bash\n` +
     `set -e\n` +
@@ -163,7 +198,7 @@ export function buildDockerStartScript(node: GpuNode, port: number, listen: stri
     // sequential fp8 offload recipe relies on ComfyUI offloading a model to make
     // room for the next stage. --cpu-vae is intentionally NOT passed -- the VAE runs
     // on XPU and ComfyUI auto-falls-back to tiled decode if a full decode would OOM.
-    `  /comfyui/main.py --port ${port} --listen ${listen} --reserve-vram 1\n` +
+    `  /comfyui/main.py --port ${port} --listen ${listen} ${flags}\n` +
     `nohup docker logs -f '${containerName}' > /tmp/comfyui-${port}.log 2>&1 < /dev/null &\n`
   );
 }
@@ -172,9 +207,9 @@ export function defaultContainerName(node: GpuNode): string {
   return `comfyui-${node.name}`.replace(/[^a-zA-Z0-9_.-]/g, "-");
 }
 
-async function startDocker(node: GpuNode, port: number, listen: string, containerName: string): Promise<void> {
+async function startDocker(node: GpuNode, port: number, listen: string, containerName: string, vramFlags?: readonly string[]): Promise<void> {
   const scriptPath = `/tmp/start-comfyui-docker-${port}.sh`;
-  const body = buildDockerStartScript(node, port, listen, containerName);
+  const body = buildDockerStartScript(node, port, listen, containerName, vramFlags);
   const b64 = Buffer.from(body).toString("base64");
   if (node.kind === "ssh") {
     await execFile("ssh", [...sshBase(node), `echo ${b64} | base64 -d > ${scriptPath} && chmod +x ${scriptPath}`], { timeout: 30_000 });
@@ -185,8 +220,9 @@ async function startDocker(node: GpuNode, port: number, listen: string, containe
   }
 }
 
-async function startBareMetal(node: GpuNode, port: number, listen: string): Promise<void> {
+async function startBareMetal(node: GpuNode, port: number, listen: string, vramFlags?: readonly string[]): Promise<void> {
   const scriptPath = `/tmp/start-comfyui-${port}.sh`;
+  const flags = resolveVramFlags(node, vramFlags).join(" ");
   const body =
     `#!/usr/bin/env bash\n` +
     `[ -f ~/.proxyrc ] && . ~/.proxyrc 2>/dev/null || true\n` +
@@ -195,7 +231,7 @@ async function startBareMetal(node: GpuNode, port: number, listen: string): Prom
     `cd '${node.comfyui_root}' || exit 3\n` +
     `export OMNI_FP8_KEEP_ON_MOVE=1\n` +
     (node.attn_backend ? `export OMNI_ATTN_BACKEND=${shellQuote(node.attn_backend)}\n` : ``) +
-    `exec '${node.venv_python}' main.py --port ${port} --listen ${listen} --reserve-vram 1 > /tmp/comfyui-${port}.log 2>&1 < /dev/null\n`;
+    `exec '${node.venv_python}' main.py --port ${port} --listen ${listen} ${flags} > /tmp/comfyui-${port}.log 2>&1 < /dev/null\n`;
   const b64 = Buffer.from(body).toString("base64");
   if (node.kind === "ssh") {
     await execFile("ssh", [...sshBase(node), `echo ${b64} | base64 -d > ${scriptPath} && chmod +x ${scriptPath}`], { timeout: 30_000 });
@@ -207,12 +243,18 @@ async function startBareMetal(node: GpuNode, port: number, listen: string): Prom
 }
 
 /** Launch a fresh ComfyUI (docker or bare-metal per node.runtime) -- never improvises. */
-export async function startComfyUi(node: GpuNode, port: number, listen: string, containerName?: string): Promise<void> {
+export async function startComfyUi(
+  node: GpuNode,
+  port: number,
+  listen: string,
+  containerName?: string,
+  vramFlags?: readonly string[]
+): Promise<void> {
   if (node.runtime === "docker") {
-    await startDocker(node, port, listen, containerName ?? defaultContainerName(node));
+    await startDocker(node, port, listen, containerName ?? defaultContainerName(node), vramFlags);
     return;
   }
-  await startBareMetal(node, port, listen);
+  await startBareMetal(node, port, listen, vramFlags);
 }
 
 export interface EnsureComfyUiUpResult {
@@ -240,8 +282,33 @@ export async function ensureComfyUiUp(input: {
   /** e.g. `comfyui-${TASK_ID}` when invoked from a migration step. */
   container?: string;
   waitSec?: number;
+  /**
+   * VRAM launch flags to use if a fresh launch happens (a level of
+   * VRAM_ESCALATION_LADDER). Defaults to the node/default flags.
+   */
+  vramFlags?: readonly string[];
+  /**
+   * Force a fresh relaunch with `vramFlags` even if ComfyUI is already up or a
+   * container is running -- used by the orchestrator's capacity-retry ladder to
+   * apply escalated flags (a plain restart/`docker start` reuses the old flags).
+   */
+  forceRelaunch?: boolean;
 }): Promise<EnsureComfyUiUpResult> {
-  const { node, apiUrl, waitSec = 150 } = input;
+  const { node, apiUrl, waitSec = 150, vramFlags, forceRelaunch = false } = input;
+
+  // Capacity-ladder escalation: tear down whatever is running and relaunch fresh
+  // with the escalated VRAM flags (restart/`docker start` would reuse old flags).
+  if (forceRelaunch) {
+    if (node.runtime === "docker" && input.container) {
+      await dockerOnNode(node, ["rm", "-f", input.container], 60_000);
+    }
+    const listen = node.kind === "ssh" ? "0.0.0.0" : "127.0.0.1";
+    await startComfyUi(node, node.api_port, listen, input.container, vramFlags);
+    const up = await waitUp(apiUrl, waitSec);
+    return up
+      ? { ok: true, detail: `relaunched fresh with vram flags [${resolveVramFlags(node, vramFlags).join(" ")}]`, action: "started_fresh" }
+      : { ok: false, detail: `forced relaunch did not bring up /system_stats within ${waitSec}s`, action: "failed" };
+  }
 
   if (await objectInfoUp(apiUrl)) {
     return { ok: true, detail: "already reachable", action: "already_up" };
@@ -268,7 +335,7 @@ export async function ensureComfyUiUp(input: {
       }
     }
     const listen = node.kind === "ssh" ? "0.0.0.0" : "127.0.0.1";
-    await startComfyUi(node, node.api_port, listen, input.container);
+    await startComfyUi(node, node.api_port, listen, input.container, vramFlags);
     const up = await waitUp(apiUrl, waitSec);
     return up
       ? { ok: true, detail: "launched a fresh container via buildDockerStartScript", action: "started_fresh" }
@@ -276,7 +343,7 @@ export async function ensureComfyUiUp(input: {
   }
 
   const listen = node.kind === "ssh" ? "0.0.0.0" : "127.0.0.1";
-  await startComfyUi(node, node.api_port, listen);
+  await startComfyUi(node, node.api_port, listen, undefined, vramFlags);
   const up = await waitUp(apiUrl, waitSec);
   return up
     ? { ok: true, detail: "launched a fresh bare-metal process", action: "started_fresh" }

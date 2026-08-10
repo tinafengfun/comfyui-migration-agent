@@ -67,6 +67,20 @@ describe("buildDockerStartScript", () => {
     expect(script).toContain("-e OMNI_ATTN_BACKEND=torch");
   });
 
+  it("appends escalated lossless VRAM flags from VRAM_ESCALATION_LADDER (capacity retry)", async () => {
+    const { buildDockerStartScript, VRAM_ESCALATION_LADDER } = await import("./comfyuiLifecycle");
+    const l0 = buildDockerStartScript(dockerNode(), 8188, "127.0.0.1", "c1", VRAM_ESCALATION_LADDER[0]);
+    expect(l0).toContain("--port 8188 --listen 127.0.0.1 --reserve-vram 1");
+    expect(l0).not.toContain("--lowvram");
+
+    const l1 = buildDockerStartScript(dockerNode(), 8188, "127.0.0.1", "c1", VRAM_ESCALATION_LADDER[1]);
+    expect(l1).toContain("--reserve-vram 1 --lowvram");
+
+    const l2 = buildDockerStartScript(dockerNode(), 8188, "127.0.0.1", "c1", VRAM_ESCALATION_LADDER[2]);
+    expect(l2).toContain("--reserve-vram 1 --novram");
+    expect(VRAM_ESCALATION_LADDER).toHaveLength(3);
+  });
+
   it("omits the nfs_share bind mount when the node has no shared NFS tree", async () => {
     const { buildDockerStartScript } = await import("./comfyuiLifecycle");
     const script = buildDockerStartScript(

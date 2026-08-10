@@ -152,3 +152,33 @@ describe("Step 08 capacity decision gate", () => {
     expect(updated?.steps.find((s) => s.id === "08")?.status).toBe("hard_stopped");
   });
 });
+
+describe("capacitySignalForStep (drives the lossless VRAM-escalation ladder)", () => {
+  it("Step 08: true only when capacity_tier is 'insufficient' (a hard OOM)", async () => {
+    const { orchestrator, task } = await makeOrchestratorWithTask("sig08");
+    await writeSummary(task, "insufficient");
+    expect(await (orchestrator as any).capacitySignalForStep(task, "08")).toBe(true);
+    await writeSummary(task, "reduced"); // completed-over-budget -> gate, not ladder
+    expect(await (orchestrator as any).capacitySignalForStep(task, "08")).toBe(false);
+    await writeSummary(task, "ok");
+    expect(await (orchestrator as any).capacitySignalForStep(task, "08")).toBe(false);
+  });
+
+  it("Step 07: true when the branch-smoke summary flags capacity_suspected", async () => {
+    const { orchestrator, task } = await makeOrchestratorWithTask("sig07");
+    await ensureDir(task.artifactPath);
+    await fs.writeFile(
+      path.join(task.artifactPath, "07-branch-smoke-summary.json"),
+      JSON.stringify({ capacity_suspected: true, capacity_signatures: ["device_lost"] }),
+      "utf8"
+    );
+    expect(await (orchestrator as any).capacitySignalForStep(task, "07")).toBe(true);
+
+    await fs.writeFile(
+      path.join(task.artifactPath, "07-branch-smoke-summary.json"),
+      JSON.stringify({ capacity_suspected: false }),
+      "utf8"
+    );
+    expect(await (orchestrator as any).capacitySignalForStep(task, "07")).toBe(false);
+  });
+});

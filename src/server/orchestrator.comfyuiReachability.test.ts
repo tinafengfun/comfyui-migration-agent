@@ -7,7 +7,9 @@ import { StateStore } from "./state";
 
 const ensureComfyUiUpMock = vi.fn();
 vi.mock("./comfyuiLifecycle", () => ({
-  ensureComfyUiUp: (...args: any[]) => ensureComfyUiUpMock(...args)
+  ensureComfyUiUp: (...args: any[]) => ensureComfyUiUpMock(...args),
+  // Orchestrator also imports the ladder constant; provide it in the mock.
+  VRAM_ESCALATION_LADDER: [["--reserve-vram", "1"], ["--reserve-vram", "1", "--lowvram"], ["--reserve-vram", "1", "--novram"]]
 }));
 
 // Integration tests for the automatic pre-Step07/08 reachability check wired

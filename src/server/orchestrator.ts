@@ -116,7 +116,7 @@ import {
   resolveNfsShareRoot,
   type GpuNode
 } from "./gpuNodes";
-import { ensureComfyUiUp } from "./comfyuiLifecycle";
+import { ensureComfyUiUp, VRAM_ESCALATION_LADDER } from "./comfyuiLifecycle";
 import { extractNodeModelPairs, findMatchingRecipes } from "./recipeInjector";
 import { archiveAcceptedWorkflowIfNeeded, archiveTaskSnapshot } from "./workflowArchive";
 import { syncGuiWorkflowToComfyUIServer } from "./guiWorkflowSync";
@@ -219,6 +219,15 @@ export class MigrationOrchestrator {
   // (held while an in-flight SDK call winds down) must not block new work.
   private readonly hardStoppedTaskIds = new Set<string>();
   private readonly sdkTimeoutRetries = new Map<string, number>();
+  /**
+   * Per-task VRAM escalation level (index into VRAM_ESCALATION_LADDER). Bumped by
+   * the capacity-retry ladder when Step 07/08 hits a capacity OOM: the step is
+   * re-run with ComfyUI relaunched under stronger lossless offload flags
+   * (--lowvram, then --novram) before the operator is ever asked for the lossy
+   * reduced tier. Keyed by taskId; in-memory (resets on restart, like the retry
+   * counters above).
+   */
+  private readonly vramEscalationLevel = new Map<string, number>();
 
   constructor(
     private readonly config: AppConfig,
@@ -448,7 +457,7 @@ export class MigrationOrchestrator {
     taskId: string,
     stepId: string,
     resumeContext?: Record<string, unknown>,
-    options: { pauseOnHumanGate?: boolean } = {}
+    options: { pauseOnHumanGate?: boolean; forceRerun?: boolean } = {}
   ): Promise<void> {
     const runKey = this.stepRunKey(taskId, stepId);
     if (this.activeStepRuns.has(runKey)) {
@@ -487,7 +496,13 @@ export class MigrationOrchestrator {
             complete: false,
             reason: `Resuming with ${pendingResumeDecisions.length} pending human decision(s) -- skipping fast-path artifact completion so the SDK can process them.`
           }
-        : await checkRequiredArtifactCompletion(task, step);
+        : options.forceRerun
+          ? {
+              complete: false,
+              reason:
+                "Capacity-retry ladder re-run -- skipping fast-path artifact completion so the step actually re-runs against ComfyUI relaunched with stronger VRAM offload."
+            }
+          : await checkRequiredArtifactCompletion(task, step);
     this.activeStepRuns.add(runKey);
 
     // See the retry branch below and the `finally` block at the end of this
@@ -1016,7 +1031,19 @@ export class MigrationOrchestrator {
       if (node) {
         const apiUrl = nodeApiUrl(node);
         const containerName = `comfyui-${taskId}`;
-        const ensureResult = await ensureComfyUiUp({ node, apiUrl, container: containerName, waitSec: 150 }).catch((err) => ({
+        // Capacity-retry ladder: launch ComfyUI at the current VRAM escalation
+        // level for this task. Level 0 = default flags (reuse a healthy server);
+        // level > 0 = force a fresh relaunch with stronger lossless offload flags.
+        const vramLevel = Math.min(this.vramEscalationLevel.get(taskId) ?? 0, VRAM_ESCALATION_LADDER.length - 1);
+        const vramFlags = VRAM_ESCALATION_LADDER[vramLevel];
+        const ensureResult = await ensureComfyUiUp({
+          node,
+          apiUrl,
+          container: containerName,
+          waitSec: 150,
+          vramFlags,
+          forceRelaunch: vramLevel > 0
+        }).catch((err) => ({
           ok: false as const,
           action: "failed" as const,
           detail: `ensureComfyUiUp threw: ${err instanceof Error ? err.message : String(err)}`
@@ -1125,7 +1152,9 @@ export class MigrationOrchestrator {
 
     // Step 08 full-size capacity gate: re-surface the reduced/insufficient
     // capacity decision panel on resume/restart, and never auto-complete past it.
-    if (stepId === "08" && (await this.pauseIfStep08CapacityGate(task, step))) return;
+    // Skipped on a capacity-retry ladder re-run (forceRerun) -- the stale summary
+    // must not gate before the escalated re-run actually happens.
+    if (stepId === "08" && !options.forceRerun && (await this.pauseIfStep08CapacityGate(task, step))) return;
 
     if (preRunArtifactCompletion.complete) {
       const summary = `Step ${stepId} completed from existing required artifact. ${preRunArtifactCompletion.reason}`;
@@ -1229,6 +1258,45 @@ export class MigrationOrchestrator {
       }
       if (stepId === "13" && (await this.pauseIfAgentImprovementApprovalNeeded(task, step))) return;
       if (stepId === "12" && (await this.pauseIfStep12AcceptanceGate(task, step))) return;
+      // Capacity-retry ladder (auto lossless VRAM offload) BEFORE the human gate:
+      // if Step 07/08 hit an XPU capacity OOM, relaunch ComfyUI with stronger
+      // lossless offload flags (--lowvram, then --novram) and re-run the step.
+      // Only when the ladder is exhausted does the operator get asked for the
+      // lossy reduced tier (Step 08 gate) / does Step 07 hard-stop.
+      if (stepId === "07" || stepId === "08") {
+        if (await this.capacitySignalForStep(task, stepId)) {
+          const level = this.vramEscalationLevel.get(taskId) ?? 0;
+          if (level < VRAM_ESCALATION_LADDER.length - 1) {
+            const nextLevel = level + 1;
+            this.vramEscalationLevel.set(taskId, nextLevel);
+            const nextFlags = VRAM_ESCALATION_LADDER[nextLevel].join(" ");
+            await this.emit({
+              taskId,
+              stepId,
+              type: "progress",
+              message: `Capacity OOM at Step ${stepId} — auto-retrying with stronger lossless VRAM offload (level ${nextLevel}: ${nextFlags}) before asking for a reduced tier.`
+            });
+            await this.updateStepAndPersist(taskId, stepId, "running");
+            this.activeStepRuns.delete(runKey);
+            isRetrying = true;
+            return this.runStep(taskId, stepId, undefined, { ...options, forceRerun: true });
+          }
+          if (stepId === "07") {
+            // Branch smoke still OOMs after exhausting lossless offload -> genuine
+            // capacity limit even at reduced smoke settings.
+            await this.terminateWithHardStop({
+              taskId,
+              stepId,
+              reason:
+                "Step 07 branch smoke still hit an XPU capacity limit after exhausting lossless VRAM offload (--lowvram, --novram). The workflow is too large for this GPU even at reduced smoke settings; a reduced-fidelity tier (lower resolution/frames) or a larger/multi-GPU node is required.",
+              improvementStrategy:
+                "Reduce resolution/frame count for a restricted tier, or escalate to a larger/multi-GPU node."
+            });
+            return;
+          }
+          // Step 08 ladder exhausted -> fall through to the capacity decision gate.
+        }
+      }
       // Never let a Step 08 capacity hard stop silently complete: if the 08 summary
       // classifies full-size capacity as reduced/insufficient, present the operator
       // decision panel instead of marking the step completed.
@@ -3447,6 +3515,31 @@ export class MigrationOrchestrator {
     } catch {
       return undefined;
     }
+  }
+
+  /**
+   * True if this Step 07/08 run hit a hard XPU capacity OOM (not merely a
+   * tight/over-budget completion). Drives the lossless VRAM-escalation ladder.
+   *   Step 08: completion_decision.capacity_tier === "insufficient" (a hard
+   *            capacity error/crash; "reduced"/"tight" are handled by the gate).
+   *   Step 07: 07-branch-smoke-summary.json capacity_suspected === true.
+   */
+  private async capacitySignalForStep(task: MigrationTask, stepId: string): Promise<boolean> {
+    if (stepId === "08") {
+      const summary = await this.readStep08Summary(task);
+      const tier = summary?.completion_decision?.capacity_tier ?? summary?.capacity_classification?.capacity_tier;
+      return tier === "insufficient";
+    }
+    if (stepId === "07") {
+      try {
+        const raw = await fs.readFile(path.join(task.artifactPath, "07-branch-smoke-summary.json"), "utf8");
+        const summary = JSON.parse(raw) as Record<string, any>;
+        return summary.capacity_suspected === true;
+      } catch {
+        return false;
+      }
+    }
+    return false;
   }
 
   /**

@@ -122,6 +122,38 @@ def wait_history(api_url: str, prompt_id: str, timeout_seconds: int, poll_interv
     return {"ok": False, "error": f"timeout_after_{timeout_seconds}s"}
 
 
+# XPU/oneDNN capacity-edge error signatures (kept in sync with step08's list).
+# A branch that fails with one of these -- or crash-to-deaths (history never
+# appears, the DEVICE_LOST case) -- is a capacity OOM, which the orchestrator's
+# lossless VRAM-escalation ladder acts on before asking the operator for a
+# reduced tier. See skills/capacity-vram-mitigation-ladder.md.
+CAPACITY_ERROR_SIGNATURES = (
+    "out_of_device_memory",
+    "out of memory",
+    "device_lost",
+    "out_of_resources",
+    "could not create a primitive",
+    "level_zero backend failed",
+    "error: 39",
+    "error: 20",
+    "error: 40",
+    "cuda out of memory",
+    "xpu out of memory",
+    "allocation failed",
+)
+
+
+def scan_capacity_signature(payload: Any) -> str | None:
+    """Return the first capacity-error signature found in an arbitrary payload."""
+    if payload is None:
+        return None
+    haystack = json.dumps(payload, ensure_ascii=False).lower()
+    for signature in CAPACITY_ERROR_SIGNATURES:
+        if signature in haystack:
+            return signature
+    return None
+
+
 def apply_reduced_settings(
     prompt: dict[str, Any], branch_id: str, smoke_seed: int
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
@@ -184,6 +216,16 @@ def apply_reduced_settings(
             set_input(node_id, "batch_size", 1, "Step 07 smoke keeps SeedVR2 batch minimal")
         elif class_type == "Seed (rgthree)":
             set_input(node_id, "seed", smoke_seed, "Step 07 smoke fixes seed node without bypassing it")
+        elif class_type in {"VHS_LoadVideo", "VHS_LoadVideoPath"}:
+            # Video-edit workflows drive frame count (and peak VRAM) via the input
+            # video's frame_load_cap, NOT a latent-resolution node -- so the reductions
+            # above miss them and branch smoke would run near-full-size (the real OOM
+            # that hung Step 07). Cap frames hard for a reachability smoke.
+            if isinstance(inputs.get("frame_load_cap"), (int, float)) and inputs.get("frame_load_cap", 0) > 16:
+                set_input(node_id, "frame_load_cap", 16, "Step 07 smoke caps loaded video frames (reachability, not full-length)")
+            elif inputs.get("frame_load_cap") in (0, None):
+                # 0 = load all frames; pin to a small cap for smoke.
+                set_input(node_id, "frame_load_cap", 16, "Step 07 smoke caps loaded video frames (was unbounded)")
     for node_id, node in prompt.items():
         if node.get("class_type") in {"SaveImage", "PreviewImage"}:
             inputs = node.setdefault("inputs", {})
@@ -331,6 +373,7 @@ def run_branch(
             outputs_exist = bool(output_files) and all(item.get("exists") and item.get("size_bytes", 0) > 0 for item in output_files)
             passed = completed and status_str == "success" and history_summary["has_outputs"] and outputs_exist
             cache_assisted = passed and bool(history_summary["cached_nodes"])
+            capacity_signature = None if passed else scan_capacity_signature(history_result["history"])
             summary = {
                 "branch": slug,
                 "status": "cache_assisted_pass" if cache_assisted else ("passed" if passed else "failed_runtime"),
@@ -340,8 +383,14 @@ def run_branch(
                 "history_summary": history_summary,
                 "output_files": history_summary["output_files"],
                 "gap": None if passed else "history did not report success with non-empty output files",
+                "capacity_signature": capacity_signature,
+                "capacity_suspected": bool(capacity_signature),
             }
         else:
+            # History never appeared. On a reduced-settings smoke a timeout most
+            # likely means ComfyUI crashed (DEVICE_LOST / OOM crash-to-death), not
+            # mere slowness -- treat as capacity-suspected so the orchestrator can
+            # escalate lossless VRAM offload and retry.
             summary = {
                 "branch": slug,
                 "status": "timeout",
@@ -351,6 +400,8 @@ def run_branch(
                 "history_summary": None,
                 "output_files": [],
                 "gap": history_result["error"],
+                "capacity_signature": scan_capacity_signature(history_result),
+                "capacity_suspected": True,
             }
         write_json(summary_path, summary)
 
@@ -484,6 +535,8 @@ def main() -> int:
         "branches_run": len(summaries),
         "smoke_seed": args.smoke_seed,
         "branch_summaries": summaries,
+        "capacity_suspected": any(item.get("capacity_suspected") for item in summaries),
+        "capacity_signatures": sorted({item.get("capacity_signature") for item in summaries if item.get("capacity_signature")}),
         "completion_decision": decision,
         "step08_context": {
             "workspace": str(workspace),

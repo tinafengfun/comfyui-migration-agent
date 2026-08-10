@@ -295,18 +295,17 @@ export class CopilotSdkRunner {
             20 * 60 * 1000
         : process.env.MIGRATION_AGENT_STEP_TIMEOUT_MS ?? defaultTimeout
     );
-    // No total-length cap by default: real steps (07/08/09 in particular) run
-    // actual GPU inference/benchmarks and can legitimately take well over an
-    // hour. A flat wall-clock ceiling here would kill a session that's still
-    // actively working. Staleness is instead caught by noProgressTimeoutMs
-    // above, which resets on every tool call / streaming delta -- a session
-    // that's truly stuck (not just slow) still fails fast. Set
-    // MIGRATION_AGENT_STEP_MAX_MS / MIGRATION_AGENT_PHASE1_MAX_MS explicitly
-    // if a hard total-length cap is ever wanted again.
+    // Finite absolute backstop (default 2h, env-overridable). Real steps
+    // (07/08/09) run GPU inference/benchmarks and can take well over an hour, so
+    // this cap is generous -- it exists only so a session can NEVER hang forever
+    // (the 44-min "stuck against dead ComfyUI" incident had maxRuntimeMs=0 =
+    // disabled). Fast staleness is caught earlier by noProgressTimeoutMs (30 min)
+    // and the churn-aware stuck detector (10 min) in createProgressWatchdog.
+    const DEFAULT_MAX_RUNTIME_MS = 2 * 60 * 60 * 1000;
     const maxRuntimeMs = Number(
       isPhase1Driver
-        ? process.env.MIGRATION_AGENT_PHASE1_MAX_MS ?? process.env.MIGRATION_AGENT_STEP_MAX_MS ?? 0
-        : process.env.MIGRATION_AGENT_STEP_MAX_MS ?? 0
+        ? process.env.MIGRATION_AGENT_PHASE1_MAX_MS ?? process.env.MIGRATION_AGENT_STEP_MAX_MS ?? DEFAULT_MAX_RUNTIME_MS
+        : process.env.MIGRATION_AGENT_STEP_MAX_MS ?? DEFAULT_MAX_RUNTIME_MS
     );
     const sdkIdleTimeoutMs = Number(
       process.env.MIGRATION_AGENT_SDK_IDLE_TIMEOUT_MS ??
@@ -947,14 +946,38 @@ export function shouldEmitSdkProgressEvent(
   return Boolean(eventType && /\b(error|failed|failure)\b/i.test(eventType));
 }
 
+/**
+ * Progress "reasons" that indicate the session is CHURNING against an
+ * unreachable/broken dependency (almost always a crashed ComfyUI) rather than
+ * making real forward progress. These reset the ordinary no-progress timer
+ * (they're technically tool activity), so a session that OOM-crashed ComfyUI and
+ * is now polling a dead endpoint would never trip it -- the real 44-min hang we
+ * saw. When ALL recent activity is churn, the stuck detector fires instead.
+ */
+const STUCK_CHURN_RE =
+  /econnrefused|connection refused|could ?n[o']?t connect|connection reset|connection error|fetch failed|network error|unreachable|not reachable|refused to connect|system_stats.*(fail|timeout|refus)|\bur_result_error|level_zero backend failed|http.*\b000\b|comfyui.*(down|not running|unreachable|dead)|econnreset|etimedout|socket hang up/i;
+
 export function createProgressWatchdog(input: {
   stepId: string;
   noProgressTimeoutMs: number;
   maxRuntimeMs?: number;
+  /**
+   * If the ONLY progress for this long is churn against a dead dependency (see
+   * STUCK_CHURN_RE), trip with SdkStepTimeoutError so the orchestrator retries
+   * (its pre-step ensureComfyUiUp relaunches the crashed ComfyUI). Defaults to
+   * MIGRATION_AGENT_SDK_STUCK_TIMEOUT_MS or 10 min.
+   */
+  stuckTimeoutMs?: number;
 }): ProgressWatchdog {
   const startedAt = Date.now();
   let lastProgressAt = startedAt;
+  // Only advanced by NON-churn (genuine forward) progress.
+  let lastRealProgressAt = startedAt;
+  let churning = false;
   let lastProgressReason = "SDK session started";
+  const stuckTimeoutMs =
+    input.stuckTimeoutMs ??
+    Number(process.env.MIGRATION_AGENT_SDK_STUCK_TIMEOUT_MS ?? 10 * 60 * 1000);
   const checkIntervalMs = Math.max(
     1_000,
     Math.min(30_000, Math.floor(input.noProgressTimeoutMs / 10))
@@ -962,8 +985,15 @@ export function createProgressWatchdog(input: {
 
   return {
     markProgress(reason: string) {
-      lastProgressAt = Date.now();
+      const now = Date.now();
+      lastProgressAt = now;
       lastProgressReason = reason;
+      if (STUCK_CHURN_RE.test(reason)) {
+        churning = true;
+      } else {
+        lastRealProgressAt = now;
+        churning = false;
+      }
     },
     async watch<T>(promise: Promise<T>): Promise<T> {
       let timer: NodeJS.Timeout | undefined;
@@ -979,6 +1009,20 @@ export function createProgressWatchdog(input: {
                     input.stepId,
                     input.noProgressTimeoutMs,
                     lastProgressReason
+                  )
+                );
+                return;
+              }
+              // Stuck-against-dead-dependency: active (tool calls resetting the
+              // no-progress timer) but every recent event is churn and no REAL
+              // progress for stuckTimeoutMs. Trip as a timeout so the step retries
+              // (and ensureComfyUiUp relaunches the crashed ComfyUI first).
+              if (stuckTimeoutMs && churning && now - lastRealProgressAt > stuckTimeoutMs) {
+                reject(
+                  new SdkStepTimeoutError(
+                    input.stepId,
+                    stuckTimeoutMs,
+                    `stuck: only churn against an unreachable dependency for ${Math.round(stuckTimeoutMs / 1000)}s (last: ${lastProgressReason})`
                   )
                 );
                 return;

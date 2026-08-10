@@ -69,7 +69,7 @@ Static model-file sums are an **upper-bound warning, not a measurement**. A summ
 
 1. Do not call branch smoke a full-size success.
 2. Compare runtime memory evidence with theoretical memory reasoning.
-3. Do not retry generic low-vram knobs indefinitely.
+3. Do not retry generic low-vram knobs indefinitely by hand — the orchestrator owns a bounded, deterministic lossless VRAM ladder (`--lowvram` → `--novram`, once each) that runs automatically on a capacity OOM before the operator is asked for the reduced tier (see skills/capacity-vram-mitigation-ladder.md). Write your summary; let the system escalate or gate.
 4. Preserve the highest-fidelity failure case if full success is impossible.
 5. Do not classify a run as source-identical if it uses a runtime-policy prompt variant. Report it as runtime-policy success or failure and keep the original source workflow boundary explicit.
 6. Do not declare a capacity hard stop from summed model file sizes alone. Model file sums are conservative; compare them with actual staged runtime telemetry before deciding.

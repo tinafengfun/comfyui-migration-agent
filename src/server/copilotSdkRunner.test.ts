@@ -70,6 +70,45 @@ describe("Copilot SDK progress watchdog", () => {
     await expect(watched).resolves.toBe("done");
   });
 
+  it("trips the stuck detector when the ONLY progress is churn against a dead dependency", async () => {
+    vi.useFakeTimers();
+    const watchdog = createProgressWatchdog({
+      stepId: "07",
+      noProgressTimeoutMs: 60_000, // long, so the no-progress timer is NOT what fires
+      stuckTimeoutMs: 5_000
+    });
+    const watched = watchdog.watch(new Promise<string>(() => undefined)); // never resolves
+    watched.catch(() => undefined); // avoid unhandled-rejection noise
+
+    // The real 44-min hang: tool calls keep firing (resetting the no-progress
+    // timer) but every one is a connection failure to a crashed ComfyUI.
+    for (let i = 0; i < 6; i++) {
+      watchdog.markProgress("tool completed: curl http://127.0.0.1:8188/system_stats -> connection refused");
+      await vi.advanceTimersByTimeAsync(1_000);
+    }
+    await expect(watched).rejects.toThrow(/stuck|no semantic progress/i);
+  });
+
+  it("does NOT trip the stuck detector when real progress is interleaved with churn", async () => {
+    vi.useFakeTimers();
+    let resolveReal: (value: string) => void = () => undefined;
+    const watchdog = createProgressWatchdog({
+      stepId: "07",
+      noProgressTimeoutMs: 60_000,
+      stuckTimeoutMs: 5_000
+    });
+    const watched = watchdog.watch(new Promise<string>((resolve) => { resolveReal = resolve; }));
+
+    for (let i = 0; i < 6; i++) {
+      watchdog.markProgress("connection refused"); // churn
+      await vi.advanceTimersByTimeAsync(1_000);
+      watchdog.markProgress("wrote 07-branch-smoke-summary.json"); // real progress resets churn
+      await vi.advanceTimersByTimeAsync(1_000);
+    }
+    resolveReal("done");
+    await expect(watched).resolves.toBe("done");
+  });
+
   it("does not persist raw assistant token stream deltas as API progress events", () => {
     expect(
       shouldEmitSdkProgressEvent({
