@@ -210,13 +210,17 @@ describe("effective VRAM level is hardened to disk (carries to Step 12 + survive
   it("accepting the reduced tier hardens BOTH the reduced setting and the vram flags into one config (Step 12 gets both)", async () => {
     const { orchestrator, task } = await makeOrchestratorWithTask("reduced-persist");
     await writeSummary(task, "insufficient"); // 08 summary carries recommended_reduced_setting
-    await (orchestrator as any).persistVramLevel(task, 1, "capacity OOM at Step 08"); // ladder had escalated
+    await (orchestrator as any).persistVramLevel(task, 2, "capacity OOM at Step 08"); // full-size ladder went to --novram
+    (orchestrator as any).vramEscalationLevel.set(task.id, 2);
     const decision = { taskId: task.id, stepId: "08", questionEventId: "q", answer: "Accept reduced tier", wasFreeform: false, decidedAt: new Date().toISOString() };
     await (orchestrator as any).applyStep08CapacityDecision({ task, decision });
 
     const cfg = JSON.parse(await fs.readFile(path.join(task.artifactPath, "effective-run-config.json"), "utf8"));
-    // low-ram config preserved (merge, not overwrite):
+    // The reduced tier caps VRAM at --lowvram (does NOT inherit full-size --novram, which is needlessly slow):
     expect(cfg.vram_flags).toContain("--lowvram");
+    expect(cfg.vram_flags).not.toContain("--novram");
+    expect(cfg.vram_level).toBe(1);
+    expect(await (orchestrator as any).effectiveVramLevel(task.id, task)).toBe(1);
     // low-resolution config hardened:
     expect(cfg.reduced_tier).toBe(true);
     expect(cfg.recommended_reduced_setting).toContain("480x832");

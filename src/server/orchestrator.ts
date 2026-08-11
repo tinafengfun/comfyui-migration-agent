@@ -3758,10 +3758,21 @@ export class MigrationOrchestrator {
         s08?.completion_decision?.capacity?.recommended_reduced_setting ??
         s08?.step12_context?.recommended_reduced_setting ??
         "halve spatial dims and/or frame count (e.g. 480x832 x 49 frames)";
+      // The full-size capacity ladder may have escalated to --novram (level 2),
+      // which streams the whole model every step (~6 min/step). The REDUCED
+      // workflow is much smaller and must NOT inherit that: cap it at --lowvram
+      // (level 1) so the demo runs at a practical speed. If the reduced workflow
+      // still doesn't fit at --lowvram, the ladder re-escalates from there.
+      const REDUCED_TIER_VRAM_LEVEL = 1;
+      const cappedLevel = Math.min(this.vramEscalationLevel.get(task.id) ?? 0, REDUCED_TIER_VRAM_LEVEL);
+      this.vramEscalationLevel.set(task.id, cappedLevel);
       await this.mergeEffectiveRunConfig(task, {
         reduced_tier: true,
         recommended_reduced_setting: recommended,
-        reduced_tier_notes: notes || undefined
+        reduced_tier_notes: notes || undefined,
+        vram_level: cappedLevel,
+        vram_flags: [...VRAM_ESCALATION_LADDER[cappedLevel]],
+        vram_reason: "capped at --lowvram for the reduced tier (full-size --novram would be needlessly slow)"
       });
       const summary =
         `Step 08 capacity: operator ACCEPTED the reduced tier. Step 12 will run GUI acceptance at the ` +
