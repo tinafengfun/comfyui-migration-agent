@@ -490,12 +490,85 @@ def scan_capacity_signature(history_summary: dict[str, Any] | None) -> str | Non
     return None
 
 
+# Inputs whose literal numeric value drives the diffusion resolution / attention
+# token count. CRITICAL: ref_max_size / max_size are the REAL driver in ref-resize
+# video pipelines (e.g. BerniniConditioning) -- the video is resized so its max
+# dimension == ref_max_size, so reducing width/height alone does NOT lower the token
+# count (confirmed live: seq stayed 155440 with 480x832 width/height while
+# ref_max_size=1280 governed the processing resolution). Scan by input NAME so the
+# true driver is caught regardless of which node exposes it.
+RESOLUTION_CAP_INPUTS = ("ref_max_size", "max_size", "max_resolution")
+SPATIAL_INPUTS = ("width", "height")
+FRAME_INPUTS = ("length", "num_frames", "frames", "video_frames", "frame_load_cap", "video_length")
+
+
+def _halve_to_16(value: float) -> int:
+    return max(256, int(round(value / 2 / 16) * 16))
+
+
+def compute_reduced_changes(prompt: dict[str, Any]) -> list[dict[str, Any]]:
+    """Deterministically find the resolution/frame drivers in the prompt and halve
+    them, so the reduced tier actually lowers the attention token count. Returns a
+    list of ``{node_id, input, old, new, kind, class_type}`` edits. Only literal
+    numeric inputs are touched (links are lists and are skipped)."""
+    changes: list[dict[str, Any]] = []
+    for node_id, node in prompt.items():
+        if not isinstance(node, dict):
+            continue
+        inputs = node.get("inputs", {})
+        if not isinstance(inputs, dict):
+            continue
+        class_type = node.get("class_type")
+        for key, val in inputs.items():
+            if isinstance(val, bool) or not isinstance(val, (int, float)):
+                continue
+            kl = key.lower()
+            new: float | int | None = None
+            kind: str | None = None
+            if kl in RESOLUTION_CAP_INPUTS and val > 640:
+                new, kind = 640, "resolution_cap"
+            elif kl in SPATIAL_INPUTS and val >= 640:
+                new, kind = _halve_to_16(val), "spatial"
+            elif kl == "megapixels" and val > 0.3:
+                new, kind = 0.25, "megapixels"
+            elif kl in FRAME_INPUTS and val > 24:
+                new, kind = max(16, int(val) // 2), "frames"
+            if new is not None and new != val:
+                changes.append(
+                    {"node_id": str(node_id), "input": key, "old": val, "new": new, "kind": kind, "class_type": class_type}
+                )
+    return changes
+
+
+def build_reduced_setting(prompt: dict[str, Any]) -> dict[str, Any]:
+    """Structured recommended reduced setting (with deterministic node edits) that the
+    orchestrator applies verbatim to produce the reduced workflow. Targets the REAL
+    token driver (ref_max_size), not just width/height."""
+    changes = compute_reduced_changes(prompt)
+    res = next((c["new"] for c in changes if c["kind"] in ("resolution_cap", "spatial")), None)
+    frames = next((c["new"] for c in changes if c["kind"] == "frames"), None)
+    return {
+        "resolution": f"max_size~{res}" if res else "reduced",
+        "frames": frames,
+        "changes": changes,
+        "rationale": (
+            "Deterministically reduces the resolution/token drivers (including ref_max_size / "
+            "max_size, which govern the attention token count in ref-resize video pipelines) and "
+            "the frame count. Reducing width/height alone is NOT enough when a ref_max_size cap "
+            "governs the processing resolution. Step 12 MUST verify the attention seq/token count "
+            "actually dropped before accepting."
+        ),
+        "note": "480x832 x 49 confirmed clean where 720x1280 x 81 failed on a 30 GB XPU.",
+    }
+
+
 def classify_capacity(
     run_status: str,
     run_level: str,
     success: bool,
     telemetry: dict[str, Any],
     history_summary: dict[str, Any] | None,
+    source_prompt: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Deterministically classify full-size capacity from this Step-08 run.
 
@@ -553,10 +626,12 @@ def classify_capacity(
         "detected_at_step": "08",
         "recommend_reduced_tier": recommend_reduced,
         "recommended_reduced_setting": (
-            "Halve spatial dims and/or frame count until the token count drops well "
-            "under the failing point (e.g. 480x832 x 49 frames ran clean where "
-            "720x1280 x 81 failed on a 30 GB XPU). Step 12 runs GUI acceptance at "
-            "this reduced tier; full-size customer-ready needs a larger/multi-GPU node."
+            (build_reduced_setting(source_prompt) if isinstance(source_prompt, dict) else (
+                "Halve spatial dims and/or frame count until the token count drops well "
+                "under the failing point (e.g. 480x832 x 49 frames ran clean where "
+                "720x1280 x 81 failed on a 30 GB XPU). Step 12 runs GUI acceptance at "
+                "this reduced tier; full-size customer-ready needs a larger/multi-GPU node."
+            ))
             if recommend_reduced
             else None
         ),
@@ -576,6 +651,7 @@ def completion_decision(
     run_level: str,
     telemetry: dict[str, Any],
     capacity: dict[str, Any] | None = None,
+    source_prompt: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     status_obj = history_summary.get("status", {}) if history_summary else {}
     status_str = status_obj.get("status_str") if isinstance(status_obj, dict) else None
@@ -591,7 +667,7 @@ def completion_decision(
         and node_accounting["all_source_nodes_accounted"]
     )
     if capacity is None:
-        capacity = classify_capacity(run_status, run_level, success, telemetry, history_summary)
+        capacity = classify_capacity(run_status, run_level, success, telemetry, history_summary, source_prompt)
     capacity_tier = capacity.get("capacity_tier", "unknown")
     # A capacity failure at a full-size footprint is a CLASSIFIED capacity hard
     # stop (route to the reduced tier), not a generic "unresolved issue" -- this
@@ -914,6 +990,7 @@ def main() -> int:
         node_accounting,
         args.run_level,
         telemetry,
+        source_prompt=source_prompt,
     )
     capacity = decision["capacity"]
     cache_assisted = bool(cached_nodes)
