@@ -1010,7 +1010,7 @@ export class MigrationOrchestrator {
       }
     }
 
-    if (stepId === "07" || stepId === "08") {
+    if (stepId === "07" || stepId === "08" || stepId === "12") {
       // Automatic, deterministic pre-check -- don't rely on the SDK agent to
       // read a skill doc and improvise the right relaunch command under time
       // pressure. Ensure the endpoint is reachable (reusing an existing
@@ -1034,35 +1034,50 @@ export class MigrationOrchestrator {
         // Capacity-retry ladder: launch ComfyUI at the current VRAM escalation
         // level for this task. Level 0 = default flags (reuse a healthy server);
         // level > 0 = force a fresh relaunch with stronger lossless offload flags.
-        const vramLevel = Math.min(this.vramEscalationLevel.get(taskId) ?? 0, VRAM_ESCALATION_LADDER.length - 1);
-        const vramFlags = VRAM_ESCALATION_LADDER[vramLevel];
-        const ensureResult = await ensureComfyUiUp({
-          node,
-          apiUrl,
-          container: containerName,
-          waitSec: 150,
-          vramFlags,
-          forceRelaunch: vramLevel > 0
-        }).catch((err) => ({
-          ok: false as const,
-          action: "failed" as const,
-          detail: `ensureComfyUiUp threw: ${err instanceof Error ? err.message : String(err)}`
-        }));
-        await this.emit({
-          taskId,
-          stepId,
-          type: "progress",
-          message: `ComfyUI reachability check before Step ${stepId}: ${ensureResult.detail} (${ensureResult.action})`,
-          data: ensureResult
-        });
-        if (!ensureResult.ok) {
-          await this.terminateWithHardStop({
+        // Effective VRAM level for this task (persisted across restarts via
+        // effective-run-config.json; see effectiveVramLevel). This is what makes
+        // a lossless offload strategy proven in Step 07/08 CARRY THROUGH to the
+        // Step 12 GUI demo instead of the demo relaunching at default flags and
+        // OOM-ing where Step 08 succeeded.
+        const vramLevel = Math.min(await this.effectiveVramLevel(taskId, task), VRAM_ESCALATION_LADDER.length - 1);
+        // Step 07/08 always run the reachability check. Step 12 keeps its own
+        // agent-driven launch at the default level (vramLevel 0) and is only
+        // force-relaunched here when the capacity ladder actually escalated, so
+        // the delivered demo uses the exact proven flags.
+        const needEnsure = stepId === "07" || stepId === "08" || vramLevel > 0;
+        if (needEnsure) {
+          const vramFlags = VRAM_ESCALATION_LADDER[vramLevel];
+          const ensureResult = await ensureComfyUiUp({
+            node,
+            apiUrl,
+            container: containerName,
+            waitSec: 150,
+            vramFlags,
+            forceRelaunch: vramLevel > 0
+          }).catch((err) => ({
+            ok: false as const,
+            action: "failed" as const,
+            detail: `ensureComfyUiUp threw: ${err instanceof Error ? err.message : String(err)}`
+          }));
+          await this.emit({
             taskId,
             stepId,
-            reason: `ComfyUI endpoint could not be reached before Step ${stepId}, even after an automatic relaunch attempt via the correct launch pattern: ${ensureResult.detail}. This is an infrastructure hard stop, not a workflow/capacity issue -- do not retry with an ad hoc docker/bare-metal command; check the pinned GPU node's docker image, shared venv, and NFS mount health first.`,
-            improvementStrategy: "Check the pinned GPU node's docker image, shared venv (--system-site-packages inheritance from the image), and NFS mount health; once fixed, resume this step."
+            type: "progress",
+            message:
+              vramLevel > 0
+                ? `ComfyUI launch before Step ${stepId} at VRAM escalation level ${vramLevel} (${VRAM_ESCALATION_LADDER[vramLevel].join(" ")}, proven in the capacity ladder): ${ensureResult.detail} (${ensureResult.action})`
+                : `ComfyUI reachability check before Step ${stepId}: ${ensureResult.detail} (${ensureResult.action})`,
+            data: ensureResult
           });
-          return;
+          if (!ensureResult.ok) {
+            await this.terminateWithHardStop({
+              taskId,
+              stepId,
+              reason: `ComfyUI endpoint could not be reached before Step ${stepId}, even after an automatic relaunch attempt via the correct launch pattern: ${ensureResult.detail}. This is an infrastructure hard stop, not a workflow/capacity issue -- do not retry with an ad hoc docker/bare-metal command; check the pinned GPU node's docker image, shared venv, and NFS mount health first.`,
+              improvementStrategy: "Check the pinned GPU node's docker image, shared venv (--system-site-packages inheritance from the image), and NFS mount health; once fixed, resume this step."
+            });
+            return;
+          }
         }
       }
     }
@@ -1269,6 +1284,9 @@ export class MigrationOrchestrator {
           if (level < VRAM_ESCALATION_LADDER.length - 1) {
             const nextLevel = level + 1;
             this.vramEscalationLevel.set(taskId, nextLevel);
+            // Harden to disk so Step 12 (GUI demo) + delivery use the proven flags,
+            // and the level survives a backend restart.
+            await this.persistVramLevel(task, nextLevel, `capacity OOM at Step ${stepId}`);
             const nextFlags = VRAM_ESCALATION_LADDER[nextLevel].join(" ");
             await this.emit({
               taskId,
@@ -3540,6 +3558,56 @@ export class MigrationOrchestrator {
       }
     }
     return false;
+  }
+
+  /**
+   * The effective VRAM escalation level for a task, PERSISTED across restarts via
+   * `effective-run-config.json` (the in-memory `vramEscalationLevel` map is only a
+   * warm cache and is lost on restart). Returns the max of the two so a level that
+   * the capacity ladder proved in Step 07/08 is still applied at Step 12 (the GUI
+   * demo) and after a backend restart -- i.e. the successful strategy is hardened
+   * into the delivered run, not just the mid-run in-memory state.
+   */
+  private async effectiveVramLevel(taskId: string, task: MigrationTask): Promise<number> {
+    const inMemory = this.vramEscalationLevel.get(taskId) ?? 0;
+    let persisted = 0;
+    try {
+      const cfg = JSON.parse(await fs.readFile(path.join(task.artifactPath, "effective-run-config.json"), "utf8"));
+      if (typeof cfg.vram_level === "number") persisted = cfg.vram_level;
+    } catch {
+      // no persisted config yet
+    }
+    const level = Math.max(inMemory, persisted);
+    if (level > inMemory) this.vramEscalationLevel.set(taskId, level); // re-warm cache after restart
+    return level;
+  }
+
+  /**
+   * Harden the effective VRAM launch policy to disk so it survives restarts and is
+   * consumed by Step 12 (GUI demo) + the delivery handoff. Written whenever the
+   * capacity ladder escalates. Lossless: these flags change placement only, so the
+   * delivered output is identical -- just launched with the memory strategy that
+   * was proven to fit on this GPU.
+   */
+  private async persistVramLevel(task: MigrationTask, level: number, reason: string): Promise<void> {
+    const flags = VRAM_ESCALATION_LADDER[Math.min(level, VRAM_ESCALATION_LADDER.length - 1)];
+    const cfg = {
+      vram_level: level,
+      vram_flags: [...flags],
+      reason,
+      note:
+        "Effective runtime launch policy hardened from the Step 07/08 lossless VRAM capacity ladder. Step 12 (GUI demo), any relaunch, and the delivery handoff must use these flags so the delivered run matches what was proven to fit on this GPU. Lossless (placement/scheduling only) -- output is unchanged.",
+      updated_at: new Date().toISOString()
+    };
+    try {
+      await fs.writeFile(
+        path.join(task.artifactPath, "effective-run-config.json"),
+        JSON.stringify(cfg, null, 2) + "\n",
+        "utf8"
+      );
+    } catch {
+      // best-effort; the in-memory level still carries within this process
+    }
   }
 
   /**

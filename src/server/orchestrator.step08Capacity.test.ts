@@ -9,7 +9,8 @@ import { StateStore } from "./state";
 // lives in runStep (its caller), not here, but mock ensureComfyUiUp defensively
 // so no test ever touches docker/network.
 vi.mock("./comfyuiLifecycle", () => ({
-  ensureComfyUiUp: vi.fn().mockResolvedValue({ ok: true, action: "already_up", detail: "mock" })
+  ensureComfyUiUp: vi.fn().mockResolvedValue({ ok: true, action: "already_up", detail: "mock" }),
+  VRAM_ESCALATION_LADDER: [["--reserve-vram", "1"], ["--reserve-vram", "1", "--lowvram"], ["--reserve-vram", "1", "--novram"]]
 }));
 
 function makeConfig(root: string, gpuNodesPath: string): AppConfig {
@@ -180,5 +181,29 @@ describe("capacitySignalForStep (drives the lossless VRAM-escalation ladder)", (
       "utf8"
     );
     expect(await (orchestrator as any).capacitySignalForStep(task, "07")).toBe(false);
+  });
+});
+
+describe("effective VRAM level is hardened to disk (carries to Step 12 + survives restart)", () => {
+  it("persistVramLevel writes effective-run-config.json and effectiveVramLevel recovers it with an empty in-memory cache", async () => {
+    const { orchestrator, task } = await makeOrchestratorWithTask("persist");
+    await (orchestrator as any).persistVramLevel(task, 2, "capacity OOM at Step 08");
+
+    // Simulate a backend restart: the in-memory map is empty, so the level must
+    // come from the persisted artifact (this is what makes Step 12 use it).
+    (orchestrator as any).vramEscalationLevel.clear();
+    expect(await (orchestrator as any).effectiveVramLevel(task.id, task)).toBe(2);
+
+    // The artifact records the exact flags for the delivery handoff.
+    const cfg = JSON.parse(await fs.readFile(path.join(task.artifactPath, "effective-run-config.json"), "utf8"));
+    expect(cfg.vram_flags).toContain("--novram");
+    expect(cfg.vram_level).toBe(2);
+  });
+
+  it("effectiveVramLevel returns the max of the in-memory cache and the persisted file", async () => {
+    const { orchestrator, task } = await makeOrchestratorWithTask("persist-max");
+    await (orchestrator as any).persistVramLevel(task, 1, "x");
+    (orchestrator as any).vramEscalationLevel.set(task.id, 2); // mid-run escalated further
+    expect(await (orchestrator as any).effectiveVramLevel(task.id, task)).toBe(2);
   });
 });

@@ -33,6 +33,7 @@ Use after Step 11 delivery packaging when the next goal is a clean-environment G
    - verify `torch.xpu.is_available()`
    - choose a GUI bind address/port that the tester can reach
    - avoid port conflicts with already-running ComfyUI instances
+   - **Honor the hardened runtime launch policy.** If `artifacts/effective-run-config.json` exists, the Step 07/08 capacity ladder escalated to a proven lossless VRAM strategy (e.g. `--lowvram`/`--novram`). The backend has already relaunched ComfyUI with exactly these `vram_flags` before this step — do NOT relaunch the server with different/default flags (that would reintroduce the OOM Step 08 solved). Use the running server as-is, and copy `vram_flags` verbatim into the launch flags of your delivery/handoff script so the customer environment starts the same way. See [capacity-vram-mitigation-ladder](capacity-vram-mitigation-ladder.md).
 3. Convert the validated runtime-policy API settings back into a GUI workflow copy:
    - keep source workflow unchanged
    - preserve nodes and links
