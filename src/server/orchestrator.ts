@@ -3124,6 +3124,11 @@ export class MigrationOrchestrator {
     // for 20+ minutes after this endpoint reported success). Best-effort: a
     // task with no SDK step in flight (or already finished) has nothing to abort.
     await this.sdkRunner.abortTask?.(input.taskId).catch(() => undefined);
+    // Tear down this task's ComfyUI container/process so it stops holding the
+    // GPU's port and VRAM. Killing/hard-stopping a task previously left
+    // comfyui-<taskId> running with the XPU still full -- a fresh task then
+    // reused that stale server (or OOM'd immediately). Best-effort, never throws.
+    await this.teardownComfyUiForTask(task);
     await this.store.appendArtifact({
       taskId: input.taskId,
       stepId: input.stepId,
@@ -4557,6 +4562,9 @@ export class MigrationOrchestrator {
 
     const tasks = await this.store.listTasks();
     for (const task of tasks) {
+      // Free each old task's ComfyUI (container + XPU VRAM) before removing it,
+      // so starting fresh doesn't inherit a wedged server / full GPU.
+      await this.teardownComfyUiForTask(task);
       await archiveTaskSnapshot({ task, taskArchiveRoot: this.config.taskArchiveRoot });
       await deleteTaskWorkspace(this.config.workspaceRoot, task.workspacePath);
       await this.store.deleteTask(task.id);
@@ -4709,6 +4717,28 @@ export class MigrationOrchestrator {
       return this.killRemoteComfyUI(task, node);
     }
     return this.killLocalComfyUI(task);
+  }
+
+  /**
+   * Public, best-effort teardown of a task's ComfyUI (container for runtime=docker,
+   * process otherwise) so it stops holding the GPU port + VRAM. Called on kill
+   * (hard-stop) and on task delete so leftover servers never wedge the next run.
+   * Emits a progress line when something was actually torn down; never throws.
+   */
+  async teardownComfyUiForTask(task: MigrationTask): Promise<number> {
+    try {
+      const killed = await this.killComfyUIForTask(task);
+      if (killed > 0) {
+        await this.emit({
+          taskId: task.id,
+          type: "progress",
+          message: `Tore down ComfyUI for task ${task.id} (freed its GPU port + VRAM).`
+        }).catch(() => undefined);
+      }
+      return killed;
+    } catch {
+      return 0;
+    }
   }
 
   /** Backwards-compatible local-only kill; preserved for callers that want local behaviour. */

@@ -267,3 +267,13 @@ describe("effective VRAM level is hardened to disk (carries to Step 12 + survive
     expect(cfg.reduced_prompt_path).toContain("reduced-runtime-policy-prompt.json");
   });
 });
+
+describe("teardownComfyUiForTask wiring (frees GPU on kill/delete)", () => {
+  it("hard-stop tears down the task's ComfyUI (container + VRAM)", async () => {
+    const { orchestrator, task } = await makeOrchestratorWithTask("teardown-killstop");
+    let torn = 0;
+    (orchestrator as any).teardownComfyUiForTask = async () => { torn += 1; return 1; };
+    await orchestrator.terminateWithHardStop({ taskId: task.id, reason: "test kill" });
+    expect(torn).toBe(1);
+  });
+});

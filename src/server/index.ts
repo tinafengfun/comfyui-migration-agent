@@ -335,6 +335,9 @@ app.delete("/api/tasks/:taskId", async (req, res, next) => {
       });
       return;
     }
+    // Free the task's ComfyUI (container + XPU VRAM) before deleting it, so a
+    // leftover server never holds the GPU port/VRAM for the next run.
+    await orchestrator.teardownComfyUiForTask(task);
     await archiveTaskSnapshot({ task, taskArchiveRoot: config.taskArchiveRoot });
     await deleteTaskWorkspace(config.workspaceRoot, task.workspacePath);
     const deletedTask = await store.deleteTask(task.id);
