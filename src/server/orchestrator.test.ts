@@ -2351,9 +2351,14 @@ describe("migration orchestrator", () => {
           updateStepAndPersist: (taskId: string, stepId: string, status: string) => Promise<unknown>;
         }).updateStepAndPersist(task.id, "12", "waiting_for_human");
 
-        expect(receivedRequests).toHaveLength(1);
-        expect(decodeURIComponent(receivedRequests[0].url)).toMatch(/^\/api\/userdata\/workflows\/.*\.json$/);
-        expect(JSON.parse(receivedRequests[0].body)).toEqual({ nodes: [], links: [] });
+        // Hardened: the sync writes straight into the node's workflows dir (the
+        // reliable path -- ComfyUI's HTTP userdata write is 405 on some versions).
+        const wfDir = path.join(root, "ComfyUI", "user", "default", "workflows");
+        const files = await fs.readdir(wfDir);
+        const written = files.find((f) => f.endsWith("-step12-gui-acceptance.json"));
+        expect(written).toBeTruthy();
+        expect(JSON.parse(await fs.readFile(path.join(wfDir, written!), "utf8"))).toEqual({ nodes: [], links: [] });
+        void receivedRequests; // HTTP is now only a fallback
       } finally {
         await new Promise<void>((resolve) => fakeComfyUI.close(() => resolve()));
       }

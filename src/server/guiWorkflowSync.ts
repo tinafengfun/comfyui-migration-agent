@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import type { MigrationTask } from "../shared/types";
 import { readJson } from "./fsUtils";
-import { nodeApiUrl, type GpuNode } from "./gpuNodes";
+import { nodeApiUrl, runShellOnNode, type GpuNode } from "./gpuNodes";
 
 // Real incident this closes: the Step 12 skill's own "Output" list just names
 // the field `gui_workflow_json` without pinning down its exact JSON shape or
@@ -181,17 +181,34 @@ export async function syncGuiWorkflowToComfyUIServer(input: {
 
     const destName = `${sanitizeName(task.name)}${reducedApplied > 0 ? "-REDUCED" : ""}-step12-gui-acceptance.json`;
     const destination = `workflows/${destName}`;
-    const url = `${nodeApiUrl(node)}/api/userdata/${encodeURIComponent(destination)}`;
-    const res = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: contents,
-      signal: AbortSignal.timeout(15_000)
-    });
-    if (!res.ok) {
-      return { synced: false, reason: `userdata POST returned ${res.status} ${res.statusText}`, reducedApplied };
+
+    // PRIMARY: write straight into the node's workflows dir. For runtime=docker the
+    // comfyui_root is bind-mounted to /comfyui, so <comfyui_root>/user/default/
+    // workflows lands directly in the container's Workflows sidebar; for bare-metal
+    // it IS the sidebar dir. Hardened because the HTTP userdata write is 405 on some
+    // ComfyUI versions (confirmed live on 0.27.0) -- the file write + read-back byte
+    // check is the reliable path and is self-verifying.
+    const fsWrite = await writeGuiWorkflowToNodeFs(node, destName, contents);
+    if (fsWrite.ok) {
+      return { synced: true, destination: `user/default/${destination}`, reducedApplied };
     }
-    return { synced: true, destination, reducedApplied };
+
+    // FALLBACK: HTTP userdata POST (works on ComfyUI versions that allow it).
+    let httpReason = "";
+    try {
+      const url = `${nodeApiUrl(node)}/api/userdata/${encodeURIComponent(destination)}`;
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: contents,
+        signal: AbortSignal.timeout(15_000)
+      });
+      if (res.ok) return { synced: true, destination, reducedApplied };
+      httpReason = `userdata POST returned ${res.status} ${res.statusText}`;
+    } catch (error) {
+      httpReason = `userdata POST threw: ${error instanceof Error ? error.message : String(error)}`;
+    }
+    return { synced: false, reason: `fs write failed (${fsWrite.detail}); http fallback: ${httpReason}`, reducedApplied };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return { synced: false, reason: `sync failed: ${message}` };
@@ -200,4 +217,33 @@ export async function syncGuiWorkflowToComfyUIServer(input: {
 
 function sanitizeName(value: string): string {
   return path.basename(value).replace(/[^a-zA-Z0-9._-]/g, "_") || "workflow";
+}
+
+/**
+ * Write a GUI workflow into the node's ComfyUI workflows dir and VERIFY it landed
+ * (read back the byte count). `<comfyui_root>/user/default/workflows` is the
+ * ComfyUI sidebar dir (bind-mounted into the container for runtime=docker). Content
+ * is base64-piped so arbitrary JSON can't break the shell. Best-effort, never throws.
+ */
+async function writeGuiWorkflowToNodeFs(
+  node: GpuNode,
+  destName: string,
+  contents: string
+): Promise<{ ok: boolean; detail: string }> {
+  if (!node.comfyui_root) return { ok: false, detail: "node has no comfyui_root" };
+  const dir = `${node.comfyui_root.replace(/\/+$/, "")}/user/default/workflows`;
+  const filePath = `${dir}/${destName}`;
+  const b64 = Buffer.from(contents, "utf8").toString("base64");
+  const expected = Buffer.byteLength(contents, "utf8");
+  // write, then echo back the on-disk byte count so we can confirm it landed.
+  const cmd = `mkdir -p '${dir}' && printf %s '${b64}' | base64 -d > '${filePath}' && wc -c < '${filePath}'`;
+  const out = await runShellOnNode(node, cmd, 20_000);
+  const bytes = out ? Number.parseInt(out.trim(), 10) : Number.NaN;
+  if (Number.isFinite(bytes) && bytes === expected) {
+    return { ok: true, detail: `wrote+verified ${bytes} bytes to ${filePath}` };
+  }
+  return {
+    ok: false,
+    detail: `write/verify mismatch at ${filePath} (expected ${expected}, got ${out?.trim() ?? "no output"})`
+  };
 }

@@ -92,7 +92,7 @@ describe("syncGuiWorkflowToComfyUIServer", () => {
     const node: GpuNode = {
       name: "n",
       kind: "local",
-      comfyui_root: "/irrelevant",
+      comfyui_root: "",
       venv_python: "/usr/bin/python3",
       model_roots: [],
       api_host: host,
@@ -119,7 +119,7 @@ describe("syncGuiWorkflowToComfyUIServer", () => {
     const node: GpuNode = {
       name: "n",
       kind: "local",
-      comfyui_root: "/irrelevant",
+      comfyui_root: "",
       venv_python: "/usr/bin/python3",
       model_roots: [],
       api_host: host,
@@ -138,7 +138,7 @@ describe("syncGuiWorkflowToComfyUIServer", () => {
     const node: GpuNode = {
       name: "n",
       kind: "local",
-      comfyui_root: "/irrelevant",
+      comfyui_root: "",
       venv_python: "/usr/bin/python3",
       model_roots: [],
       api_host: "127.0.0.1",
@@ -167,7 +167,7 @@ describe("syncGuiWorkflowToComfyUIServer", () => {
     cleanup = fake.close;
     const [host, port] = fake.url.replace("http://", "").split(":");
     const node: GpuNode = {
-      name: "n", kind: "local", comfyui_root: "/irrelevant", venv_python: "/usr/bin/python3",
+      name: "n", kind: "local", comfyui_root: "", venv_python: "/usr/bin/python3",
       model_roots: [], api_host: host, api_port: Number(port)
     };
 
@@ -192,7 +192,7 @@ describe("syncGuiWorkflowToComfyUIServer", () => {
     cleanup = fake.close;
     const [host, port] = fake.url.replace("http://", "").split(":");
     const node: GpuNode = {
-      name: "n", kind: "local", comfyui_root: "/irrelevant", venv_python: "/usr/bin/python3",
+      name: "n", kind: "local", comfyui_root: "", venv_python: "/usr/bin/python3",
       model_roots: [], api_host: host, api_port: Number(port)
     };
 
@@ -216,7 +216,7 @@ describe("syncGuiWorkflowToComfyUIServer", () => {
     cleanup = fake.close;
     const [host, port] = fake.url.replace("http://", "").split(":");
     const node: GpuNode = {
-      name: "n", kind: "local", comfyui_root: "/irrelevant", venv_python: "/usr/bin/python3",
+      name: "n", kind: "local", comfyui_root: "", venv_python: "/usr/bin/python3",
       model_roots: [], api_host: host, api_port: Number(port)
     };
 
@@ -232,7 +232,7 @@ describe("syncGuiWorkflowToComfyUIServer", () => {
     const node: GpuNode = {
       name: "n",
       kind: "local",
-      comfyui_root: "/irrelevant",
+      comfyui_root: "",
       venv_python: "/usr/bin/python3",
       model_roots: [],
       api_host: "127.0.0.1",
@@ -241,7 +241,7 @@ describe("syncGuiWorkflowToComfyUIServer", () => {
 
     const result = await syncGuiWorkflowToComfyUIServer({ task, node });
     expect(result.synced).toBe(false);
-    expect(result.reason).toMatch(/sync failed/);
+    expect(result.reason).toMatch(/http fallback/);
   });
 
   it("returns synced:false without throwing when the server responds with an error status", async () => {
@@ -261,7 +261,7 @@ describe("syncGuiWorkflowToComfyUIServer", () => {
     const node: GpuNode = {
       name: "n",
       kind: "local",
-      comfyui_root: "/irrelevant",
+      comfyui_root: "",
       venv_python: "/usr/bin/python3",
       model_roots: [],
       api_host: "127.0.0.1",
@@ -303,5 +303,23 @@ describe2("reduceGuiWorkflow — deterministic reduced-tier edits to GUI widgets
     // dict widgets set by key, incl. the videopreview display:
     expect2((wf.nodes[1].widgets_values as any).frame_load_cap).toBe(60);
     expect2((wf.nodes[1].widgets_values as any).videopreview.params.frame_load_cap).toBe(60);
+  });
+});
+
+describe("syncGuiWorkflowToComfyUIServer — filesystem write (primary, hardened)", () => {
+  it("writes + read-back-verifies the GUI workflow into the node's workflows dir without needing HTTP", async () => {
+    const root = path.join(process.cwd(), ".demo-state", "tests", `gui-sync-fs-${Date.now()}`);
+    const task = await makeTask(root);
+    await seedGuiWorkflow(task.artifactPath);
+    const comfyuiRoot = path.join(root, "comfyui-root");
+    const node: GpuNode = {
+      name: "n", kind: "local", comfyui_root: comfyuiRoot, venv_python: "/usr/bin/python3",
+      model_roots: [], api_host: "127.0.0.1", api_port: 1 // nothing listening -> proves HTTP not needed
+    };
+    const result = await syncGuiWorkflowToComfyUIServer({ task, node });
+    expect(result.synced).toBe(true);
+    expect(result.destination).toContain("user/default/workflows/");
+    const written = await fs.readFile(path.join(comfyuiRoot, result.destination!), "utf8");
+    expect(JSON.parse(written)).toEqual({ nodes: [], links: [] });
   });
 });

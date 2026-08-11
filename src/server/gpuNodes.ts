@@ -733,7 +733,7 @@ export async function checkRecipeEnvironmentDrift(
  * host's actual bound ports at all. Best-effort: returns undefined on any
  * failure (unreachable node, command not found, etc.), never throws.
  */
-async function runShellOnNode(node: GpuNode, cmd: string, timeoutMs = 15_000): Promise<string | undefined> {
+export async function runShellOnNode(node: GpuNode, cmd: string, timeoutMs = 15_000): Promise<string | undefined> {
   try {
     if (node.kind === "local") {
       const { stdout } = await execFileAsync("bash", ["-c", cmd], { timeout: timeoutMs });

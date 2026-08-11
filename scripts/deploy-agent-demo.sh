@@ -27,6 +27,12 @@
 # ============================================================
 set -euo pipefail
 
+# Hardening: a tsc/vitest failure aborts BEFORE the restart, so the old backend
+# keeps running the OLD code silently -- the exact trap that made a "deployed" fix
+# never actually go live. Make any failure impossible to miss and state plainly
+# that the running backend is stale.
+trap 'rc=$?; if [ "$rc" -ne 0 ]; then echo ""; echo "############################################################"; echo "## DEPLOY FAILED (exit $rc). The agent-demo backend was NOT"; echo "## restarted -- it is STILL RUNNING THE OLD CODE. Fix the"; echo "## error above (tsc/vitest/restart) and re-run.            "; echo "############################################################"; fi' EXIT
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CMA_STAGING="$(cd "$SCRIPT_DIR/.." && pwd)"
 AGENT_DEMO="/home/intel/tianfeng/comfy/ComfyUI/agent-demo"
@@ -117,6 +123,20 @@ echo "==> Restarting agent-demo..."
 bash "$AGENT_DEMO/scripts/restart.sh"
 
 echo ""
+echo "==> Verifying the restarted backend is actually up (else the deploy is a no-op)..."
+up=""
+for i in $(seq 1 20); do
+  if curl -sf -o /dev/null "$API/api/tasks" 2>/dev/null; then up="yes"; break; fi
+  sleep 2
+done
+if [ -z "$up" ]; then
+  echo "!! Backend did NOT come back up at $API within ~40s after restart."
+  echo "!! The deploy did not take effect. Check /tmp/migration-backend.log."
+  exit 1
+fi
+echo "    backend healthy at $API ✓"
+
+echo ""
 echo "==> Confirming task state survived the restart..."
 curl -s "$API/api/tasks" | python3 -m json.tool 2>/dev/null | head -20 || true
-echo "==> Done."
+echo "==> Done (deploy verified live)."
