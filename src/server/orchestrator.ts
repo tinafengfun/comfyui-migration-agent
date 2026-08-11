@@ -3626,6 +3626,66 @@ export class MigrationOrchestrator {
   }
 
   /**
+   * Deterministically apply the reduced-tier node edits (from Step 08's
+   * recommended_reduced_setting.changes) to the Step 06 runtime-policy API prompt,
+   * producing reduced-runtime-policy-prompt.json. This replaces the unreliable
+   * "Step 12 agent hand-edits the workflow" path: the reduction is a mechanical
+   * transform applied the moment the operator accepts the tier. Returns the reduced
+   * prompt path, or undefined if it couldn't be produced (Step 12 then falls back to
+   * the agent path). Each change is `{node_id, input, new}`.
+   */
+  private async generateReducedWorkflow(
+    task: MigrationTask,
+    changes: Array<{ node_id: string | number; input: string; new: unknown }> | undefined
+  ): Promise<string | undefined> {
+    if (!Array.isArray(changes) || changes.length === 0) return undefined;
+    // Locate the runtime-policy API prompt (Step 06 variant).
+    let promptPath: string | undefined;
+    try {
+      const s06 = JSON.parse(await fs.readFile(path.join(task.artifactPath, "06-prompt-validation-summary.json"), "utf8"));
+      if (typeof s06?.variant_prompt_path === "string") promptPath = s06.variant_prompt_path;
+    } catch {
+      // fall through to the default artifact name
+    }
+    const candidates = [promptPath, path.join(task.artifactPath, "06b-runtime-policy-prompt.json")].filter(
+      (p): p is string => Boolean(p)
+    );
+    let raw: string | undefined;
+    for (const p of candidates) {
+      try {
+        raw = await fs.readFile(p, "utf8");
+        break;
+      } catch {
+        // try next candidate
+      }
+    }
+    if (!raw) return undefined;
+    let obj: any;
+    try {
+      obj = JSON.parse(raw);
+    } catch {
+      return undefined;
+    }
+    const prompt = obj && typeof obj === "object" && obj.prompt && typeof obj.prompt === "object" ? obj.prompt : obj;
+    let applied = 0;
+    for (const change of changes) {
+      const node = prompt?.[String(change.node_id)];
+      if (node && node.inputs && typeof node.inputs === "object" && change.input in node.inputs) {
+        node.inputs[change.input] = change.new;
+        applied += 1;
+      }
+    }
+    if (applied === 0) return undefined;
+    const outPath = path.join(task.artifactPath, "reduced-runtime-policy-prompt.json");
+    try {
+      await fs.writeFile(outPath, JSON.stringify({ prompt }, null, 2) + "\n", "utf8");
+    } catch {
+      return undefined;
+    }
+    return outPath;
+  }
+
+  /**
    * Step 08 full-size capacity decision gate. The step08 tool classifies full-size
    * capacity (capacity_tier) from a full-resolution probe; when it is 'reduced' or
    * 'insufficient', full size does not fit reliably on this GPU and the operator
@@ -3758,6 +3818,15 @@ export class MigrationOrchestrator {
         s08?.completion_decision?.capacity?.recommended_reduced_setting ??
         s08?.step12_context?.recommended_reduced_setting ??
         "halve spatial dims and/or frame count (e.g. 480x832 x 49 frames)";
+      const recommendedObj = recommended && typeof recommended === "object" ? (recommended as Record<string, any>) : undefined;
+      const recommendedLabel = recommendedObj
+        ? `${recommendedObj.resolution ?? "reduced"} x ${recommendedObj.frames ?? recommendedObj.length ?? "?"} frames`
+        : String(recommended);
+      // DETERMINISTICALLY apply the recommended node edits to the runtime-policy
+      // workflow NOW (do not leave it to the Step 12 agent -- that hand-editing has
+      // proven unreliable). Produces reduced-runtime-policy-prompt.json for Step 12
+      // to run + deliver, so the demo is genuinely reduced, not full-size.
+      const reducedPromptPath = await this.generateReducedWorkflow(task, recommendedObj?.changes);
       // The full-size capacity ladder may have escalated to --novram (level 2),
       // which streams the whole model every step (~6 min/step). The REDUCED
       // workflow is much smaller and must NOT inherit that: cap it at --lowvram
@@ -3769,14 +3838,18 @@ export class MigrationOrchestrator {
       await this.mergeEffectiveRunConfig(task, {
         reduced_tier: true,
         recommended_reduced_setting: recommended,
+        reduced_prompt_path: reducedPromptPath,
         reduced_tier_notes: notes || undefined,
         vram_level: cappedLevel,
         vram_flags: [...VRAM_ESCALATION_LADDER[cappedLevel]],
         vram_reason: "capped at --lowvram for the reduced tier (full-size --novram would be needlessly slow)"
       });
       const summary =
-        `Step 08 capacity: operator ACCEPTED the reduced tier. Step 12 will run GUI acceptance at the ` +
-        `recommended reduced setting (${recommended}) with the effective VRAM flags; delivery is reduced-tier, NOT full-size customer-ready.` +
+        `Step 08 capacity: operator ACCEPTED the reduced tier. ` +
+        (reducedPromptPath
+          ? `A reduced workflow (${recommendedLabel}) was generated deterministically at ${reducedPromptPath}; Step 12 runs/delivers THAT. `
+          : `Step 12 must run GUI acceptance at the recommended reduced setting (${recommendedLabel}). `) +
+        `Effective VRAM flags apply; delivery is reduced-tier, NOT full-size customer-ready.` +
         (notes ? ` Notes: ${notes}` : "");
       await this.updateStepAndPersist(task.id, "08", "completed", { summary, error: undefined });
       await this.emit({

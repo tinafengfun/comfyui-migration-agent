@@ -225,4 +225,45 @@ describe("effective VRAM level is hardened to disk (carries to Step 12 + survive
     expect(cfg.reduced_tier).toBe(true);
     expect(cfg.recommended_reduced_setting).toContain("480x832");
   });
+
+  it("deterministically generates the reduced workflow from the recommended node edits (not left to the Step 12 agent)", async () => {
+    const { orchestrator, task } = await makeOrchestratorWithTask("reduced-workflow");
+    // 08 summary with structured recommended changes:
+    const changes = [
+      { node_id: "109", input: "value", old: 720, new: 480 },
+      { node_id: "110", input: "value", old: 1280, new: 832 },
+      { node_id: "34", input: "length", old: 81, new: 49 },
+      { node_id: "90", input: "frame_load_cap", old: 121, new: 49 }
+    ];
+    await fs.writeFile(
+      path.join(task.artifactPath, "08-full-validation-summary.json"),
+      JSON.stringify({ completion_decision: { capacity_tier: "insufficient", capacity: { capacity_tier: "insufficient", recommended_reduced_setting: { resolution: "480x832", frames: 49, changes } } } }),
+      "utf8"
+    );
+    // The Step 06 runtime-policy API prompt (full size):
+    await fs.writeFile(
+      path.join(task.artifactPath, "06b-runtime-policy-prompt.json"),
+      JSON.stringify({ prompt: {
+        "109": { class_type: "PrimitiveInt", inputs: { value: 720 } },
+        "110": { class_type: "PrimitiveInt", inputs: { value: 1280 } },
+        "34": { class_type: "BerniniConditioning", inputs: { length: 81, batch_size: 1 } },
+        "90": { class_type: "VHS_LoadVideo", inputs: { frame_load_cap: 121 } }
+      } }),
+      "utf8"
+    );
+
+    const decision = { taskId: task.id, stepId: "08", questionEventId: "q", answer: "Accept reduced tier", wasFreeform: false, decidedAt: new Date().toISOString() };
+    await (orchestrator as any).applyStep08CapacityDecision({ task, decision });
+
+    // The reduced workflow was produced deterministically with the exact edits:
+    const reduced = JSON.parse(await fs.readFile(path.join(task.artifactPath, "reduced-runtime-policy-prompt.json"), "utf8"));
+    const p = reduced.prompt;
+    expect(p["109"].inputs.value).toBe(480);
+    expect(p["110"].inputs.value).toBe(832);
+    expect(p["34"].inputs.length).toBe(49);
+    expect(p["90"].inputs.frame_load_cap).toBe(49);
+    // and effective-run-config points Step 12 at it:
+    const cfg = JSON.parse(await fs.readFile(path.join(task.artifactPath, "effective-run-config.json"), "utf8"));
+    expect(cfg.reduced_prompt_path).toContain("reduced-runtime-policy-prompt.json");
+  });
 });
