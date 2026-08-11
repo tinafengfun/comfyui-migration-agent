@@ -1040,20 +1040,24 @@ export class MigrationOrchestrator {
         // Step 12 GUI demo instead of the demo relaunching at default flags and
         // OOM-ing where Step 08 succeeded.
         const vramLevel = Math.min(await this.effectiveVramLevel(taskId, task), VRAM_ESCALATION_LADDER.length - 1);
-        // Step 07/08 always run the reachability check. Step 12 keeps its own
-        // agent-driven launch at the default level (vramLevel 0) and is only
-        // force-relaunched here when the capacity ladder actually escalated, so
-        // the delivered demo uses the exact proven flags.
-        const needEnsure = stepId === "07" || stepId === "08" || vramLevel > 0;
+        // Step 07/08/12 all launch ComfyUI deterministically. Step 12 (the final
+        // GUI demo) MUST run against the SAME validated docker container + NFS venv
+        // as Steps 05-08 -- which has llama_cpp (the VLM node dependency), the fp8
+        // keep-on-move patch, and the effective VRAM flags -- never an
+        // agent-improvised local/bare-metal ComfyUI (that env is missing llama_cpp
+        // and hangs the VLM node; real incident 2026-08-11). Force a fresh relaunch
+        // for Step 12 so a stray/wrong instance on the port can't be silently reused.
+        const needEnsure = stepId === "07" || stepId === "08" || stepId === "12" || vramLevel > 0;
         if (needEnsure) {
           const vramFlags = VRAM_ESCALATION_LADDER[vramLevel];
+          const forceRelaunch = stepId === "12" || vramLevel > 0;
           const ensureResult = await ensureComfyUiUp({
             node,
             apiUrl,
             container: containerName,
             waitSec: 150,
             vramFlags,
-            forceRelaunch: vramLevel > 0
+            forceRelaunch
           }).catch((err) => ({
             ok: false as const,
             action: "failed" as const,
@@ -3589,25 +3593,36 @@ export class MigrationOrchestrator {
    * delivered output is identical -- just launched with the memory strategy that
    * was proven to fit on this GPU.
    */
-  private async persistVramLevel(task: MigrationTask, level: number, reason: string): Promise<void> {
-    const flags = VRAM_ESCALATION_LADDER[Math.min(level, VRAM_ESCALATION_LADDER.length - 1)];
-    const cfg = {
-      vram_level: level,
-      vram_flags: [...flags],
-      reason,
+  /** Read-merge-write the hardened effective-run-config.json (best-effort). */
+  private async mergeEffectiveRunConfig(task: MigrationTask, patch: Record<string, unknown>): Promise<void> {
+    const configPath = path.join(task.artifactPath, "effective-run-config.json");
+    let cfg: Record<string, unknown> = {};
+    try {
+      cfg = JSON.parse(await fs.readFile(configPath, "utf8"));
+    } catch {
+      cfg = {};
+    }
+    const merged = {
       note:
-        "Effective runtime launch policy hardened from the Step 07/08 lossless VRAM capacity ladder. Step 12 (GUI demo), any relaunch, and the delivery handoff must use these flags so the delivered run matches what was proven to fit on this GPU. Lossless (placement/scheduling only) -- output is unchanged.",
+        "Effective runtime policy hardened from the Step 07/08 capacity ladder + reduced-tier decision. Step 12 (GUI demo), any relaunch, and the delivery handoff must reuse it so the delivered run matches what was proven to fit on this GPU: launch with vram_flags, and if reduced_tier is true run at recommended_reduced_setting. VRAM flags are lossless (placement only); the reduced tier is the human-approved lossy fidelity downgrade.",
+      ...cfg,
+      ...patch,
       updated_at: new Date().toISOString()
     };
     try {
-      await fs.writeFile(
-        path.join(task.artifactPath, "effective-run-config.json"),
-        JSON.stringify(cfg, null, 2) + "\n",
-        "utf8"
-      );
+      await fs.writeFile(configPath, JSON.stringify(merged, null, 2) + "\n", "utf8");
     } catch {
       // best-effort; the in-memory level still carries within this process
     }
+  }
+
+  private async persistVramLevel(task: MigrationTask, level: number, reason: string): Promise<void> {
+    const flags = VRAM_ESCALATION_LADDER[Math.min(level, VRAM_ESCALATION_LADDER.length - 1)];
+    await this.mergeEffectiveRunConfig(task, {
+      vram_level: level,
+      vram_flags: [...flags],
+      vram_reason: reason
+    });
   }
 
   /**
@@ -3735,9 +3750,22 @@ export class MigrationOrchestrator {
     await this.patchStep08CapacityDecision(task, outcome, notes);
 
     if (outcome === "reduced") {
+      // Harden the reduced (lossy) tier alongside the lossless VRAM flags so Step 12
+      // runs the demo at the low resolution/frames the operator approved -- avoiding
+      // the OOM at full size -- and the delivery handoff records it.
+      const s08 = await this.readStep08Summary(task);
+      const recommended =
+        s08?.completion_decision?.capacity?.recommended_reduced_setting ??
+        s08?.step12_context?.recommended_reduced_setting ??
+        "halve spatial dims and/or frame count (e.g. 480x832 x 49 frames)";
+      await this.mergeEffectiveRunConfig(task, {
+        reduced_tier: true,
+        recommended_reduced_setting: recommended,
+        reduced_tier_notes: notes || undefined
+      });
       const summary =
         `Step 08 capacity: operator ACCEPTED the reduced tier. Step 12 will run GUI acceptance at the ` +
-        `recommended reduced setting; delivery is reduced-tier, NOT full-size customer-ready.` +
+        `recommended reduced setting (${recommended}) with the effective VRAM flags; delivery is reduced-tier, NOT full-size customer-ready.` +
         (notes ? ` Notes: ${notes}` : "");
       await this.updateStepAndPersist(task.id, "08", "completed", { summary, error: undefined });
       await this.emit({
