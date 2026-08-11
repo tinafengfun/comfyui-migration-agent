@@ -45,6 +45,82 @@ export interface GuiWorkflowSyncResult {
   synced: boolean;
   destination?: string;
   reason?: string;
+  reducedApplied?: number;
+}
+
+interface ReducedChange {
+  node_id: string | number;
+  input: string;
+  new: unknown;
+}
+
+/**
+ * Ordered names of a node type's WIDGET inputs (INT/FLOAT/STRING/BOOLEAN/combo),
+ * required then optional -- this is exactly the order of a GUI node's
+ * `widgets_values` array, so `indexOf(inputName)` gives the widget position.
+ */
+function widgetInputNames(nodeDef: any): string[] {
+  const req = nodeDef?.input?.required ?? {};
+  const opt = nodeDef?.input?.optional ?? {};
+  const names: string[] = [];
+  for (const [name, spec] of [...Object.entries(req), ...Object.entries(opt)]) {
+    const t = Array.isArray(spec) ? (spec as any[])[0] : spec;
+    const isWidget = Array.isArray(t) || t === "INT" || t === "FLOAT" || t === "STRING" || t === "BOOLEAN";
+    if (isWidget) names.push(name);
+  }
+  return names;
+}
+
+/**
+ * Apply the reduced-tier node edits to a GUI-format workflow's `widgets_values`
+ * so the graph the operator loads is genuinely reduced (not full-size). Handles
+ * both dict widgets_values (set by key, e.g. VHS_LoadVideo.frame_load_cap) and
+ * list widgets_values (map input name -> widget index via object_info). Returns
+ * the number of edits applied. Pure/deterministic; no live ComfyUI needed beyond
+ * the object_info passed in.
+ */
+export function reduceGuiWorkflow(
+  workflow: any,
+  changes: ReducedChange[],
+  objectInfo: Record<string, any>
+): number {
+  const nodes: any[] = Array.isArray(workflow?.nodes) ? workflow.nodes : [];
+  const byId = new Map<string, any>(nodes.map((n) => [String(n.id), n]));
+  let applied = 0;
+  for (const change of changes) {
+    const node = byId.get(String(change.node_id));
+    if (!node) continue;
+    const wv = node.widgets_values;
+    if (wv && typeof wv === "object" && !Array.isArray(wv)) {
+      if (change.input in wv) {
+        wv[change.input] = change.new;
+        // keep the VHS videopreview display in sync too
+        if (wv.videopreview?.params && change.input in wv.videopreview.params) {
+          wv.videopreview.params[change.input] = change.new;
+        }
+        applied += 1;
+      }
+    } else if (Array.isArray(wv)) {
+      const order = widgetInputNames(objectInfo?.[node.type]);
+      const idx = order.indexOf(change.input);
+      if (idx >= 0 && idx < wv.length) {
+        wv[idx] = change.new;
+        applied += 1;
+      }
+    }
+  }
+  return applied;
+}
+
+async function loadReducedChanges(taskArtifactPath: string): Promise<ReducedChange[]> {
+  try {
+    const cfg = await readJson<any>(path.join(taskArtifactPath, "effective-run-config.json"), {});
+    if (!cfg?.reduced_tier) return [];
+    const changes = cfg?.recommended_reduced_setting?.changes;
+    return Array.isArray(changes) ? changes : [];
+  } catch {
+    return [];
+  }
 }
 
 /**
@@ -83,9 +159,27 @@ export async function syncGuiWorkflowToComfyUIServer(input: {
     }
 
     const localWorkflowPath = path.join(task.artifactPath, relativeWorkflowPath);
-    const contents = await fs.readFile(localWorkflowPath, "utf8");
+    let contents = await fs.readFile(localWorkflowPath, "utf8");
 
-    const destName = `${sanitizeName(task.name)}-step12-gui-acceptance.json`;
+    // Reduced tier: the graph the operator loads MUST be the reduced one, or they
+    // queue full-size and OOM/DEVICE_LOST (real incident 2026-08-11). Apply the
+    // deterministic reduced-tier edits to the GUI widgets_values before pushing.
+    let reducedApplied = 0;
+    const reducedChanges = await loadReducedChanges(task.artifactPath);
+    if (reducedChanges.length > 0) {
+      try {
+        const objRes = await fetch(`${nodeApiUrl(node)}/object_info`, { signal: AbortSignal.timeout(15_000) });
+        const objectInfo = objRes.ok ? ((await objRes.json()) as Record<string, any>) : {};
+        const workflow = JSON.parse(contents);
+        reducedApplied = reduceGuiWorkflow(workflow, reducedChanges, objectInfo);
+        if (reducedApplied > 0) contents = JSON.stringify(workflow);
+      } catch {
+        // best-effort: fall back to pushing the unmodified workflow (Step 12 skill
+        // still instructs verifying the reduction before acceptance)
+      }
+    }
+
+    const destName = `${sanitizeName(task.name)}${reducedApplied > 0 ? "-REDUCED" : ""}-step12-gui-acceptance.json`;
     const destination = `workflows/${destName}`;
     const url = `${nodeApiUrl(node)}/api/userdata/${encodeURIComponent(destination)}`;
     const res = await fetch(url, {
@@ -95,9 +189,9 @@ export async function syncGuiWorkflowToComfyUIServer(input: {
       signal: AbortSignal.timeout(15_000)
     });
     if (!res.ok) {
-      return { synced: false, reason: `userdata POST returned ${res.status} ${res.statusText}` };
+      return { synced: false, reason: `userdata POST returned ${res.status} ${res.statusText}`, reducedApplied };
     }
-    return { synced: true, destination };
+    return { synced: true, destination, reducedApplied };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return { synced: false, reason: `sync failed: ${message}` };

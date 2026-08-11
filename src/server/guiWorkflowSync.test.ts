@@ -273,3 +273,35 @@ describe("syncGuiWorkflowToComfyUIServer", () => {
     expect(result.reason).toMatch(/500/);
   });
 });
+
+import { describe as describe2, it as it2, expect as expect2 } from "vitest";
+import { reduceGuiWorkflow } from "./guiWorkflowSync";
+
+describe2("reduceGuiWorkflow — deterministic reduced-tier edits to GUI widgets_values", () => {
+  const objectInfo = {
+    BerniniConditioning: { input: { required: {
+      positive: ["CONDITIONING"], negative: ["CONDITIONING"], vae: ["VAE"],
+      width: ["INT"], height: ["INT"], length: ["INT"], batch_size: ["INT"],
+      source_video: ["IMAGE"], ref_max_size: ["INT"]
+    } } }
+  };
+  it2("maps list widgets_values by object_info widget order (ref_max_size is the real driver)", () => {
+    const wf = { nodes: [
+      { id: 34, type: "BerniniConditioning", widgets_values: [720, 1280, 81, 1, 1280] },
+      { id: 90, type: "VHS_LoadVideo", widgets_values: { frame_load_cap: 121, videopreview: { params: { frame_load_cap: 121 } } } }
+    ] };
+    const changes = [
+      { node_id: "34", input: "ref_max_size", new: 640 },
+      { node_id: "34", input: "length", new: 40 },
+      { node_id: "90", input: "frame_load_cap", new: 60 }
+    ];
+    const applied = reduceGuiWorkflow(wf, changes, objectInfo);
+    expect2(applied).toBe(3);
+    // ref_max_size is widget index 4 (width,height,length,batch_size,ref_max_size):
+    expect2(wf.nodes[0].widgets_values[4]).toBe(640);
+    expect2(wf.nodes[0].widgets_values[2]).toBe(40); // length
+    // dict widgets set by key, incl. the videopreview display:
+    expect2((wf.nodes[1].widgets_values as any).frame_load_cap).toBe(60);
+    expect2((wf.nodes[1].widgets_values as any).videopreview.params.frame_load_cap).toBe(60);
+  });
+});
