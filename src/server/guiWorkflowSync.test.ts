@@ -298,8 +298,8 @@ describe2("reduceGuiWorkflow — deterministic reduced-tier edits to GUI widgets
     const applied = reduceGuiWorkflow(wf, changes, objectInfo);
     expect2(applied).toBe(3);
     // ref_max_size is widget index 4 (width,height,length,batch_size,ref_max_size):
-    expect2(wf.nodes[0].widgets_values[4]).toBe(640);
-    expect2(wf.nodes[0].widgets_values[2]).toBe(40); // length
+    expect2((wf.nodes[0].widgets_values as any)[4]).toBe(640);
+    expect2((wf.nodes[0].widgets_values as any)[2]).toBe(40); // length
     // dict widgets set by key, incl. the videopreview display:
     expect2((wf.nodes[1].widgets_values as any).frame_load_cap).toBe(60);
     expect2((wf.nodes[1].widgets_values as any).videopreview.params.frame_load_cap).toBe(60);
