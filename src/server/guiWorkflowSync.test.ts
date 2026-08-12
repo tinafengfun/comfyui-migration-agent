@@ -322,4 +322,40 @@ describe("syncGuiWorkflowToComfyUIServer — filesystem write (primary, hardened
     const written = await fs.readFile(path.join(comfyuiRoot, result.destination!), "utf8");
     expect(JSON.parse(written)).toEqual({ nodes: [], links: [] });
   });
+
+  it("writes the SINGLE canonical acceptance name and OVERWRITES a stale full-size file squatting it", async () => {
+    // Regression for the 2026-08-12 OOM: a stale full-size workflow at the canonical
+    // `<name>-step12-gui-acceptance.json` path was opened by the operator (seq=155440)
+    // because the sync wrote its reduced graph under a "-REDUCED" twin instead. The
+    // canonical name must always hold the freshly-synced graph.
+    const root = path.join(process.cwd(), ".demo-state", "tests", `gui-sync-overwrite-${Date.now()}`);
+    const task = await makeTask(root);
+    await seedGuiWorkflow(task.artifactPath);
+    const comfyuiRoot = path.join(root, "comfyui-root");
+    const wfDir = path.join(comfyuiRoot, "user", "default", "workflows");
+    await ensureDir(wfDir);
+    // canonical name for this task (matches sanitizeName("My Zimage Workflow!!"))
+    const canonical = "My_Zimage_Workflow__-step12-gui-acceptance.json";
+    // a stale full-size file (and a legacy -REDUCED twin) already squatting the sidebar
+    await fs.writeFile(path.join(wfDir, canonical), '{"STALE":"full-size"}', "utf8");
+    await fs.writeFile(
+      path.join(wfDir, "My_Zimage_Workflow__-REDUCED-step12-gui-acceptance.json"),
+      '{"STALE":"reduced-twin"}',
+      "utf8"
+    );
+    const node: GpuNode = {
+      name: "n", kind: "local", comfyui_root: comfyuiRoot, venv_python: "/usr/bin/python3",
+      model_roots: [], api_host: "127.0.0.1", api_port: 1
+    };
+    const result = await syncGuiWorkflowToComfyUIServer({ task, node });
+    expect(result.synced).toBe(true);
+    // exactly one canonical acceptance file, holding the fresh graph (not the stale one)
+    expect(result.destination).toContain(canonical);
+    const written = await fs.readFile(path.join(wfDir, canonical), "utf8");
+    expect(JSON.parse(written)).toEqual({ nodes: [], links: [] });
+    // the legacy -REDUCED twin is purged so it can't be mis-picked
+    await expect(
+      fs.access(path.join(wfDir, "My_Zimage_Workflow__-REDUCED-step12-gui-acceptance.json"))
+    ).rejects.toThrow();
+  });
 });

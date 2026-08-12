@@ -179,7 +179,15 @@ export async function syncGuiWorkflowToComfyUIServer(input: {
       }
     }
 
-    const destName = `${sanitizeName(task.name)}${reducedApplied > 0 ? "-REDUCED" : ""}-step12-gui-acceptance.json`;
+    // ALWAYS write to the SINGLE canonical acceptance name. The tier is carried in the
+    // file *content*, never the filename. A "-REDUCED" filename suffix (previous design)
+    // was itself the trap: it wrote a twin the operator never opens and left the canonical
+    // `<name>-step12-gui-acceptance.json` free for a STALE full-size workflow (from a prior
+    // run, often root-owned) to squat -- the operator opened that canonical name and queued
+    // full-size -> OOM/DEVICE_LOST (real incident 2026-08-12: seq=155440 vs reduced 73080).
+    // writeGuiWorkflowToNodeFs rm -f's the target first so it overwrites even a root-owned
+    // stale file (removal uses the workflows-dir write perm, not the file's).
+    const destName = `${sanitizeName(task.name)}-step12-gui-acceptance.json`;
     const destination = `workflows/${destName}`;
 
     // PRIMARY: write straight into the node's workflows dir. For runtime=docker the
@@ -235,8 +243,16 @@ async function writeGuiWorkflowToNodeFs(
   const filePath = `${dir}/${destName}`;
   const b64 = Buffer.from(contents, "utf8").toString("base64");
   const expected = Buffer.byteLength(contents, "utf8");
-  // write, then echo back the on-disk byte count so we can confirm it landed.
-  const cmd = `mkdir -p '${dir}' && printf %s '${b64}' | base64 -d > '${filePath}' && wc -c < '${filePath}'`;
+  // rm -f BEFORE writing: (1) overwrites a stale/full-size file squatting the canonical
+  // name even when it is root-owned (rm needs the *directory* write bit -- which the
+  // orchestrator user has -- not the file's, so a plain `> file` truncate would fail
+  // EACCES while `rm` + recreate succeeds); (2) also drops the legacy "-REDUCED" twin
+  // from the previous naming scheme so the sidebar holds exactly ONE acceptance workflow
+  // for this task, and it is the one we just wrote. Then write and echo the byte count.
+  const legacyTwin = `${dir}/${destName.replace(/-step12-gui-acceptance\.json$/, "-REDUCED-step12-gui-acceptance.json")}`;
+  const cmd =
+    `mkdir -p '${dir}' && rm -f '${filePath}' '${legacyTwin}' && ` +
+    `printf %s '${b64}' | base64 -d > '${filePath}' && wc -c < '${filePath}'`;
   const out = await runShellOnNode(node, cmd, 20_000);
   const bytes = out ? Number.parseInt(out.trim(), 10) : Number.NaN;
   if (Number.isFinite(bytes) && bytes === expected) {
