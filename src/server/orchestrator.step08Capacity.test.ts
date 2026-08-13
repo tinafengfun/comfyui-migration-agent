@@ -200,11 +200,37 @@ describe("effective VRAM level is hardened to disk (carries to Step 12 + survive
     expect(cfg.vram_level).toBe(2);
   });
 
-  it("effectiveVramLevel returns the max of the in-memory cache and the persisted file", async () => {
-    const { orchestrator, task } = await makeOrchestratorWithTask("persist-max");
-    await (orchestrator as any).persistVramLevel(task, 1, "x");
-    (orchestrator as any).vramEscalationLevel.set(task.id, 2); // mid-run escalated further
-    expect(await (orchestrator as any).effectiveVramLevel(task.id, task)).toBe(2);
+  it("effectiveVramLevel treats the persisted file as the SINGLE SOURCE OF TRUTH — a stale higher in-memory level does NOT win (drift regression)", async () => {
+    // Real 2026-08-12 bug: the in-memory map held L2 (--novram) from a full-size OOM
+    // escalation while the file had been written down to L1 (--lowvram) for the reduced
+    // tier; the old Math.max let the stale in-memory L2 win -> Step 12 relaunched at
+    // --novram while the file said --lowvram. The file must win.
+    const { orchestrator, task } = await makeOrchestratorWithTask("persist-truth");
+    await (orchestrator as any).persistVramLevel(task, 1, "reduced tier -> lowvram");
+    (orchestrator as any).vramEscalationLevel.set(task.id, 2); // stale higher level from an earlier escalation
+    expect(await (orchestrator as any).effectiveVramLevel(task.id, task)).toBe(1);
+    // and the exact launch flags come from the file, not a re-indexed level:
+    expect(await (orchestrator as any).effectiveVramFlags(task.id, task)).toEqual(["--reserve-vram", "1", "--lowvram"]);
+  });
+
+  it("effectiveVramFlags falls back to the ladder entry when no flags are persisted yet", async () => {
+    const { orchestrator, task } = await makeOrchestratorWithTask("flags-fallback");
+    (orchestrator as any).vramEscalationLevel.set(task.id, 1);
+    expect(await (orchestrator as any).effectiveVramFlags(task.id, task)).toEqual(["--reserve-vram", "1", "--lowvram"]);
+  });
+
+  it("accepting the reduced tier from a FRESH instance (empty in-memory) persists L1, not L0 (collapse regression)", async () => {
+    // Second 2026-08-12 bug: Math.min(inMemory ?? 0, 1) computed 0 after a restart
+    // (empty map), collapsing the reduced tier BELOW --lowvram. It must pin to L1.
+    const { orchestrator, task } = await makeOrchestratorWithTask("reduced-fresh");
+    await writeSummary(task, "insufficient");
+    (orchestrator as any).vramEscalationLevel.clear(); // simulate post-restart empty cache
+    const decision = { taskId: task.id, stepId: "08", questionEventId: "q", answer: "Accept reduced tier", wasFreeform: false, decidedAt: new Date().toISOString() };
+    await (orchestrator as any).applyStep08CapacityDecision({ task, decision });
+    const cfg = JSON.parse(await fs.readFile(path.join(task.artifactPath, "effective-run-config.json"), "utf8"));
+    expect(cfg.vram_level).toBe(1);
+    expect(cfg.vram_flags).toContain("--lowvram");
+    expect(cfg.vram_flags).not.toContain("--novram");
   });
 
   it("accepting the reduced tier hardens BOTH the reduced setting and the vram flags into one config (Step 12 gets both)", async () => {

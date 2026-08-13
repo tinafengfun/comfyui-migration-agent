@@ -562,6 +562,131 @@ def build_reduced_setting(prompt: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def apply_named_reduced_changes(
+    prompt: dict[str, Any], changes: list[dict[str, Any]]
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Apply the deterministic ``compute_reduced_changes`` edits ({node_id,input,new})
+    to a copy of the prompt -- the SAME edits the orchestrator applies to build the
+    reduced workflow that Step 12 runs. Used by the reduced-validation probe so it
+    measures EXACTLY the reduced config that will ship, not an approximation."""
+    reduced = json.loads(json.dumps(prompt, ensure_ascii=False))
+    applied: list[dict[str, Any]] = []
+    for ch in changes:
+        node_id = str(ch.get("node_id"))
+        key = ch.get("input")
+        node = reduced.get(node_id)
+        if isinstance(node, dict) and isinstance(node.get("inputs"), dict) and key in node["inputs"]:
+            node["inputs"][key] = ch.get("new")
+            applied.append(ch)
+    return reduced, applied
+
+
+def run_reduced_validation_probe(
+    api_url: str,
+    source_prompt: dict[str, Any],
+    changes: list[dict[str, Any]],
+    run_dir: Path,
+    comfy_root: Path,
+    usable_budget_bytes: int | None,
+    seed: int,
+    timeout_seconds: int,
+    poll_interval_seconds: float,
+) -> dict[str, Any]:
+    """Second, cheap Step-08 probe that actually RUNS the reduced config (name-based
+    reduced changes + minimized sampler steps) to CONFIRM it clears the OOM before
+    Step 12 commits to it -- instead of handing Step 12 an unvalidated recommendation.
+
+    Peak VRAM is per-forward and step-count-independent, so minimal sampler steps at
+    the reduced resolution/frames measure the true reduced peak cheaply. Best-effort:
+    never raises; on any error returns ``{"validated": None, ...}`` so the caller can
+    still gate on the (unvalidated) recommendation.
+
+    Emits a ``reduced_validation`` dict for step12_context/manifest:
+      validated  -> True (tier ok/tight, no OOM signature, run succeeded),
+                    False (over budget / OOM signature / crash), or None (couldn't tell).
+    """
+    if not changes:
+        return {
+            "validated": None,
+            "note": "no deterministic reduced changes were found to apply; nothing to validate.",
+        }
+    try:
+        reduced_prompt, applied = apply_named_reduced_changes(source_prompt, changes)
+        # Minimize sampler cost on the already-reduced prompt (reduce_resolution=False
+        # keeps the reduced res/frames we just applied; only trims steps).
+        reduced_prompt, _ = apply_reduced_full_path_settings(
+            reduced_prompt, "zimage_v2_step08/reduced_validation", seed, reduce_resolution=False
+        )
+        pid = str(uuid.uuid4())
+        cid = str(uuid.uuid4())
+        payload = {"prompt": reduced_prompt, "prompt_id": pid, "client_id": cid}
+        write_json(run_dir / "08-reduced-validation-prompt.json", reduced_prompt)
+        write_json(run_dir / "08-reduced-validation-request.json", payload)
+
+        poller = TelemetryPoller(poll_interval_seconds)
+        poller.start()
+        resp = post_json(f"{api_url}/prompt", payload)
+        write_json(run_dir / "08-reduced-validation-submit-response.json", resp)
+        rv_status = "submit_failed"
+        hist_summary: dict[str, Any] | None = None
+        if resp.get("ok"):
+            hr = wait_history(api_url, pid, timeout_seconds, poll_interval_seconds)
+            if hr.get("ok"):
+                rv_status = "history_available"
+                write_json(run_dir / "08-reduced-validation-history.json", hr["history"])
+                hist_summary = summarize_history(hr["history"], comfy_root.resolve())
+            else:
+                rv_status = "history_timeout"
+        poller.stop()
+
+        rv_telemetry = telemetry_summary(poller.samples, usable_budget_bytes)
+        write_json(run_dir / "08-reduced-validation-telemetry.json", {"summary": rv_telemetry, "samples": poller.samples})
+        ratio = rv_telemetry.get("peak_memory_budget_ratio")
+        signature = scan_capacity_signature(hist_summary)
+        status_obj = (hist_summary or {}).get("status") or {}
+        succeeded = rv_status == "history_available" and status_obj.get("status_str") == "success"
+
+        # Purpose-built classification for the REDUCED footprint (not classify_capacity's
+        # full-size semantics): does the reduced config actually fit without OOM?
+        if signature or (rv_status in {"history_timeout", "submit_failed"}):
+            tier, validated = "insufficient", False
+        elif ratio is None:
+            tier, validated = "unknown", None
+        elif ratio >= CAPACITY_RATIO_OVER_BUDGET:
+            tier, validated = "reduced", False  # over budget: survived via offload thrash, not a clean fit
+        elif ratio >= CAPACITY_RATIO_TIGHT:
+            tier, validated = "tight", bool(succeeded)
+        else:
+            tier, validated = "ok", bool(succeeded)
+
+        note = (
+            f"Reduced config actually RAN at Step 08 (peak/budget={ratio}, tier='{tier}', "
+            f"run_status={rv_status}, signature={signature}). "
+            + (
+                "It clears OOM at the current VRAM tier -- Step 12 can run it safely."
+                if validated
+                else "It did NOT clear cleanly -- reduce frames further or escalate the VRAM tier before Step 12."
+            )
+        )
+        return {
+            "validated": validated,
+            "reduced_capacity_tier": tier,
+            "reduced_peak_memory_budget_ratio": ratio,
+            "reduced_peak_memory_used_mib": rv_telemetry.get("peak_memory_used_mib"),
+            "reduced_run_status": rv_status,
+            "reduced_run_succeeded": succeeded,
+            "capacity_error_signature": signature,
+            "applied_changes": applied,
+            "note": note,
+        }
+    except Exception as exc:  # noqa: BLE001 - best-effort, surfaced not swallowed
+        return {
+            "validated": None,
+            "error": str(exc),
+            "note": "reduced-validation probe errored; treat the reduced setting as unvalidated.",
+        }
+
+
 def classify_capacity(
     run_status: str,
     run_level: str,
@@ -993,6 +1118,38 @@ def main() -> int:
         source_prompt=source_prompt,
     )
     capacity = decision["capacity"]
+
+    # One-shot reduced-config VALIDATION probe: if the full-size capacity probe says
+    # the reduced tier is needed, actually RUN the reduced config once and confirm it
+    # clears OOM -- so Step 12 launches a config PROVEN to fit, not an unvalidated
+    # recommendation (real incident 2026-08-12: reduced config handed to Step 12
+    # unvalidated, operator OOM'd). Only fires on the capacity-probe level when a
+    # reduction is recommended; adds ~1 probe run only when reduction is needed.
+    reduced_validation: dict[str, Any] | None = None
+    if args.run_level == "capacity-probe" and capacity.get("recommend_reduced_tier"):
+        recommended = capacity.get("recommended_reduced_setting")
+        reduced_changes = recommended.get("changes") if isinstance(recommended, dict) else None
+        reduced_validation = run_reduced_validation_probe(
+            api_url,
+            source_prompt,
+            reduced_changes or [],
+            run_dir,
+            args.comfy_root,
+            usable_budget_bytes,
+            args.seed,
+            args.timeout_seconds,
+            args.poll_interval_seconds,
+        )
+        # Annotate the recommended setting with the validation verdict so downstream
+        # (orchestrator gate, guiWorkflowSync) can surface "validated" to the operator.
+        if isinstance(recommended, dict):
+            recommended["validated"] = reduced_validation.get("validated")
+            recommended["validation"] = {
+                "reduced_capacity_tier": reduced_validation.get("reduced_capacity_tier"),
+                "reduced_peak_memory_budget_ratio": reduced_validation.get("reduced_peak_memory_budget_ratio"),
+                "note": reduced_validation.get("note"),
+            }
+
     cache_assisted = bool(cached_nodes)
     result_class = (
         "restricted_reduced_full_path_runtime_policy_success"
@@ -1072,12 +1229,15 @@ def main() -> int:
             "full_size_supported": capacity["full_size_supported"],
             "recommend_reduced_tier": capacity["recommend_reduced_tier"],
             "recommended_reduced_setting": capacity["recommended_reduced_setting"],
+            "reduced_validation": reduced_validation,
             "peak_memory_budget_ratio": telemetry.get("peak_memory_budget_ratio"),
             "capacity_error_signature": capacity["capacity_error_signature"],
             "note": (
                 "Step 08 measured full-size capacity via a full-resolution probe. If capacity_tier is "
-                "'tight'/'reduced'/'insufficient', run Step 12 GUI acceptance at recommended_reduced_setting "
-                "and downgrade the claim boundary (reduced-tier accepted, NOT full-size customer-ready)."
+                "'tight'/'reduced'/'insufficient', a reduced-validation probe then RAN the reduced config "
+                "(reduced_validation.validated true = it cleared OOM). Run Step 12 GUI acceptance at "
+                "recommended_reduced_setting and downgrade the claim boundary (reduced-tier accepted, NOT "
+                "full-size customer-ready)."
             ),
         },
         "result_class": result_class,

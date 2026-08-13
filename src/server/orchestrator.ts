@@ -1040,6 +1040,11 @@ export class MigrationOrchestrator {
         // Step 12 GUI demo instead of the demo relaunching at default flags and
         // OOM-ing where Step 08 succeeded.
         const vramLevel = Math.min(await this.effectiveVramLevel(taskId, task), VRAM_ESCALATION_LADDER.length - 1);
+        // Launch with the EXACT persisted flags (the BKC hardened by Step 07/08 +
+        // reduced-tier acceptance), not a ladder entry re-indexed from the level.
+        // This is what makes the flags proven in the previous step carry through to
+        // Step 12 verbatim (fixes the lowvram->novram drift).
+        const persistedVramFlags = await this.effectiveVramFlags(taskId, task);
         // Step 07/08/12 all launch ComfyUI deterministically. Step 12 (the final
         // GUI demo) MUST run against the SAME validated docker container + NFS venv
         // as Steps 05-08 -- which has llama_cpp (the VLM node dependency), the fp8
@@ -1049,7 +1054,7 @@ export class MigrationOrchestrator {
         // for Step 12 so a stray/wrong instance on the port can't be silently reused.
         const needEnsure = stepId === "07" || stepId === "08" || stepId === "12" || vramLevel > 0;
         if (needEnsure) {
-          const vramFlags = VRAM_ESCALATION_LADDER[vramLevel];
+          const vramFlags = persistedVramFlags;
           const forceRelaunch = stepId === "12" || vramLevel > 0;
           const ensureResult = await ensureComfyUiUp({
             node,
@@ -1069,7 +1074,7 @@ export class MigrationOrchestrator {
             type: "progress",
             message:
               vramLevel > 0
-                ? `ComfyUI launch before Step ${stepId} at VRAM escalation level ${vramLevel} (${VRAM_ESCALATION_LADDER[vramLevel].join(" ")}, proven in the capacity ladder): ${ensureResult.detail} (${ensureResult.action})`
+                ? `ComfyUI launch before Step ${stepId} at VRAM escalation level ${vramLevel} (${persistedVramFlags.join(" ")}, proven in the capacity ladder): ${ensureResult.detail} (${ensureResult.action})`
                 : `ComfyUI reachability check before Step ${stepId}: ${ensureResult.detail} (${ensureResult.action})`,
             data: ensureResult
           });
@@ -3578,17 +3583,49 @@ export class MigrationOrchestrator {
    * into the delivered run, not just the mid-run in-memory state.
    */
   private async effectiveVramLevel(taskId: string, task: MigrationTask): Promise<number> {
-    const inMemory = this.vramEscalationLevel.get(taskId) ?? 0;
-    let persisted = 0;
+    // The persisted effective-run-config.json is the SINGLE SOURCE OF TRUTH for the
+    // launch level. It is kept in sync on every escalation (persistVramLevel writes
+    // the file BEFORE the re-launch) and on reduced-tier acceptance, so once it
+    // exists it always reflects the currently-intended level. Using it directly
+    // (instead of Math.max with the in-memory map) fixes a real drift: the in-memory
+    // map could still hold L2 (--novram) from an earlier full-size OOM escalation
+    // while the file had been written down to L1 (--lowvram) for the reduced tier,
+    // and the old Math.max let the stale in-memory L2 win -> Step 12 relaunched at
+    // --novram while the file said --lowvram (real incident 2026-08-12).
+    let persisted: number | undefined;
     try {
       const cfg = JSON.parse(await fs.readFile(path.join(task.artifactPath, "effective-run-config.json"), "utf8"));
       if (typeof cfg.vram_level === "number") persisted = cfg.vram_level;
     } catch {
       // no persisted config yet
     }
-    const level = Math.max(inMemory, persisted);
-    if (level > inMemory) this.vramEscalationLevel.set(taskId, level); // re-warm cache after restart
-    return level;
+    if (typeof persisted === "number") {
+      this.vramEscalationLevel.set(taskId, persisted); // keep the in-memory cache aligned to the file
+      return persisted;
+    }
+    // No persisted config yet (early steps before any escalation): fall back to the
+    // in-memory map, which the live escalation loop bumps before it first persists.
+    return this.vramEscalationLevel.get(taskId) ?? 0;
+  }
+
+  /**
+   * The exact launch flags to use for this task, read from the persisted
+   * effective-run-config.json (the hardened BKC) so the container is (re)launched
+   * with EXACTLY the flags proven in Step 07/08 -- not re-derived from a level index
+   * that could disagree with the file. Falls back to the ladder entry for the
+   * effective level when no flags are persisted yet.
+   */
+  private async effectiveVramFlags(taskId: string, task: MigrationTask): Promise<string[]> {
+    try {
+      const cfg = JSON.parse(await fs.readFile(path.join(task.artifactPath, "effective-run-config.json"), "utf8"));
+      if (Array.isArray(cfg.vram_flags) && cfg.vram_flags.every((f: unknown) => typeof f === "string")) {
+        return cfg.vram_flags as string[];
+      }
+    } catch {
+      // no persisted config yet
+    }
+    const level = Math.min(await this.effectiveVramLevel(taskId, task), VRAM_ESCALATION_LADDER.length - 1);
+    return [...VRAM_ESCALATION_LADDER[level]];
   }
 
   /**
@@ -3726,6 +3763,30 @@ export class MigrationOrchestrator {
     const workflowName = path.basename(task.workflowPath).replace(/\.json$/i, "");
     const ratioPct = typeof ratio === "number" ? `${Math.round(ratio * 100)}%` : undefined;
 
+    // The reduced config was actually RUN by Step 08's reduced-validation probe --
+    // surface that verdict so the operator accepts evidence-backed, not a guess.
+    const rv = (capacity.reduced_validation ?? summary.step12_context?.reduced_validation) as
+      | Record<string, any>
+      | undefined;
+    let validationLine = "";
+    if (rv) {
+      const rvRatioPct =
+        typeof rv.reduced_peak_memory_budget_ratio === "number"
+          ? `${Math.round(rv.reduced_peak_memory_budget_ratio * 100)}%`
+          : undefined;
+      if (rv.validated === true) {
+        validationLine =
+          `\n\n✅ **Reduced config validated:** Step 08 ran the reduced setting and it cleared OOM` +
+          (rvRatioPct ? ` (reduced peak ≈ ${rvRatioPct} of budget)` : "") +
+          ` — safe to accept.`;
+      } else if (rv.validated === false) {
+        validationLine =
+          `\n\n⚠️ **Reduced config did NOT clear cleanly** when Step 08 ran it` +
+          (rvRatioPct ? ` (reduced peak ≈ ${rvRatioPct} of budget)` : "") +
+          `${rv.capacity_error_signature ? `, ${rv.capacity_error_signature}` : ""} — accepting it may still OOM at Step 12; consider reducing frames further or a larger node.`;
+      }
+    }
+
     const choices = [
       "Accept reduced tier — run GUI acceptance at the recommended reduced setting",
       "Hardware escalation — full size needs a larger / multi-GPU node",
@@ -3738,7 +3799,8 @@ export class MigrationOrchestrator {
       `.\n\nFull size does not fit reliably here. Choose how to proceed:\n\n` +
       `1. **Accept reduced tier** — Step 12 GUI acceptance runs at the recommended reduced setting (${recommended}); delivered as reduced-tier, **NOT full-size customer-ready**.\n` +
       `2. **Hardware escalation** — stop here; full-size customer-ready needs a larger / multi-GPU node.\n` +
-      `3. **Hard stop** — stop the migration.`;
+      `3. **Hard stop** — stop the migration.` +
+      validationLine;
 
     await this.updateStepAndPersist(task.id, step.id, "waiting_for_human", {
       summary: `Step 08 full-size capacity is '${tier}'. Choose: accept reduced tier / hardware escalation / hard stop.`,
@@ -3838,7 +3900,13 @@ export class MigrationOrchestrator {
       // (level 1) so the demo runs at a practical speed. If the reduced workflow
       // still doesn't fit at --lowvram, the ladder re-escalates from there.
       const REDUCED_TIER_VRAM_LEVEL = 1;
-      const cappedLevel = Math.min(this.vramEscalationLevel.get(task.id) ?? 0, REDUCED_TIER_VRAM_LEVEL);
+      // The reduced tier launches at EXACTLY --lowvram (level 1). Do NOT compute this
+      // as Math.min(inMemory ?? 0, 1): after a backend restart the in-memory map is
+      // empty, so `?? 0` collapsed the level to 0 (no offload) and the file was
+      // written down to vram_level:0 -- a silent drift BELOW the intended lowvram
+      // (real incident 2026-08-12). The reduced tier is a fixed floor+cap at L1; if
+      // the reduced workflow still OOMs there, the live ladder re-escalates from L1.
+      const cappedLevel = REDUCED_TIER_VRAM_LEVEL;
       this.vramEscalationLevel.set(task.id, cappedLevel);
       await this.mergeEffectiveRunConfig(task, {
         reduced_tier: true,

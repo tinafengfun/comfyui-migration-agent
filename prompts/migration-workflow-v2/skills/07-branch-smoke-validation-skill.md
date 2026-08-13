@@ -60,7 +60,7 @@ It consumes `06-branch-prompts.csv`, applies bounded smoke settings, submits eac
 - smoke result generalized to all branches
 - single-image branch used to claim double/triple-image support
 - first/last-frame path used to claim all multi-reference variants
-- frame count or resolution tail case silently untested
+- frame count or resolution tail case silently untested — for video graphs, **`frame_load_cap` (VHS_LoadVideo) is the dominant VRAM/OOM driver, more than resolution** (the branch smoke caps it to 16 for reachability). See [wan22-capacity-reference](wan22-capacity-reference.md).
 - downstream custom-node fails on a declared runtime dependency that was not installed during environment deployment
 - rerun after fixing a late blocker succeeds only because upstream outputs were cached, but the report omits cached-node evidence
 - terminal non-output wrapper from Step 06 is ignored and the raw non-output node is submitted
