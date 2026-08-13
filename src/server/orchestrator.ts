@@ -228,6 +228,14 @@ export class MigrationOrchestrator {
    * counters above).
    */
   private readonly vramEscalationLevel = new Map<string, number>();
+  /**
+   * Task IDs whose XPU should be `xpu-smi --reset` on the NEXT forced relaunch,
+   * because the previous Step 07/08 run hit a capacity OOM / DEVICE_LOST that can
+   * wedge the `xe` driver (VM worker -12 / engine resets) — a plain relaunch frees
+   * VRAM but not the driver. Set when the capacity ladder escalates; consumed
+   * (and cleared) by the pre-step ComfyUI launch. In-memory (resets on restart).
+   */
+  private readonly xpuResetPending = new Set<string>();
 
   constructor(
     private readonly config: AppConfig,
@@ -1056,13 +1064,18 @@ export class MigrationOrchestrator {
         if (needEnsure) {
           const vramFlags = persistedVramFlags;
           const forceRelaunch = stepId === "12" || vramLevel > 0;
+          // Reset the XPU on this relaunch if a prior capacity OOM/DEVICE_LOST at
+          // Step 07/08 flagged the driver as possibly wedged (consume-once).
+          const resetXpu = this.xpuResetPending.has(taskId);
+          if (resetXpu) this.xpuResetPending.delete(taskId);
           const ensureResult = await ensureComfyUiUp({
             node,
             apiUrl,
             container: containerName,
             waitSec: 150,
             vramFlags,
-            forceRelaunch
+            forceRelaunch,
+            resetXpu
           }).catch((err) => ({
             ok: false as const,
             action: "failed" as const,
@@ -1293,6 +1306,9 @@ export class MigrationOrchestrator {
           if (level < VRAM_ESCALATION_LADDER.length - 1) {
             const nextLevel = level + 1;
             this.vramEscalationLevel.set(taskId, nextLevel);
+            // The OOM/DEVICE_LOST may have wedged the xe driver — reset the XPU on
+            // the escalated relaunch (a plain relaunch frees VRAM but not the driver).
+            this.xpuResetPending.add(taskId);
             // Harden to disk so Step 12 (GUI demo) + delivery use the proven flags,
             // and the level survives a backend restart.
             await this.persistVramLevel(task, nextLevel, `capacity OOM at Step ${stepId}`);
@@ -1301,7 +1317,7 @@ export class MigrationOrchestrator {
               taskId,
               stepId,
               type: "progress",
-              message: `Capacity OOM at Step ${stepId} — auto-retrying with stronger lossless VRAM offload (level ${nextLevel}: ${nextFlags}) before asking for a reduced tier.`
+              message: `Capacity OOM at Step ${stepId} — resetting the XPU (xpu-smi --reset) and auto-retrying with stronger lossless VRAM offload (level ${nextLevel}: ${nextFlags}) before asking for a reduced tier.`
             });
             await this.updateStepAndPersist(taskId, stepId, "running");
             this.activeStepRuns.delete(runKey);

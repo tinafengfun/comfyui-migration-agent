@@ -20,7 +20,7 @@
 import { execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
 import fs from "node:fs";
-import { resolveNfsShareRoot, type GpuNode } from "./gpuNodes";
+import { resolveNfsShareRoot, runShellOnNode, type GpuNode } from "./gpuNodes";
 
 const execFile = promisify(execFileCb);
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -64,6 +64,28 @@ export async function dockerOnNode(
     return { ok: true, stdout, stderr };
   } catch (e: any) {
     return { ok: false, stdout: e?.stdout ?? "", stderr: e?.stderr ?? String(e) };
+  }
+}
+
+/**
+ * Reset the XPU via `xpu-smi config -d <device> --reset` to recover the `xe`
+ * driver after a capacity OOM / DEVICE_LOST wedges it (VM worker -12 / engine
+ * resets) — a container relaunch frees VRAM but not the driver state, so without
+ * this the next run can DEVICE_LOST again on a config that fit minutes earlier
+ * (real incident 2026-08-12). Best-effort: never throws; needs passwordless sudo
+ * and the device to be free (call AFTER `docker rm -f`). Returns a short detail.
+ */
+export async function resetXpuDevice(node: GpuNode, timeoutMs = 120_000): Promise<{ ok: boolean; detail: string }> {
+  const device = String(node.xpu_device ?? "0");
+  // `sudo -n` (non-interactive): if sudo isn't passwordless this fails cleanly
+  // rather than hanging on a password prompt. The reset itself takes ~1 min.
+  const cmd = `sudo -n xpu-smi config -d ${shellQuote(device)} --reset 2>&1 || true`;
+  try {
+    const out = (await runShellOnNode(node, cmd, timeoutMs)) ?? "";
+    const ok = /succeed to reset/i.test(out);
+    return { ok, detail: ok ? `xpu-smi reset GPU ${device} ✓` : `xpu-smi reset GPU ${device} not confirmed: ${out.trim().slice(0, 160) || "no output"}` };
+  } catch (e) {
+    return { ok: false, detail: `xpu-smi reset GPU ${device} threw: ${e instanceof Error ? e.message : String(e)}` };
   }
 }
 
@@ -293,21 +315,36 @@ export async function ensureComfyUiUp(input: {
    * apply escalated flags (a plain restart/`docker start` reuses the old flags).
    */
   forceRelaunch?: boolean;
+  /**
+   * Reset the XPU (`xpu-smi config -d <device> --reset`) between teardown and
+   * relaunch. Set by the capacity-retry ladder when the previous run hit an OOM /
+   * DEVICE_LOST that can wedge the `xe` driver -- a plain relaunch frees VRAM but
+   * not the driver, so the next run can DEVICE_LOST again. Only honored together
+   * with forceRelaunch on a docker node. Best-effort (never blocks the relaunch).
+   */
+  resetXpu?: boolean;
 }): Promise<EnsureComfyUiUpResult> {
-  const { node, apiUrl, waitSec = 150, vramFlags, forceRelaunch = false } = input;
+  const { node, apiUrl, waitSec = 150, vramFlags, forceRelaunch = false, resetXpu = false } = input;
 
   // Capacity-ladder escalation: tear down whatever is running and relaunch fresh
   // with the escalated VRAM flags (restart/`docker start` would reuse old flags).
   if (forceRelaunch) {
+    let resetDetail = "";
     if (node.runtime === "docker" && input.container) {
       await dockerOnNode(node, ["rm", "-f", input.container], 60_000);
+      // Reset the wedged XPU AFTER the container is gone (device is now free) and
+      // BEFORE relaunch, so the fresh ComfyUI starts on a clean driver.
+      if (resetXpu) {
+        const r = await resetXpuDevice(node);
+        resetDetail = `; ${r.detail}`;
+      }
     }
     const listen = node.kind === "ssh" ? "0.0.0.0" : "127.0.0.1";
     await startComfyUi(node, node.api_port, listen, input.container, vramFlags);
     const up = await waitUp(apiUrl, waitSec);
     return up
-      ? { ok: true, detail: `relaunched fresh with vram flags [${resolveVramFlags(node, vramFlags).join(" ")}]`, action: "started_fresh" }
-      : { ok: false, detail: `forced relaunch did not bring up /system_stats within ${waitSec}s`, action: "failed" };
+      ? { ok: true, detail: `relaunched fresh with vram flags [${resolveVramFlags(node, vramFlags).join(" ")}]${resetDetail}`, action: "started_fresh" }
+      : { ok: false, detail: `forced relaunch did not bring up /system_stats within ${waitSec}s${resetDetail}`, action: "failed" };
   }
 
   if (await objectInfoUp(apiUrl)) {

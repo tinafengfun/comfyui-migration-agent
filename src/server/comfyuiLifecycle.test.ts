@@ -158,4 +158,79 @@ describe("ensureComfyUiUp", () => {
       expect.anything()
     );
   }, 15_000);
+
+  it("forceRelaunch + resetXpu runs xpu-smi --reset AFTER teardown and BEFORE relaunch", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false }));
+    const seen: string[] = [];
+    execFileMock.mockImplementation((cmd: string, args: string[]) => {
+      seen.push(`${cmd} ${Array.isArray(args) ? args.join(" ") : ""}`);
+      if (cmd === "bash" && args?.[1]?.includes("xpu-smi")) {
+        return Promise.resolve({ stdout: "It may take one minute...\nSucceed to reset the GPU 0", stderr: "" });
+      }
+      return Promise.resolve({ stdout: "", stderr: "" });
+    });
+    writeFileSyncMock.mockReset();
+
+    const { ensureComfyUiUp } = await import("./comfyuiLifecycle");
+    const result = await ensureComfyUiUp({
+      node: dockerNode(),
+      apiUrl: "http://127.0.0.1:8188",
+      container: "comfyui-task-1",
+      waitSec: 5,
+      vramFlags: ["--reserve-vram", "1", "--lowvram"],
+      forceRelaunch: true,
+      resetXpu: true
+    });
+
+    const rmIdx = seen.findIndex((s) => s.includes("rm -f") && s.includes("comfyui-task-1"));
+    const resetIdx = seen.findIndex((s) => s.includes("xpu-smi config -d 0 --reset"));
+    expect(rmIdx).toBeGreaterThanOrEqual(0);
+    expect(resetIdx).toBeGreaterThan(rmIdx); // reset happens after the container is torn down
+    expect(result.detail).toContain("xpu-smi reset GPU 0");
+  }, 15_000);
+
+  it("forceRelaunch WITHOUT resetXpu never calls xpu-smi", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false }));
+    const seen: string[] = [];
+    execFileMock.mockImplementation((cmd: string, args: string[]) => {
+      seen.push(`${cmd} ${Array.isArray(args) ? args.join(" ") : ""}`);
+      return Promise.resolve({ stdout: "", stderr: "" });
+    });
+    writeFileSyncMock.mockReset();
+
+    const { ensureComfyUiUp } = await import("./comfyuiLifecycle");
+    await ensureComfyUiUp({
+      node: dockerNode(),
+      apiUrl: "http://127.0.0.1:8188",
+      container: "comfyui-task-1",
+      waitSec: 5,
+      vramFlags: ["--reserve-vram", "1", "--lowvram"],
+      forceRelaunch: true
+    });
+    expect(seen.some((s) => s.includes("xpu-smi"))).toBe(false);
+  }, 15_000);
+});
+
+describe("resetXpuDevice", () => {
+  beforeEach(() => execFileMock.mockReset());
+  it("runs `xpu-smi config -d <device> --reset` on the node and confirms success", async () => {
+    execFileMock.mockImplementation((cmd: string, args: string[]) => {
+      if (cmd === "bash" && args?.[1]?.includes("xpu-smi config -d 3 --reset")) {
+        return Promise.resolve({ stdout: "Succeed to reset the GPU 3", stderr: "" });
+      }
+      return Promise.resolve({ stdout: "", stderr: "" });
+    });
+    const { resetXpuDevice } = await import("./comfyuiLifecycle");
+    const r = await resetXpuDevice(dockerNode({ xpu_device: 3 }));
+    expect(r.ok).toBe(true);
+    expect(r.detail).toContain("GPU 3");
+  });
+
+  it("defaults to device 0 and reports not-confirmed when the reset output is missing", async () => {
+    execFileMock.mockImplementation(() => Promise.resolve({ stdout: "", stderr: "" }));
+    const { resetXpuDevice } = await import("./comfyuiLifecycle");
+    const r = await resetXpuDevice(dockerNode());
+    expect(r.ok).toBe(false);
+    expect(r.detail).toContain("GPU 0");
+  });
 });

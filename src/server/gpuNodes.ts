@@ -74,6 +74,14 @@ export interface GpuNode {
    * reduced-size tier for full-size video). Confirmed live 2026-08-09.
    */
   attn_backend?: string;
+  /**
+   * XPU device index for `xpu-smi config -d <n> --reset`, used to recover the GPU
+   * after a capacity OOM / DEVICE_LOST wedges the `xe` driver (VM worker -12 /
+   * engine resets) — a container relaunch frees memory but NOT the driver state.
+   * Defaults to "0" (matches the container's ZE_AFFINITY_MASK=0). Reset needs
+   * passwordless sudo on the node and is run while the container is torn down.
+   */
+  xpu_device?: number | string;
 }
 
 export interface GpuNodeRegistry {

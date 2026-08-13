@@ -4,7 +4,7 @@ When a step hits an XPU capacity OOM (`out_of_device_memory` / `device_lost` / `
 
 ## Lossless rungs (identical output, only slower) — applied AUTOMATICALLY by the orchestrator
 
-These change model *placement/scheduling*, never the computation, so the generated result is byte-for-byte the same tier — just slower. The orchestrator's capacity-retry ladder (`orchestrator.ts` + `comfyuiLifecycle.VRAM_ESCALATION_LADDER`) relaunches ComfyUI and re-runs Step 07/08 through these on a capacity OOM, **before** any human gate:
+These change model *placement/scheduling*, never the computation, so the generated result is byte-for-byte the same tier — just slower. The orchestrator's capacity-retry ladder (`orchestrator.ts` + `comfyuiLifecycle.VRAM_ESCALATION_LADDER`) relaunches ComfyUI and re-runs Step 07/08 through these on a capacity OOM, **before** any human gate. On each escalation it also **resets the XPU** (`xpu-smi config -d <device> --reset`, between container teardown and relaunch) because an OOM/DEVICE_LOST can wedge the `xe` driver (VM worker -12 / engine resets) — a plain relaunch frees VRAM but not the driver, so without the reset the next run can DEVICE_LOST again on a config that fit minutes earlier:
 
 1. **fp8 keep-on-move** (`OMNI_FP8_KEEP_ON_MOVE=1`, always on) — fp8 tensors move XPU↔CPU without a bf16 upcast.
 2. **`--lowvram`** (ladder level 1) — sequential model load + offload-after-use; frees resident weights so the active forward fits.
