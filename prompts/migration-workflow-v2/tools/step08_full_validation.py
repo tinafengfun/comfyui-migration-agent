@@ -517,17 +517,52 @@ def scan_capacity_signature(history_summary: dict[str, Any] | None) -> str | Non
 RESOLUTION_CAP_INPUTS = ("ref_max_size", "max_size", "max_resolution")
 SPATIAL_INPUTS = ("width", "height")
 FRAME_INPUTS = ("length", "num_frames", "frames", "video_frames", "frame_load_cap", "video_length")
+# Inputs that express a frame rate, used to convert the WAN2.2 5-second limit into a
+# frame budget for a given node (node-local first, then any workflow-wide value).
+FPS_INPUTS = ("fps", "frame_rate", "framerate", "force_rate", "output_fps")
+
+# WAN2.2 (A14B) generates short clips only -- <= ~5 seconds. So any frame-count input
+# in the REDUCED config must map to <= 5 s of video, or the reduced graph is not a
+# valid WAN2.2 config (and needlessly inflates the attention token count). We cap all
+# frame inputs at the 5-second frame budget in addition to halving.
+WAN22_MAX_SECONDS = 5.0
+WAN22_DEFAULT_FPS = 16  # WAN2.2 base generation fps (81 frames ~= 5 s)
 
 
 def _halve_to_16(value: float) -> int:
     return max(256, int(round(value / 2 / 16) * 16))
 
 
+def _fps_for_node(node: dict[str, Any], prompt: dict[str, Any]) -> float:
+    """Best-effort fps for converting the 5 s limit to a frame budget: a frame-rate
+    input on the same node wins; else any workflow-wide frame-rate input; else the
+    WAN2.2 default (16). Only literal numerics are considered."""
+    inputs = node.get("inputs", {}) if isinstance(node, dict) else {}
+    for k in FPS_INPUTS:
+        v = inputs.get(k) if isinstance(inputs, dict) else None
+        if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0:
+            return float(v)
+    for n in prompt.values():
+        ins = n.get("inputs", {}) if isinstance(n, dict) else {}
+        for k in FPS_INPUTS:
+            v = ins.get(k) if isinstance(ins, dict) else None
+            if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0:
+                return float(v)
+    return float(WAN22_DEFAULT_FPS)
+
+
+def _five_second_frame_cap(node: dict[str, Any], prompt: dict[str, Any]) -> int:
+    """Max frames allowed for a WAN2.2 <=5 s clip at this node's fps (>= 16)."""
+    return max(16, int(round(WAN22_MAX_SECONDS * _fps_for_node(node, prompt))))
+
+
 def compute_reduced_changes(prompt: dict[str, Any]) -> list[dict[str, Any]]:
     """Deterministically find the resolution/frame drivers in the prompt and halve
-    them, so the reduced tier actually lowers the attention token count. Returns a
-    list of ``{node_id, input, old, new, kind, class_type}`` edits. Only literal
-    numeric inputs are touched (links are lists and are skipped)."""
+    them, so the reduced tier actually lowers the attention token count. Frame inputs
+    are ALSO capped at the WAN2.2 5-second frame budget (WAN2.2 only generates <= 5 s
+    clips, so a longer reduced config is invalid and wastes tokens). Returns a list of
+    ``{node_id, input, old, new, kind, class_type}`` edits. Only literal numeric
+    inputs are touched (links are lists and are skipped)."""
     changes: list[dict[str, Any]] = []
     for node_id, node in prompt.items():
         if not isinstance(node, dict):
@@ -549,7 +584,16 @@ def compute_reduced_changes(prompt: dict[str, Any]) -> list[dict[str, Any]]:
             elif kl == "megapixels" and val > 0.3:
                 new, kind = 0.25, "megapixels"
             elif kl in FRAME_INPUTS and val > 24:
-                new, kind = max(16, int(val) // 2), "frames"
+                # Halve for VRAM, THEN clamp to the WAN2.2 <=5 s frame budget so the
+                # reduced clip never exceeds the model's max length.
+                cap = _five_second_frame_cap(node, prompt)
+                new, kind = min(max(16, int(val) // 2), cap), "frames"
+            elif kl in FRAME_INPUTS:
+                # Not large enough to halve, but STILL enforce the 5 s limit: WAN2.2
+                # cannot exceed ~5 s, so clamp any over-length frame input down.
+                cap = _five_second_frame_cap(node, prompt)
+                if val > cap:
+                    new, kind = cap, "frames_5s_cap"
             if new is not None and new != val:
                 changes.append(
                     {"node_id": str(node_id), "input": key, "old": val, "new": new, "kind": kind, "class_type": class_type}
@@ -563,7 +607,7 @@ def build_reduced_setting(prompt: dict[str, Any]) -> dict[str, Any]:
     token driver (ref_max_size), not just width/height."""
     changes = compute_reduced_changes(prompt)
     res = next((c["new"] for c in changes if c["kind"] in ("resolution_cap", "spatial")), None)
-    frames = next((c["new"] for c in changes if c["kind"] == "frames"), None)
+    frames = next((c["new"] for c in changes if c["kind"] in ("frames", "frames_5s_cap")), None)
     return {
         "resolution": f"max_size~{res}" if res else "reduced",
         "frames": frames,
@@ -572,10 +616,11 @@ def build_reduced_setting(prompt: dict[str, Any]) -> dict[str, Any]:
             "Deterministically reduces the resolution/token drivers (including ref_max_size / "
             "max_size, which govern the attention token count in ref-resize video pipelines) and "
             "the frame count. Reducing width/height alone is NOT enough when a ref_max_size cap "
-            "governs the processing resolution. Step 12 MUST verify the attention seq/token count "
-            "actually dropped before accepting."
+            "governs the processing resolution. Frame counts are also clamped to the WAN2.2 "
+            "<=5-second budget (WAN2.2 only generates short <=5 s clips). Step 12 MUST verify the "
+            "attention seq/token count actually dropped before accepting."
         ),
-        "note": "480x832 x 49 confirmed clean where 720x1280 x 81 failed on a 30 GB XPU.",
+        "note": "480x832 x 49 confirmed clean where 720x1280 x 81 failed on a 30 GB XPU. Frames capped at WAN2.2's <=5 s limit.",
     }
 
 

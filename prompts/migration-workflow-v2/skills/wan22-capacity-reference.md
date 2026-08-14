@@ -34,6 +34,8 @@ Neither alone is enough: offload without seq-reduction still peaks near the ceil
 
 So when reducing: **cut frames first** (`length` / `frame_load_cap` / `num_frames`), then resolution. The real spatial driver in ref-resize pipelines is **`ref_max_size` / `max_size`**, not `width`/`height` (reducing width/height alone left `seq` unchanged).
 
+**Hard model limit: WAN2.2 only generates clips of ≤ ~5 seconds.** So every frame-count input in the reduced config must map to ≤ 5 s of video (at the base 16 fps that's ~80 frames; the workflow's `length=81` is exactly the 5 s ceiling). `compute_reduced_changes` halves frame inputs for VRAM **and** clamps them to the 5 s frame budget (`round(5 × fps)`, fps discovered from `fps`/`frame_rate`/`force_rate` inputs, default 16) — a reduced config longer than 5 s is not a valid WAN2.2 config and just inflates the token count.
+
 ## Offload does NOT fix the activation overflow
 
 `--lowvram`/`--novram`/`block_swap` relocate **weights only** — never in-flight activations. At large `seq` the OmniXPU ESIMD attention kernel hits **FP16 overflow → falls back to SDPA** (`[OmniXPU] FP16 overflow in ESIMD, falling back to SDPA`); the run survives but slower. Offload helps *indirectly* (freeing weight VRAM leaves room for a bigger activation peak) but cannot fix the numeric overflow. The overflow itself is only removed by: reducing `seq`, forcing SDPA/flash or fp32 attention accumulation, or tiled attention/VAE. See [xpu-attention-fallback](xpu-attention-fallback.md).
