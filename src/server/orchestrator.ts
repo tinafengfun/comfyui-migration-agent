@@ -3910,6 +3910,33 @@ export class MigrationOrchestrator {
       // proven unreliable). Produces reduced-runtime-policy-prompt.json for Step 12
       // to run + deliver, so the demo is genuinely reduced, not full-size.
       const reducedPromptPath = await this.generateReducedWorkflow(task, recommendedObj?.changes);
+      // SAFETY NET (real incident 2026-08-13, task 051acd0a): NEVER ship a full-size
+      // workflow under a `reduced_tier` flag. If no structured reduced changes were
+      // produced (recommended_reduced_setting is a text string, or generateReducedWorkflow
+      // applied nothing), reducedPromptPath is undefined -> the Step 12 sidebar would be
+      // FULL-SIZE and OOM. This happens when the Step 08 capacity-probe crashed the XPU
+      // (DEVICE_LOST) and never wrote the structured setting. Hard-stop with a clear,
+      // actionable error instead of silently delivering the full-size graph.
+      if (!reducedPromptPath) {
+        const reason =
+          "Step 08 reduced tier was accepted but NO reduced workflow could be generated: the Step 08 " +
+          "summary has no structured `recommended_reduced_setting.changes` (only a text fallback). This " +
+          "means the capacity-probe likely DEVICE_LOST'd the XPU before writing the structured setting. " +
+          "Shipping the reduced tier now would push the FULL-SIZE workflow to Step 12 and OOM. Re-run Step " +
+          "08 (the backend resets the XPU on the retry) so the capacity-probe emits " +
+          "`recommended_reduced_setting.changes`; if the full-size probe keeps crashing, reset the XPU " +
+          "(`xpu-smi config -d 0 --reset`) and run `step08_full_validation.py --run-level reduced-validation` " +
+          "to produce + validate the reduced config, then accept again.";
+        await this.updateStepAndPersist(task.id, "08", "hard_stopped", { summary: reason, error: reason });
+        await this.emit({
+          taskId: task.id,
+          stepId: "08",
+          type: "hard_stop",
+          message: reason,
+          data: { capacity_decision: "reduced_no_structured_changes" }
+        });
+        return true;
+      }
       // The full-size capacity ladder may have escalated to --novram (level 2),
       // which streams the whole model every step (~6 min/step). The REDUCED
       // workflow is much smaller and must NOT inherit that: cap it at --lowvram

@@ -60,7 +60,19 @@ async function makeOrchestratorWithTask(label: string) {
   return { orchestrator, store, task };
 }
 
-function summary(capacityTier: string) {
+// Structured recommended setting (with node changes) — the correct path that
+// yields a real reduced workflow. `recommendedOverride` lets a test inject the
+// text-only fallback to exercise the "never ship full-size" guard.
+function summary(capacityTier: string, recommendedOverride?: unknown) {
+  const structured = {
+    resolution: "480x832",
+    frames: 49,
+    changes: [
+      { node_id: "34", input: "length", old: 81, new: 49, kind: "frames", class_type: "BerniniConditioning" },
+      { node_id: "90", input: "frame_load_cap", old: 121, new: 60, kind: "frames", class_type: "VHS_LoadVideo" }
+    ]
+  };
+  const recommended = recommendedOverride !== undefined ? recommendedOverride : structured;
   return {
     run_level: "capacity-probe",
     memory_runtime: { peak_memory_budget_ratio: 1.1663 },
@@ -71,18 +83,30 @@ function summary(capacityTier: string) {
         capacity_tier: capacityTier,
         peak_memory_budget_ratio: 1.1663,
         capacity_error_signature: "device_lost",
-        recommended_reduced_setting: "480x832 x 49 frames"
+        recommended_reduced_setting: recommended
       }
     },
-    step12_context: { capacity_tier: capacityTier, recommended_reduced_setting: "480x832 x 49 frames" }
+    step12_context: { capacity_tier: capacityTier, recommended_reduced_setting: recommended }
   };
 }
 
-async function writeSummary(task: { artifactPath: string }, capacityTier: string) {
+async function writeSummary(task: { artifactPath: string }, capacityTier: string, recommendedOverride?: unknown) {
   await ensureDir(task.artifactPath);
   await fs.writeFile(
     path.join(task.artifactPath, "08-full-validation-summary.json"),
-    JSON.stringify(summary(capacityTier), null, 2),
+    JSON.stringify(summary(capacityTier, recommendedOverride), null, 2),
+    "utf8"
+  );
+  // The Step 06 runtime-policy prompt generateReducedWorkflow applies changes to
+  // (fallback candidate 06b-runtime-policy-prompt.json). Nodes match summary().changes.
+  await fs.writeFile(
+    path.join(task.artifactPath, "06b-runtime-policy-prompt.json"),
+    JSON.stringify({
+      prompt: {
+        "34": { class_type: "BerniniConditioning", inputs: { length: 81, batch_size: 1 } },
+        "90": { class_type: "VHS_LoadVideo", inputs: { frame_load_cap: 121 } }
+      }
+    }),
     "utf8"
   );
 }
@@ -249,7 +273,29 @@ describe("effective VRAM level is hardened to disk (carries to Step 12 + survive
     expect(await (orchestrator as any).effectiveVramLevel(task.id, task)).toBe(1);
     // low-resolution config hardened:
     expect(cfg.reduced_tier).toBe(true);
-    expect(cfg.recommended_reduced_setting).toContain("480x832");
+    expect(cfg.recommended_reduced_setting.resolution).toBe("480x832");
+    // a real reduced workflow was generated (not a full-size ship):
+    expect(cfg.reduced_prompt_path).toContain("reduced-runtime-policy-prompt.json");
+  });
+
+  it("NEVER ships full-size as reduced_tier: a text-only recommended setting (no structured changes) HARD-STOPS", async () => {
+    // Real 2026-08-13 incident (task 051acd0a): the capacity-probe DEVICE_LOST'd and
+    // never wrote structured changes, so the config fell back to a text string; the
+    // reduced workflow was never generated and Step 12 ran FULL-SIZE -> OOM. The guard
+    // must hard-stop instead of shipping the full-size graph under reduced_tier.
+    const { orchestrator, store, task } = await makeOrchestratorWithTask("no-structured-changes");
+    await writeSummary(task, "insufficient", "halve spatial dims and/or frame count (e.g. 480x832 x 49 frames)");
+    const decision = { taskId: task.id, stepId: "08", questionEventId: "q", answer: "Accept reduced tier", wasFreeform: false, decidedAt: new Date().toISOString() };
+    expect(await (orchestrator as any).applyStep08CapacityDecision({ task, decision })).toBe(true);
+    const updated = await store.getTask(task.id);
+    expect(updated?.steps.find((s) => s.id === "08")?.status).toBe("hard_stopped");
+    expect(updated?.steps.find((s) => s.id === "08")?.error).toMatch(/no structured|reduced-validation|xpu-smi/i);
+    // and it did NOT write a reduced_tier config that would ship full-size:
+    const cfgExists = await fs.access(path.join(task.artifactPath, "effective-run-config.json")).then(() => true).catch(() => false);
+    if (cfgExists) {
+      const cfg = JSON.parse(await fs.readFile(path.join(task.artifactPath, "effective-run-config.json"), "utf8"));
+      expect(cfg.reduced_tier).not.toBe(true);
+    }
   });
 
   it("deterministically generates the reduced workflow from the recommended node edits (not left to the Step 12 agent)", async () => {

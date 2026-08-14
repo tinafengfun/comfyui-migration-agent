@@ -134,6 +134,23 @@ def apply_reduced_full_path_settings(
                     1,
                     "Step 08 reduced full-path preserves second-stage split with fewer steps",
                 )
+        elif class_type == "SamplerCustom":
+            # SamplerCustom (common in WAN2.2 pipelines) takes its step count from a
+            # linked scheduler/sigmas node, not a `steps` input -- so we can only fix
+            # the seed here (sampler cost is bounded by the linked sigmas). Fix
+            # noise_seed, preserving a linked rgthree Seed node rather than replacing
+            # the link with a literal (which would drop the seed node from execution).
+            if isinstance(inputs.get("noise_seed"), list):
+                set_input(
+                    prompt,
+                    changes,
+                    str(inputs["noise_seed"][0]),
+                    "seed",
+                    seed,
+                    "Step 08 fixes linked seed node for SamplerCustom without bypassing it",
+                )
+            elif "noise_seed" in inputs:
+                set_input(prompt, changes, node_id, "noise_seed", seed, "Step 08 SamplerCustom fixed seed")
         elif class_type == "UltimateSDUpscale":
             set_input(prompt, changes, node_id, "steps", 1, "Step 08 reduced full-path limits tile cost")
             set_input(prompt, changes, node_id, "batch_size", 1, "Step 08 reduced full-path keeps tile batch minimal")
@@ -984,13 +1001,17 @@ def main() -> int:
     parser.add_argument("--api-url", required=True)
     parser.add_argument(
         "--run-level",
-        choices=["capacity-probe", "reduced-full-path", "full-size"],
+        choices=["capacity-probe", "reduced-full-path", "full-size", "reduced-validation"],
         default="capacity-probe",
         help=(
             "capacity-probe (default): full resolution/frames, minimal sampler steps -- "
             "measures the true full-size peak VRAM cheaply so full-size capacity is gated "
-            "at Step 08 instead of at the Step 12 human run. reduced-full-path: also shrinks "
-            "resolution (cheap integration check, says nothing about full-size capacity). "
+            "at Step 08 instead of at the Step 12 human run. reduced-validation: applies the "
+            "deterministic reduced changes (compute_reduced_changes: ref_max_size/frames) + "
+            "minimal sampler steps and RUNS them once to confirm the reduced config clears OOM "
+            "-- run this on a CLEAN server (reset the XPU first) when the capacity-probe deferred "
+            "validation because the full-size run DEVICE_LOST'd the XPU. reduced-full-path: also "
+            "shrinks resolution (cheap integration check, says nothing about full-size capacity). "
             "full-size: unmodified full run."
         ),
     )
@@ -1019,6 +1040,7 @@ def main() -> int:
         "reduced-full-path": "zimage_v2_step08/reduced_full",
         "capacity-probe": "zimage_v2_step08/capacity_probe",
         "full-size": "zimage_v2_step08/full_size",
+        "reduced-validation": "zimage_v2_step08/reduced_validation",
     }[args.run_level]
     if args.run_level == "reduced-full-path":
         prompt, setting_changes = apply_reduced_full_path_settings(
@@ -1032,6 +1054,18 @@ def main() -> int:
         prompt, setting_changes = apply_reduced_full_path_settings(
             source_prompt, output_prefix, args.seed, reduce_resolution=False
         )
+    elif args.run_level == "reduced-validation":
+        # Standalone validation of the DEFERRED reduced config on a clean server:
+        # apply the deterministic reduced changes (the exact edits Step 12 will run)
+        # then minimize sampler steps. Run this AFTER resetting the XPU when the
+        # capacity-probe deferred validation (full-size DEVICE_LOST).
+        reduced_prompt, applied_named = apply_named_reduced_changes(
+            source_prompt, compute_reduced_changes(source_prompt)
+        )
+        prompt, setting_changes = apply_reduced_full_path_settings(
+            reduced_prompt, output_prefix, args.seed, reduce_resolution=False
+        )
+        setting_changes = [*applied_named, *setting_changes]
     else:
         prompt = json.loads(json.dumps(source_prompt, ensure_ascii=False))
         setting_changes = []
@@ -1125,21 +1159,52 @@ def main() -> int:
     # recommendation (real incident 2026-08-12: reduced config handed to Step 12
     # unvalidated, operator OOM'd). Only fires on the capacity-probe level when a
     # reduction is recommended; adds ~1 probe run only when reduction is needed.
+    #
+    # CRITICAL (real incident 2026-08-13, task 051acd0a): only run the inline probe
+    # if the full-size run did NOT hit a hard capacity error. A DEVICE_LOST / OOM
+    # kills the XPU handle but leaves the HTTP server up, so a submitted reduced
+    # probe sits STUCK PENDING (server accepts it, XPU can't run it) until the
+    # timeout -- hanging the tool so it never writes this summary, which then loses
+    # the structured recommended_reduced_setting and Step 12 silently runs full-size
+    # -> OOM. When the full-size probe crashed the XPU we DEFER the validation
+    # (needs_reset) and let the operator/agent reset the XPU + re-run at
+    # --run-level reduced-validation on a clean server. The structured
+    # recommended_reduced_setting is ALWAYS written below regardless, so Step 12
+    # always gets the correct reduced config even without the empirical pass.
     reduced_validation: dict[str, Any] | None = None
     if args.run_level == "capacity-probe" and capacity.get("recommend_reduced_tier"):
         recommended = capacity.get("recommended_reduced_setting")
         reduced_changes = recommended.get("changes") if isinstance(recommended, dict) else None
-        reduced_validation = run_reduced_validation_probe(
-            api_url,
-            source_prompt,
-            reduced_changes or [],
-            run_dir,
-            args.comfy_root,
-            usable_budget_bytes,
-            args.seed,
-            args.timeout_seconds,
-            args.poll_interval_seconds,
-        )
+        hard_error = capacity.get("capacity_error_signature")
+        if hard_error:
+            # Full-size probe crashed the XPU handle -> the server can't run anything
+            # until it is reset. Do NOT submit (it would hang STUCK PENDING).
+            reduced_validation = {
+                "validated": None,
+                "needs_reset": True,
+                "reduced_capacity_tier": None,
+                "note": (
+                    f"Full-size probe hit '{hard_error}' which kills the XPU handle (the HTTP server "
+                    "stays up but cannot run anything), so an inline reduced-validation would hang "
+                    "STUCK PENDING. Deferred: reset the XPU (`xpu-smi config -d 0 --reset`) or restart "
+                    "the container, then re-run this tool with `--run-level reduced-validation` to "
+                    "confirm the reduced config on a clean server. The structured "
+                    "recommended_reduced_setting.changes is still produced, so Step 12 gets the correct "
+                    "reduced workflow regardless."
+                ),
+            }
+        else:
+            reduced_validation = run_reduced_validation_probe(
+                api_url,
+                source_prompt,
+                reduced_changes or [],
+                run_dir,
+                args.comfy_root,
+                usable_budget_bytes,
+                args.seed,
+                args.timeout_seconds,
+                args.poll_interval_seconds,
+            )
         # Annotate the recommended setting with the validation verdict so downstream
         # (orchestrator gate, guiWorkflowSync) can surface "validated" to the operator.
         if isinstance(recommended, dict):
@@ -1147,8 +1212,43 @@ def main() -> int:
             recommended["validation"] = {
                 "reduced_capacity_tier": reduced_validation.get("reduced_capacity_tier"),
                 "reduced_peak_memory_budget_ratio": reduced_validation.get("reduced_peak_memory_budget_ratio"),
+                "needs_reset": reduced_validation.get("needs_reset", False),
                 "note": reduced_validation.get("note"),
             }
+    elif args.run_level == "reduced-validation":
+        # This whole run IS the reduced-config validation (deferred from a prior
+        # capacity-probe that DEVICE_LOST'd). Classify THIS run's reduced footprint.
+        signature = scan_capacity_signature(history_summary)
+        status_obj = (history_summary or {}).get("status") or {}
+        succeeded = run_status == "history_available" and status_obj.get("status_str") == "success"
+        ratio = telemetry.get("peak_memory_budget_ratio")
+        if signature or run_status in {"history_timeout", "submit_failed"}:
+            rv_tier, rv_validated = "insufficient", False
+        elif ratio is None:
+            rv_tier, rv_validated = "unknown", None
+        elif ratio >= CAPACITY_RATIO_OVER_BUDGET:
+            rv_tier, rv_validated = "reduced", False
+        elif ratio >= CAPACITY_RATIO_TIGHT:
+            rv_tier, rv_validated = "tight", bool(succeeded)
+        else:
+            rv_tier, rv_validated = "ok", bool(succeeded)
+        reduced_validation = {
+            "validated": rv_validated,
+            "needs_reset": False,
+            "reduced_capacity_tier": rv_tier,
+            "reduced_peak_memory_budget_ratio": ratio,
+            "reduced_peak_memory_used_mib": telemetry.get("peak_memory_used_mib"),
+            "reduced_run_status": run_status,
+            "reduced_run_succeeded": succeeded,
+            "capacity_error_signature": signature,
+            "applied_changes": setting_changes,
+            "note": (
+                f"Standalone reduced-validation run (peak/budget={ratio}, tier='{rv_tier}', "
+                f"status={run_status}). "
+                + ("Reduced config clears OOM on a clean server -- Step 12 can run it safely."
+                   if rv_validated else "Reduced config did NOT clear cleanly -- reduce frames further / escalate.")
+            ),
+        }
 
     cache_assisted = bool(cached_nodes)
     result_class = (
