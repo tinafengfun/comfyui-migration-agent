@@ -171,3 +171,122 @@ export async function waitFor(
 export function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
+
+// ── Artifact content + ComfyUI direct execution (for Step-12 execute+validate) ──
+
+/**
+ * Fetch one artifact's text by filename (matched against the artifact list's
+ * relativePath, e.g. "effective-run-config.json" or "reduced-runtime-policy-prompt.json").
+ * Returns "" if not found. The content endpoint serves raw text.
+ */
+export async function getArtifactText(
+  request: APIRequestContext,
+  taskId: string,
+  fileName: string
+): Promise<string> {
+  const artifacts = await listArtifacts(request, taskId);
+  const hit =
+    artifacts.find((a) => a.relativePath.endsWith(`/${fileName}`) || a.relativePath === fileName || a.relativePath.endsWith(fileName));
+  const rel = hit?.relativePath ?? `artifacts/${fileName}`;
+  const r = await request.get(`${API}/api/tasks/${taskId}/artifacts/content?path=${encodeURIComponent(rel)}`);
+  if (!r.ok()) return "";
+  return await r.text();
+}
+
+/** JSON-parse an artifact; returns undefined on any error. */
+export async function getArtifactJson<T = any>(
+  request: APIRequestContext,
+  taskId: string,
+  fileName: string
+): Promise<T | undefined> {
+  const text = await getArtifactText(request, taskId, fileName);
+  if (!text) return undefined;
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    return undefined;
+  }
+}
+
+export interface ComfyRunResult {
+  ok: boolean;
+  status: "success" | "error" | "timeout" | "submit_failed";
+  promptId?: string;
+  outputs: Array<{ filename: string; type: string }>;
+  raw: unknown;
+  detail: string;
+}
+
+/**
+ * Submit an API-format prompt to a ComfyUI server and wait for it to finish --
+ * the automated equivalent of a human running the reduced workflow at Step 12.
+ * Uses plain fetch (the Playwright host can reach the GPU node's ComfyUI directly).
+ * Never throws; returns a structured result the spec asserts on.
+ */
+export async function comfyuiSubmitAndWait(
+  comfyUrl: string,
+  promptObj: unknown,
+  opts: { timeoutMs?: number; pollMs?: number; clientId?: string } = {}
+): Promise<ComfyRunResult> {
+  const base = comfyUrl.replace(/\/+$/, "");
+  const timeoutMs = opts.timeoutMs ?? 30 * 60_000;
+  const pollMs = opts.pollMs ?? 8_000;
+  const clientId = opts.clientId ?? "wan22-e2e";
+  const empty: ComfyRunResult = { ok: false, status: "submit_failed", outputs: [], raw: null, detail: "" };
+  let promptId: string;
+  try {
+    const res = await fetch(`${base}/prompt`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prompt: promptObj, client_id: clientId }),
+    });
+    if (!res.ok) return { ...empty, detail: `POST /prompt -> ${res.status}: ${(await res.text()).slice(0, 300)}` };
+    const body = (await res.json()) as { prompt_id?: string; node_errors?: unknown };
+    if (!body.prompt_id) return { ...empty, detail: `no prompt_id (node_errors: ${JSON.stringify(body.node_errors)})` };
+    promptId = body.prompt_id;
+  } catch (e) {
+    return { ...empty, detail: `submit threw: ${e instanceof Error ? e.message : String(e)}` };
+  }
+
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, pollMs));
+    let hist: Record<string, any> = {};
+    try {
+      const hr = await fetch(`${base}/history/${promptId}`);
+      if (hr.ok) hist = (await hr.json()) as Record<string, any>;
+    } catch {
+      continue; // server may be briefly unreachable (e.g. mid-relaunch)
+    }
+    const rec = hist[promptId];
+    if (!rec) continue; // still running / queued
+    const statusStr = rec?.status?.status_str;
+    const outputs = collectComfyOutputs(rec?.outputs);
+    const dump = JSON.stringify(rec).toLowerCase();
+    const oom = /device_lost|out_of_device_memory|out of memory|ur_result_error/.test(dump);
+    if (statusStr === "success" && !oom) {
+      return { ok: true, status: "success", promptId, outputs, raw: rec, detail: `success, ${outputs.length} output(s)` };
+    }
+    return {
+      ok: false,
+      status: "error",
+      promptId,
+      outputs,
+      raw: rec,
+      detail: oom ? "OOM/DEVICE_LOST during render" : `status_str=${statusStr}`,
+    };
+  }
+  return { ...empty, status: "timeout", promptId, detail: `no history within ${Math.round(timeoutMs / 60000)}min` };
+}
+
+function collectComfyOutputs(outputs: unknown): Array<{ filename: string; type: string }> {
+  const files: Array<{ filename: string; type: string }> = [];
+  if (!outputs || typeof outputs !== "object") return files;
+  for (const nodeOut of Object.values(outputs as Record<string, any>)) {
+    for (const key of ["images", "gifs", "videos"]) {
+      const arr = (nodeOut as any)?.[key];
+      if (Array.isArray(arr)) for (const f of arr) if (f?.filename) files.push({ filename: f.filename, type: key });
+    }
+  }
+  return files;
+}
