@@ -348,4 +348,18 @@ describe("teardownComfyUiForTask wiring (frees GPU on kill/delete)", () => {
     await orchestrator.terminateWithHardStop({ taskId: task.id, reason: "test kill" });
     expect(torn).toBe(1);
   });
+
+  it("reconcileStaleActiveTasks tears down the ComfyUI of a restart-orphaned running task (frees GPU)", async () => {
+    // Real 2026-08-15 incident: a backend restart orphaned a running Step-07 SDK
+    // session; the task state was terminated but its ComfyUI container kept running
+    // the in-flight prompt, pinning 32.6 GB of VRAM. Reconcile must free the GPU.
+    const { orchestrator, task } = await makeOrchestratorWithTask("reconcile-teardown");
+    await (orchestrator as any).updateStepAndPersist(task.id, "08", "running"); // orphaned step
+    (orchestrator as any).failCompletedButIncompletePhase1Session = async () => false; // take the terminate path
+    let torn = 0;
+    (orchestrator as any).teardownComfyUiForTask = async () => { torn += 1; return 1; };
+    const cleaned = await orchestrator.reconcileStaleActiveTasks("test: restart");
+    expect(cleaned.some((c) => c.id === task.id)).toBe(true);
+    expect(torn).toBe(1);
+  });
 });

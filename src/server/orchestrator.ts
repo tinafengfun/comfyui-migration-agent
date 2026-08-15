@@ -4612,12 +4612,21 @@ export class MigrationOrchestrator {
       const stepIds = refreshedTask.steps
         .filter((step) => step.status === "running")
         .map((step) => step.id);
+      // A step orphaned by a backend restart leaves its ComfyUI container + the
+      // in-flight prompt RUNNING (a zombie that holds all the GPU VRAM until it
+      // finishes/OOMs). Terminating the task state alone doesn't free the GPU --
+      // tear the container down here too (best-effort; no-op if none). Real
+      // incident 2026-08-15: a deploy restart orphaned a Step-07 run and its
+      // ComfyUI prompt pinned 32.6 GB until manually killed.
+      const freeGpu = () => this.teardownComfyUiForTask(refreshedTask).catch(() => 0);
       if (await this.failCompletedButIncompletePhase1Session(refreshedTask, reason, stepIds)) {
+        await freeGpu();
         cleaned.push({ id: refreshedTask.id, name: refreshedTask.name, stepIds });
         continue;
       }
       const updated = await this.store.terminateActiveTaskState(refreshedTask.id, reason);
       if (!updated) continue;
+      await freeGpu();
       cleaned.push({ id: refreshedTask.id, name: refreshedTask.name, stepIds });
       await this.emit({
         taskId: refreshedTask.id,

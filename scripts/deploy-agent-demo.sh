@@ -54,29 +54,50 @@ echo "==> Target (deployed):       $AGENT_DEMO"
 
 echo ""
 echo "==> Checking live task state before syncing..."
-ACTIVE_FOUND=0
+ACTIVE_FOUND=0   # a step is waiting_for_human (a gate) -- --yes can override
+RUNNING_FOUND=0  # a step is actively RUNNING (live SDK + GPU work) -- NOT overridable
+CODE=0
 if TASKS_JSON=$(curl -sf "$API/api/tasks" 2>/dev/null); then
   echo "$TASKS_JSON" | python3 -c "
 import json, sys
 d = json.load(sys.stdin)
-active = False
+running = waiting = False
 for t in d.get('tasks', []):
     print(f\"  task {t['id']}: {t['status']}\")
     for s in t.get('steps', []):
-        if s['status'] in ('running', 'waiting_for_human'):
-            print(f\"    step {s['id']}: {s['status']}  <-- ACTIVE\")
-            active = True
-sys.exit(1 if active else 0)
-" || ACTIVE_FOUND=1
+        if s['status'] == 'running':
+            print(f\"    step {s['id']}: running  <-- LIVE GPU RUN\")
+            running = True
+        elif s['status'] == 'waiting_for_human':
+            print(f\"    step {s['id']}: waiting_for_human  <-- GATE\")
+            waiting = True
+# 2 = a running step (hard block); 1 = only a gate (soft, --yes overrides); 0 = idle
+sys.exit(2 if running else (1 if waiting else 0))
+" || CODE=$?
+  if [ "$CODE" -eq 2 ]; then RUNNING_FOUND=1; fi
+  if [ "$CODE" -ge 1 ]; then ACTIVE_FOUND=1; fi
 else
   echo "  (backend not reachable at $API -- skipping live check; proceed with caution)"
 fi
 
+# A live RUNNING step means an SDK session is driving a real GPU workload right now.
+# Restarting orphans it AND leaves a zombie ComfyUI prompt pinning GPU VRAM until it
+# OOMs (real incident 2026-08-15: a deploy through a running Step 07 pinned 32.6 GB).
+# This is NOT safe to override -- refuse regardless of --yes.
+if [ "$RUNNING_FOUND" -eq 1 ]; then
+  echo ""
+  echo "  BLOCKED: a step is actively RUNNING (live SDK session + GPU work)."
+  echo "  Deploying now would orphan it and strand a zombie ComfyUI run holding GPU VRAM."
+  echo "  Wait for the step to finish, or hard-stop the task first, then re-deploy."
+  echo "  (This is intentionally NOT overridable with --yes.)"
+  exit 1
+fi
+
 if [ "$ACTIVE_FOUND" -eq 1 ]; then
   echo ""
-  echo "  WARNING: a step is running or waiting_for_human right now."
-  echo "  Restarting will orphan its live SDK session. If a human answers a pending"
-  echo "  question after this restart, the resume may silently discard that answer."
+  echo "  WARNING: a step is waiting_for_human (a gate) right now."
+  echo "  Restarting persists the gate but orphans its SDK session; a human answer"
+  echo "  after the restart may be discarded. Confirm this is safe before proceeding."
 fi
 
 if [ "$CONFIRMED" -ne 1 ]; then
