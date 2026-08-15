@@ -1,3 +1,23 @@
+---
+skillId: wan22-capacity-reference
+version: 1.0.0
+tier: on-demand
+trigger:
+  stepId: ["02", "07", "08"]
+  condition:
+    anyOf:
+      - nodeType: "BerniniConditioning"
+      - nodeType: "WanVideo*"
+      - nodeType: "WanImageToVideo"
+      - modelPattern: "*wan2*"
+      - modelPattern: "*Wan2*"
+      - modelPattern: "*Bernini*"
+provenance:
+  taskOrigin: "manual"
+  createdAt: "2026-08-15"
+  approvedBy: "tinafengfun"
+---
+
 # WAN2.2 (T2V/I2V) capacity reference
 
 Field-tested VRAM/capacity knowledge for WAN2.2-class video workflows on a single 32 GB Intel XPU (task 075f6823, a `Video_Edit_Multimodal_Generator` with a Qwen VLM front-end). Read this alongside [capacity-vram-mitigation-ladder](capacity-vram-mitigation-ladder.md) and [xpu-attention-fallback](xpu-attention-fallback.md).

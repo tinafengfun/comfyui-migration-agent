@@ -35,6 +35,7 @@ import {
   verifyNode
 } from "./gpuNodes";
 import { loadStepDefinitions } from "./workflowLoader";
+import { auditSkillRecipeLoading, auditActiveSkillIds } from "./skillLoadingAudit";
 
 const config = loadConfig();
 const store = new StateStore(config);
@@ -926,6 +927,19 @@ app.use((error: unknown, _req: express.Request, res: express.Response, _next: ex
 
 app.listen(config.port, "0.0.0.0", () => {
   console.log(`Migration demo API listening on http://127.0.0.1:${config.port}`);
+  // Boot-time skill/recipe loading audit: surface any missing/broken skill, recipe,
+  // or dangling reference link the copilot agent would otherwise silently not get.
+  auditSkillRecipeLoading()
+    .then((problems) => {
+      const active = auditActiveSkillIds();
+      if (problems.length === 0) {
+        console.log(`[skill-audit] OK — step bindings, ${active.length} on-demand skills (${active.join(", ")}), recipes, and reference links all load.`);
+      } else {
+        console.warn(`[skill-audit] ${problems.length} LOADING PROBLEM(S) — the agent may not receive all guidance:`);
+        for (const p of problems) console.warn(`  - [${p.kind}] ${p.detail}`);
+      }
+    })
+    .catch((e) => console.warn(`[skill-audit] audit failed to run: ${e instanceof Error ? e.message : String(e)}`));
 });
 
 function sanitizeFileName(name: string): string {

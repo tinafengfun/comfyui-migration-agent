@@ -31,9 +31,11 @@
       "required": ["stepId", "condition"],
       "properties": {
         "stepId": {
-          "type": "string",
-          "pattern": "^\\d{2}$",
-          "description": "Two-digit step id, e.g. \"02\"."
+          "description": "Two-digit step id (e.g. \"02\") or a list of them (e.g. [\"07\",\"08\"]) -- the skill injects at any listed step.",
+          "oneOf": [
+            { "type": "string", "pattern": "^\\d{2}$" },
+            { "type": "array", "minItems": 1, "items": { "type": "string", "pattern": "^\\d{2}$" } }
+          ]
         },
         "condition": {
           "type": "object",

@@ -60,7 +60,10 @@ export function evaluateTrigger(skill: SkillEntry, context: SkillTriggerContext)
   const fm = skill.frontmatter;
   if (fm.tier !== "on-demand") return false;
   if (!fm.trigger) return false;
-  if (fm.trigger.stepId !== context.stepId) return false;
+  // stepId may be a single id or a list -- inject at any matching step. This lets
+  // one skill (e.g. wan22-capacity-reference) cover both Step 02 and Step 08.
+  const triggerSteps = Array.isArray(fm.trigger.stepId) ? fm.trigger.stepId : [fm.trigger.stepId];
+  if (!triggerSteps.includes(context.stepId)) return false;
 
   const cond = fm.trigger.condition;
   if (!cond) return false;

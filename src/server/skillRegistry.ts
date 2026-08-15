@@ -43,7 +43,8 @@ export interface SkillTriggerCondition {
 }
 
 export interface SkillTrigger {
-  stepId: string;
+  /** One step id ("08") or several ("07"/"08") -- the skill injects at any of them. */
+  stepId: string | string[];
   condition: SkillTriggerCondition;
 }
 
@@ -116,12 +117,32 @@ export function loadRegistry(registryPath: string = GLOBAL_DIRS.skillsRegistry):
  * Skills that fail validation or are missing from disk go to `invalid[]`;
  * healthy skills still load.
  */
+/**
+ * The set of active on-demand skillIds = the VERSION-CONTROLLED repo seed
+ * (`<skillsDir>/skills-registry.default.json`, synced by deploy) UNION the runtime
+ * `.demo-state/skills-registry.json` (per-host promotions), minus any id retired in
+ * either. The seed is what makes on-demand skills guaranteed across deployments --
+ * the runtime file alone is not synced, so a skill listed only there would silently
+ * not load on a fresh host.
+ */
+export function resolveActiveSkillIds(
+  registryPath: string = GLOBAL_DIRS.skillsRegistry,
+  dir: string = skillsDir(path.join(process.cwd(), "prompts"))
+): string[] {
+  const runtime = loadRegistry(registryPath);
+  const seed = loadRegistry(path.join(dir, "skills-registry.default.json"));
+  const retired = new Set([...Object.keys(runtime.retired ?? {}), ...Object.keys(seed.retired ?? {})]);
+  const active = new Set<string>();
+  for (const id of [...seed.active, ...runtime.active]) if (!retired.has(id)) active.add(id);
+  return [...active];
+}
+
 export function loadActiveSkills(
   registryPath: string = GLOBAL_DIRS.skillsRegistry,
   dir: string = skillsDir(path.join(process.cwd(), "prompts"))
 ): SkillRegistryLoadResult {
   const result: SkillRegistryLoadResult = { skills: [], invalid: [] };
-  const { active } = loadRegistry(registryPath);
+  const active = resolveActiveSkillIds(registryPath, dir);
   if (active.length === 0) return result;
 
   for (const skillId of active) {

@@ -1,0 +1,10 @@
+{
+  "_comment": "Version-controlled SEED of active on-demand skills. Synced by deploy (under prompts/), UNIONed with the per-host runtime .demo-state/skills-registry.json in skillRegistry.resolveActiveSkillIds(). List a skillId here to GUARANTEE it loads on every deployment; the runtime file is for per-host promotions only and is NOT synced.",
+  "active": [
+    "fp8-feasibility-checklist",
+    "xpu-attention-fallback",
+    "seedvr2-loader-workaround",
+    "wan22-capacity-reference"
+  ],
+  "retired": {}
+}
