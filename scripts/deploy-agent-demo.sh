@@ -146,7 +146,9 @@ echo ""
 echo "==> Recipe + skill LOADING audit on the deployed copy (fails the deploy if the"
 echo "    agent would not receive a step skill, an on-demand skill, a recipe, or a"
 echo "    linked reference doc)..."
-npm run audit:skills
+# Call the CLI directly (not `npm run audit:skills`): the deploy syncs scripts/ but
+# NOT package.json, so agent-demo's package.json may lack the script alias.
+npx tsx "$AGENT_DEMO/scripts/audit-skills-recipes.ts"
 
 echo ""
 echo "==> Restarting agent-demo..."
