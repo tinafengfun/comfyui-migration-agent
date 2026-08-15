@@ -154,6 +154,19 @@ def scan_capacity_signature(payload: Any) -> str | None:
     return None
 
 
+# Reachability-smoke caps for the REAL capacity drivers, scanned by input NAME so
+# they are caught regardless of which node exposes them. ref_max_size/max_size govern
+# the attention token count in ref-resize video pipelines (e.g. BerniniConditioning) --
+# reducing frames alone is NOT enough (real incident 2026-08-15: a WAN2.2 branch smoke
+# ran ref_max_size=1280, length=81 with only frame_load_cap capped and hit
+# OUT_OF_RESOURCES even at --novram -> Step 07 hard-stopped). A smoke only checks the
+# branch executes, so cap these hard.
+SMOKE_RESOLUTION_CAP = 512
+SMOKE_FRAME_CAP = 16
+RESOLUTION_CAP_INPUTS = ("ref_max_size", "max_size", "max_resolution")
+FRAME_INPUTS = ("length", "num_frames", "frames", "video_frames", "frame_load_cap", "video_length")
+
+
 def apply_reduced_settings(
     prompt: dict[str, Any], branch_id: str, smoke_seed: int
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
@@ -226,6 +239,23 @@ def apply_reduced_settings(
             elif inputs.get("frame_load_cap") in (0, None):
                 # 0 = load all frames; pin to a small cap for smoke.
                 set_input(node_id, "frame_load_cap", 16, "Step 07 smoke caps loaded video frames (was unbounded)")
+
+    # Name-based cap of the REAL capacity drivers for ANY node (ref_max_size/max_size
+    # and every frame-count input). This is what makes the smoke actually FIT: without
+    # capping ref_max_size the WAN2.2 BerniniConditioning ran at 1280 -> huge attention
+    # seq -> OUT_OF_RESOURCES even at --novram. Reducing the drivers here lets Step 07
+    # find a viable reduced smoke config and continue instead of hard-stopping.
+    for node_id, node in prompt.items():
+        inputs = node.setdefault("inputs", {})
+        for key, val in list(inputs.items()):
+            if isinstance(val, bool) or not isinstance(val, (int, float)):
+                continue
+            kl = key.lower()
+            if kl in RESOLUTION_CAP_INPUTS and val > SMOKE_RESOLUTION_CAP:
+                set_input(node_id, key, SMOKE_RESOLUTION_CAP, "Step 07 smoke caps resolution/token driver (ref_max_size etc.) for reachability")
+            elif kl in FRAME_INPUTS and val > SMOKE_FRAME_CAP:
+                set_input(node_id, key, SMOKE_FRAME_CAP, "Step 07 smoke caps frame count for reachability")
+
     for node_id, node in prompt.items():
         if node.get("class_type") in {"SaveImage", "PreviewImage"}:
             inputs = node.setdefault("inputs", {})
