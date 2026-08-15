@@ -4,7 +4,8 @@
 # checked out here) onto the deployed agent-demo copy, then restart it.
 #
 # Wraps the manual sequence used by hand throughout this project's
-# development: diff-audit copy -> tsc --noEmit -> vitest run -> restart.sh ->
+# development: snapshot recipes/skills -> copy -> diff-audit -> report changed
+# recipe/skill files -> tsc --noEmit -> vitest run -> skill/recipe loading audit -> restart.sh ->
 # confirm task state survived. This is stage (e)'s "deploy" half of the
 # generate -> verify -> merge -> push -> deploy pipeline for Step 13 agent
 # self-improvements -- it is NEVER invoked automatically by anything else in
@@ -85,6 +86,18 @@ if [ "$CONFIRMED" -ne 1 ]; then
   exit 1
 fi
 
+# Snapshot the recipe + skill files BEFORE syncing so we can report exactly which
+# knowledge files this deploy updates (the agent's hard recipes + soft skills).
+SKILLS_SUBDIR="prompts/migration-workflow-v2/skills"
+snapshot_recipes_skills() {
+  { find "$AGENT_DEMO/recipes" -type f -name '*.json' 2>/dev/null
+    find "$AGENT_DEMO/$SKILLS_SUBDIR" -type f \( -name '*.md' -o -name '*.json' \) 2>/dev/null
+  } | sort | while read -r f; do
+    printf '%s  %s\n' "$(md5sum "$f" 2>/dev/null | cut -d' ' -f1)" "${f#"$AGENT_DEMO"/}"
+  done
+}
+RS_BEFORE="$(mktemp)"; snapshot_recipes_skills > "$RS_BEFORE"
+
 echo ""
 echo "==> Syncing src/, scripts/, prompts/, recipes/, schemas/, patches/ (additive only, no deletes)..."
 for dir in src scripts prompts recipes schemas patches; do
@@ -108,6 +121,17 @@ for dir in src scripts prompts recipes schemas patches; do
   fi
 done
 
+echo ""
+echo "==> Recipe + skill files updated by this deploy:"
+RS_AFTER="$(mktemp)"; snapshot_recipes_skills > "$RS_AFTER"
+CHANGED_RS="$(comm -13 <(sort "$RS_BEFORE") <(sort "$RS_AFTER") | awk '{print $2}')"
+if [ -z "$CHANGED_RS" ]; then
+  echo "  (no recipe/skill files changed)"
+else
+  echo "$CHANGED_RS" | sed 's#^#  ~ #'
+fi
+rm -f "$RS_BEFORE" "$RS_AFTER"
+
 cd "$AGENT_DEMO"
 
 echo ""
@@ -117,6 +141,12 @@ npx tsc --noEmit -p .
 echo ""
 echo "==> npx vitest run"
 npx vitest run
+
+echo ""
+echo "==> Recipe + skill LOADING audit on the deployed copy (fails the deploy if the"
+echo "    agent would not receive a step skill, an on-demand skill, a recipe, or a"
+echo "    linked reference doc)..."
+npm run audit:skills
 
 echo ""
 echo "==> Restarting agent-demo..."

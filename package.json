@@ -16,6 +16,7 @@
     "asset:sources:demo": "MIGRATION_AGENT_DOWNLOAD_PROFILE=demo tsx src/server/assetSourceCli.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
+    "audit:skills": "tsx scripts/audit-skills-recipes.ts",
     "playwright": "playwright test",
     "playwright:install": "playwright install chromium",
     "playwright:ui": "playwright test --grep @ui",
