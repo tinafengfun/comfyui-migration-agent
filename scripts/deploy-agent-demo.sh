@@ -37,6 +37,15 @@ trap 'rc=$?; if [ "$rc" -ne 0 ]; then echo ""; echo "###########################
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CMA_STAGING="$(cd "$SCRIPT_DIR/.." && pwd)"
 AGENT_DEMO="/home/intel/tianfeng/comfy/ComfyUI/agent-demo"
+# The step SKILLS/PROMPTS the agent runs hardcode tool paths under
+# ComfyUI/docs/draft/migration-workflow-v2/tools/ (the agent's original tree, still
+# referenced in 15 prompts). The SDK agent EXECUTES the tools from there (copying
+# them into per-task nfs_share workspaces), so a tool fix synced ONLY to agent-demo
+# never reaches a real run -- the agent keeps running the stale docs/draft copy
+# (real incident 2026-08-15: the Step-07 ref_max_size cap never applied, the smoke
+# ran full-size, OOM'd, and escalated to --novram). Mirror the migration-workflow-v2
+# tree here too. Override with DRAFT_DOCS_ROOT= to skip/redirect.
+DRAFT_DOCS_ROOT="${DRAFT_DOCS_ROOT:-/home/intel/tianfeng/comfy/ComfyUI/docs/draft}"
 API="http://127.0.0.1:3001"
 CONFIRMED=0
 
@@ -141,6 +150,22 @@ for dir in src scripts prompts recipes schemas patches; do
     fi
   fi
 done
+
+# Mirror the migration-workflow-v2 tree (tools + prompts + skills) into the
+# docs/draft location the step prompts hardcode, so the agent EXECUTES the freshly
+# deployed tools -- not a stale copy. Without this, tool fixes silently never run.
+if [ -n "$DRAFT_DOCS_ROOT" ] && [ -d "$CMA_STAGING/prompts/migration-workflow-v2" ]; then
+  echo ""
+  echo "==> Mirroring prompts/migration-workflow-v2/ -> $DRAFT_DOCS_ROOT/migration-workflow-v2/ (the tool path the agent runs)..."
+  mkdir -p "$DRAFT_DOCS_ROOT/migration-workflow-v2"
+  cp -r "$CMA_STAGING/prompts/migration-workflow-v2/." "$DRAFT_DOCS_ROOT/migration-workflow-v2/"
+  if diff -rq -x "__pycache__" -x "*.pyc" "$CMA_STAGING/prompts/migration-workflow-v2" "$DRAFT_DOCS_ROOT/migration-workflow-v2"; then
+    echo "  OK: docs/draft tools/prompts/skills match the deployed tree"
+  else
+    echo "  MISMATCH: docs/draft mirror did not produce an identical copy -- investigate"
+    exit 1
+  fi
+fi
 
 echo ""
 echo "==> Recipe + skill files updated by this deploy:"
