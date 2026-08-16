@@ -183,13 +183,26 @@ function stepStatus(steps: { id: string; status: string }[], id: string): string
 }
 
 /**
- * Best-effort assert on the canonical sidebar workflow the operator will load at
+ * Best-effort assert on the canonical sidebar GUI workflow the operator will load at
  * Step 12: fetch it via the ComfyUI userdata HTTP API and, if a BerniniConditioning
- * node is parseable, make sure the full-size ref_max_size (1280) is NOT baked into it.
- * The authoritative reduced assertion is on the reduced API prompt (below in the
- * caller); this is the extra "what the human actually opens" guard.
+ * node is parseable, make sure its ref_max_size is the reduced value (<=768), NOT the
+ * full-size 1280 — i.e. the graph the human opens is genuinely reduced.
+ *
+ * IMPORTANT: BerniniConditioning's widgets_values is ordered [width, height, length,
+ * batch_size, ref_max_size] (the non-link inputs in slot order). ref_max_size is the
+ * LAST widget. We must check THAT widget specifically — an earlier naive "any widget
+ * === 1280" check false-positived on the legitimate, unchanged HEIGHT dimension
+ * (720x1280 portrait), where 640 is the actually-reduced ref_max_size.
+ *
+ * The authoritative reduced assertion is on the reduced API prompt (in the caller);
+ * this is the extra "what the human actually opens" guard. `expectedRefMaxSize` is the
+ * reduced ref_max_size read from the API prompt, cross-checked against the sidebar.
  */
-async function assertSidebarNotFullSize(comfyOrigin: string, taskName: string): Promise<string> {
+async function assertSidebarNotFullSize(
+  comfyOrigin: string,
+  taskName: string,
+  expectedRefMaxSize?: number
+): Promise<string> {
   // destName mirrors guiWorkflowSync.ts: `${sanitizeName(task.name)}-step12-gui-acceptance.json`.
   const sanitized = (taskName.split("/").pop() ?? taskName).replace(/[^a-zA-Z0-9._-]/g, "_") || "workflow";
   const destName = `${sanitized}-step12-gui-acceptance.json`;
@@ -208,14 +221,22 @@ async function assertSidebarNotFullSize(comfyOrigin: string, taskName: string): 
     const bernini = nodes.find((n) => n?.type === "BerniniConditioning");
     if (!bernini) return "sidebar reachable; no BerniniConditioning node found to inspect (non-fatal)";
     const widgets: unknown[] = Array.isArray(bernini.widgets_values) ? bernini.widgets_values : [];
-    // Full-size ref_max_size (1280) must not be baked into the graph the operator opens.
-    if (widgets.some((w) => w === 1280)) {
-      throw new Error(
-        `Step 12 SIDEBAR workflow contains full-size 1280 in BerniniConditioning widgets_values ` +
-          `(${JSON.stringify(widgets)}) — the operator would queue full-size and OOM. Sync bug NOT resolved.`
-      );
+    // ref_max_size is the LAST widget value (input order: width,height,length,batch_size,ref_max_size).
+    const refMaxSize = widgets.length > 0 ? widgets[widgets.length - 1] : undefined;
+    if (typeof refMaxSize === "number") {
+      if (refMaxSize === 1280 || refMaxSize > 768) {
+        throw new Error(
+          `Step 12 SIDEBAR workflow BerniniConditioning ref_max_size=${refMaxSize} is FULL-SIZE ` +
+            `(widgets_values=${JSON.stringify(widgets)}) — the operator would queue full-size and OOM. Sync bug NOT resolved.`
+        );
+      }
+      // Cross-check against the reduced API prompt when we have it.
+      if (typeof expectedRefMaxSize === "number" && refMaxSize !== expectedRefMaxSize) {
+        return `sidebar ref_max_size=${refMaxSize} <=768 OK but differs from API-prompt ${expectedRefMaxSize} (widgets=${JSON.stringify(widgets)})`;
+      }
+      return `sidebar reachable; BerniniConditioning ref_max_size=${refMaxSize} (reduced, <=768); widgets_values=${JSON.stringify(widgets)}`;
     }
-    return `sidebar reachable; BerniniConditioning widgets_values=${JSON.stringify(widgets)} (no full-size 1280)`;
+    return `sidebar reachable; BerniniConditioning widgets_values=${JSON.stringify(widgets)} (ref_max_size not numeric; non-fatal)`;
   } catch (e) {
     if (e instanceof Error && e.message.includes("Sync bug NOT resolved")) throw e;
     return `sidebar fetch threw: ${e instanceof Error ? e.message : String(e)} (non-fatal)`;
@@ -317,7 +338,11 @@ test.describe("WAN2.2 reduction-config multi-step sync @wan22-consistency", () =
             expect(apiRef, "Step 12 reduced API prompt BerniniConditioning ref_max_size must be reduced (<=768)").toBeLessThanOrEqual(768);
             expect(apiRef, "Step 12 reduced API prompt ref_max_size must not be full-size 1280").not.toBe(1280);
           }
-          const sidebarNote = await assertSidebarNotFullSize(origin, t.name);
+          const sidebarNote = await assertSidebarNotFullSize(
+            origin,
+            t.name,
+            typeof apiRef === "number" ? apiRef : undefined
+          );
 
           console.log(`\n=== Step 12 GATE reached — reduced config verified, task LEFT at the gate for the human ===`);
           console.log(`  verificationUrl: ${verifUrl}`);
