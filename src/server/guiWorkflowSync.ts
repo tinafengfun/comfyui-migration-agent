@@ -46,6 +46,8 @@ export interface GuiWorkflowSyncResult {
   destination?: string;
   reason?: string;
   reducedApplied?: number;
+  /** Which base graph was pushed: the agent's GUI workflow, or the source-workflow fallback. */
+  baseSource?: string;
 }
 
 interface ReducedChange {
@@ -149,17 +151,39 @@ export async function syncGuiWorkflowToComfyUIServer(input: {
     const summaryPath = path.join(task.artifactPath, "12-gui-acceptance-summary.json");
     const summary = await readJson<Step12AcceptanceSummary>(summaryPath, {});
     const relativeWorkflowPath = await resolveGuiWorkflowRelativePath(summary, task.artifactPath);
-    if (!relativeWorkflowPath) {
+
+    // Base GUI workflow to push. Prefer the agent-prepared runtime-policy GUI workflow;
+    // but if the agent hasn't produced one yet (real incident 2026-08-16: Step 12 gate
+    // fired with no 12-gui-acceptance artifact, so the sync had nothing to push and a
+    // STALE sidebar workflow from a prior run stayed in place), FALL BACK to the source
+    // GUI workflow (task.workflowPath) as the base. reduceGuiWorkflow below then applies
+    // the Step-07/08-VALIDATED reduced changes to it, so the sidebar always gets a fresh,
+    // correctly-reduced graph for THIS task -- never a stale/full-size leftover.
+    let contents: string;
+    let baseSource: string;
+    if (relativeWorkflowPath) {
+      contents = await fs.readFile(path.join(task.artifactPath, relativeWorkflowPath), "utf8");
+      baseSource = `agent GUI workflow (${relativeWorkflowPath})`;
+    } else if (task.workflowPath) {
+      try {
+        contents = await fs.readFile(task.workflowPath, "utf8");
+        baseSource = "source GUI workflow (fallback; agent artifact missing)";
+      } catch (e) {
+        return {
+          synced: false,
+          reason:
+            `no agent GUI workflow (12-gui-acceptance) and the source workflow ${task.workflowPath} ` +
+            `could not be read: ${e instanceof Error ? e.message : String(e)}`
+        };
+      }
+    } else {
       return {
         synced: false,
         reason:
-          "12-gui-acceptance-summary.json has no usable gui_workflow_json pointer, and the default " +
-          `${DEFAULT_GUI_WORKFLOW_RELATIVE_PATH} is missing`
+          "12-gui-acceptance-summary.json has no usable gui_workflow_json pointer, the default " +
+          `${DEFAULT_GUI_WORKFLOW_RELATIVE_PATH} is missing, and task.workflowPath is unset`
       };
     }
-
-    const localWorkflowPath = path.join(task.artifactPath, relativeWorkflowPath);
-    let contents = await fs.readFile(localWorkflowPath, "utf8");
 
     // Reduced tier: the graph the operator loads MUST be the reduced one, or they
     // queue full-size and OOM/DEVICE_LOST (real incident 2026-08-11). Apply the
@@ -167,15 +191,24 @@ export async function syncGuiWorkflowToComfyUIServer(input: {
     let reducedApplied = 0;
     const reducedChanges = await loadReducedChanges(task.artifactPath);
     if (reducedChanges.length > 0) {
+      // object_info is only needed to map LIST widgets_values by input name -> index
+      // (e.g. BerniniConditioning.ref_max_size). Fetch it best-effort: if the server
+      // is briefly unreachable, DICT widgets_values (e.g. VHS_LoadVideo.frame_load_cap)
+      // still reduce by key without it -- so don't let an object_info blip skip ALL
+      // reduction and silently push a full-size graph.
+      let objectInfo: Record<string, any> = {};
       try {
         const objRes = await fetch(`${nodeApiUrl(node)}/object_info`, { signal: AbortSignal.timeout(15_000) });
-        const objectInfo = objRes.ok ? ((await objRes.json()) as Record<string, any>) : {};
+        if (objRes.ok) objectInfo = (await objRes.json()) as Record<string, any>;
+      } catch {
+        // object_info unreachable -> dict-widget reductions still apply below
+      }
+      try {
         const workflow = JSON.parse(contents);
         reducedApplied = reduceGuiWorkflow(workflow, reducedChanges, objectInfo);
         if (reducedApplied > 0) contents = JSON.stringify(workflow);
       } catch {
-        // best-effort: fall back to pushing the unmodified workflow (Step 12 skill
-        // still instructs verifying the reduction before acceptance)
+        // malformed workflow JSON -> push as-is (Step 12 skill still verifies reduction)
       }
     }
 
@@ -198,7 +231,7 @@ export async function syncGuiWorkflowToComfyUIServer(input: {
     // check is the reliable path and is self-verifying.
     const fsWrite = await writeGuiWorkflowToNodeFs(node, destName, contents);
     if (fsWrite.ok) {
-      return { synced: true, destination: `user/default/${destination}`, reducedApplied };
+      return { synced: true, destination: `user/default/${destination}`, reducedApplied, baseSource };
     }
 
     // FALLBACK: HTTP userdata POST (works on ComfyUI versions that allow it).
@@ -211,7 +244,7 @@ export async function syncGuiWorkflowToComfyUIServer(input: {
         body: contents,
         signal: AbortSignal.timeout(15_000)
       });
-      if (res.ok) return { synced: true, destination, reducedApplied };
+      if (res.ok) return { synced: true, destination, reducedApplied, baseSource };
       httpReason = `userdata POST returned ${res.status} ${res.statusText}`;
     } catch (error) {
       httpReason = `userdata POST threw: ${error instanceof Error ? error.message : String(error)}`;

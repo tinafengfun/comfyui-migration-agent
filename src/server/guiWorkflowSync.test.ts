@@ -130,10 +130,11 @@ describe("syncGuiWorkflowToComfyUIServer", () => {
     expect(result.destination).toMatch(/^workflows\/[a-zA-Z0-9._-]+\.json$/);
   });
 
-  it("returns synced:false without throwing when the summary file is missing", async () => {
+  it("returns synced:false without throwing when neither the agent artifact NOR the source workflow exists", async () => {
     const root = path.join(process.cwd(), ".demo-state", "tests", `gui-sync-missing-${Date.now()}`);
     const task = await makeTask(root);
-    // No seedGuiWorkflow() call -- no 12-gui-acceptance-summary.json exists.
+    // No seedGuiWorkflow() call -- no 12-gui-acceptance-summary.json exists, and the
+    // task.workflowPath source file was never written -> both bases missing.
 
     const node: GpuNode = {
       name: "n",
@@ -147,7 +148,7 @@ describe("syncGuiWorkflowToComfyUIServer", () => {
 
     const result = await syncGuiWorkflowToComfyUIServer({ task, node });
     expect(result.synced).toBe(false);
-    expect(result.reason).toMatch(/no usable gui_workflow_json pointer/);
+    expect(result.reason).toMatch(/source workflow.*could not be read|no usable gui_workflow_json pointer/);
   });
 
   it("resolves gui_workflow_json when written as a plain string at the top level (real incident: SDK wrote it this way instead of {path})", async () => {
@@ -357,5 +358,38 @@ describe("syncGuiWorkflowToComfyUIServer — filesystem write (primary, hardened
     await expect(
       fs.access(path.join(wfDir, "My_Zimage_Workflow__-REDUCED-step12-gui-acceptance.json"))
     ).rejects.toThrow();
+  });
+
+  it("FALLS BACK to the source workflow + applies validated reduced changes when the agent artifact is missing", async () => {
+    // Real 2026-08-16 incident: Step 12 gate fired with NO 12-gui-acceptance artifact,
+    // so the sync had nothing to push and a STALE sidebar workflow stayed. The sync must
+    // fall back to the source GUI workflow and apply the Step-07/08-validated reduced
+    // changes, so the sidebar always gets a fresh, correctly-reduced graph for THIS task.
+    const root = path.join(process.cwd(), ".demo-state", "tests", `gui-sync-srcfallback-${Date.now()}`);
+    const task = await makeTask(root);
+    // NO seedGuiWorkflow() -> no agent 12-gui-acceptance artifact.
+    // Source GUI workflow with a dict-widget node (reducible without a live object_info):
+    await fs.writeFile(
+      task.workflowPath,
+      JSON.stringify({ nodes: [{ id: 90, type: "VHS_LoadVideo", widgets_values: { frame_load_cap: 121 } }], links: [] }),
+      "utf8"
+    );
+    // Validated reduced changes hardened by Step 08:
+    await writeJson(path.join(task.artifactPath, "effective-run-config.json"), {
+      reduced_tier: true,
+      recommended_reduced_setting: { changes: [{ node_id: "90", input: "frame_load_cap", old: 121, new: 60 }] }
+    });
+    const comfyuiRoot = path.join(root, "comfyui-root");
+    const node: GpuNode = {
+      name: "n", kind: "local", comfyui_root: comfyuiRoot, venv_python: "/usr/bin/python3",
+      model_roots: [], api_host: "127.0.0.1", api_port: 1
+    };
+    const result = await syncGuiWorkflowToComfyUIServer({ task, node });
+    expect(result.synced).toBe(true);
+    expect(result.baseSource).toMatch(/source GUI workflow/);
+    expect(result.reducedApplied).toBe(1);
+    // the pushed sidebar graph carries the REDUCED value, sourced from the source workflow
+    const written = JSON.parse(await fs.readFile(path.join(comfyuiRoot, result.destination!), "utf8"));
+    expect(written.nodes[0].widgets_values.frame_load_cap).toBe(60);
   });
 });
