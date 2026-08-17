@@ -23,8 +23,12 @@
 # only in the deployed copy (no rsync --delete) -- if a file was removed in
 # the canonical repo, remove it from agent-demo by hand and note why.
 #
+# Runtime image: also ensures this host's docker-runtime ComfyUI image (pinned
+# in gpu-nodes.json) is loaded from the shared /nfs_share store -- idempotent, a
+# no-op when already present. Opt out with --skip-image / DEPLOY_SKIP_IMAGE=1.
+#
 # Usage:
-#   bash scripts/deploy-agent-demo.sh --yes [--agent-demo /path/to/agent-demo] [--api http://127.0.0.1:3001]
+#   bash scripts/deploy-agent-demo.sh --yes [--agent-demo /path/to/agent-demo] [--api http://127.0.0.1:3001] [--skip-image]
 # ============================================================
 set -euo pipefail
 
@@ -48,12 +52,17 @@ AGENT_DEMO="/home/intel/tianfeng/comfy/ComfyUI/agent-demo"
 DRAFT_DOCS_ROOT="${DRAFT_DOCS_ROOT:-/home/intel/tianfeng/comfy/ComfyUI/docs/draft}"
 API="http://127.0.0.1:3001"
 CONFIRMED=0
+# Ensure the docker-runtime ComfyUI image is loaded from the NFS store as part
+# of the deploy (idempotent -- a no-op when it's already present). Opt out with
+# --skip-image or DEPLOY_SKIP_IMAGE=1 when you only want to push code.
+SKIP_IMAGE="${DEPLOY_SKIP_IMAGE:-0}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --yes) CONFIRMED=1; shift ;;
     --agent-demo) AGENT_DEMO="$2"; shift 2 ;;
     --api) API="$2"; shift 2 ;;
+    --skip-image) SKIP_IMAGE=1; shift ;;
     *) echo "unknown arg: $1"; exit 2 ;;
   esac
 done
@@ -179,6 +188,16 @@ fi
 rm -f "$RS_BEFORE" "$RS_AFTER"
 
 cd "$AGENT_DEMO"
+
+echo ""
+if [ "$SKIP_IMAGE" -eq 1 ]; then
+  echo "==> Runtime docker image pre-flight SKIPPED (--skip-image/DEPLOY_SKIP_IMAGE=1)."
+else
+  echo "==> Ensuring runtime docker image is loaded from NFS (idempotent)..."
+  # Run the freshly-synced helper against the LIVE agent-demo gpu-nodes.json
+  # (gpu-nodes.json is local-only config, not synced by this script).
+  GPU_NODES_PATH="$AGENT_DEMO/gpu-nodes.json" bash "$AGENT_DEMO/scripts/ensure-runtime-image.sh"
+fi
 
 echo ""
 echo "==> npx tsc --noEmit -p ."
