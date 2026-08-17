@@ -34,7 +34,45 @@ Tune an already validated workflow path on Intel XPU using controlled measuremen
 5. Compare runtime, memory, output integrity, cached-node counts, telemetry quality, and failure signatures.
 6. Pick winner or declare no safe improvement.
 7. If telemetry is missing, fix the harness and rerun the affected candidates rather than reusing incomplete data.
-8. If no safe improvement is justified, explicitly select `no_runtime_change_selected` and keep the validated baseline/fallback.
+8. If no safe lossless improvement is justified, select the delivered config the tool reports (`validated-reduced-lowvram` / `reduced-lowvram-marginal` / `full-size-delivery`) with an explicit "no lossless tuning headroom" reason — do not invent a launch-tweak winner.
+
+## Config-aware: read the delivered config, do not re-derive it
+
+The delivered runtime config is already hardened by the Step 07/08 capacity ladder in
+`artifacts/effective-run-config.json` (`vram_flags`, `reduced_tier`, `reduced_prompt_path`,
+`recommended_reduced_setting`). Step 09's job is to report THAT config truthfully and back it
+with one clean **same-flags** telemetry sample — not to invent a per-workflow default.
+
+- The VRAM offload flags (`--lowvram`/`--novram`) are **lossless** (placement only) and are
+  owned by the system escalation ladder. Do **not** hand-toggle them as a "tuning knob"; the
+  orchestrator relaunches ComfyUI with the persisted flags before each GPU step (and the ladder
+  re-escalates on OOM). Dropping offload to "go faster" just re-introduces the capacity OOM.
+- When the workflow is **capacity-locked** to a reduced tier + offload flags (e.g. WAN2.2 at
+  `--lowvram`), "no lossless tuning headroom — a faster run needs a larger-VRAM node" is a
+  VALID, expected outcome. Report it; do not fabricate a launch-tweak winner.
+
+## Reusable Step 09 tool
+
+Use the config-aware tuning tool. **Pass `--api-url`** so it captures a real reduced +
+delivered-flags sample on the current server (by Step 09 the orchestrator has already reset the
+XPU and reconciled the container to the persisted `--lowvram` flags, so the sample measures the
+config ON THE DELIVERED FLAGS — not the off-flags value Step 08's inline probe may have recorded
+before the reduced tier pinned `--lowvram`):
+
+```bash
+<ComfyUI root>/.venv-xpu/bin/python \
+  ComfyUI/docs/draft/migration-workflow-v2/tools/step09_performance_tuning.py \
+  --workspace <workspace> \
+  --comfy-root <ComfyUI root> \
+  --api-url http://127.0.0.1:<port> \
+  --timeout-seconds 1200 \
+  --smoke-seed <fixed integer>
+```
+
+It reads `effective-run-config.json`, runs the deferred reduced-validation once on the delivered
+flags (or reuses a valid upstream verdict / defers to Step 12 when no server is given), and writes
+`09-tuning-analysis.json`, `09-tuning.md`, and `09-output-manifest.json`. If `--api-url` is
+omitted it still produces a truthful config-aware report, just without the fresh same-flags sample.
 
 ## Output
 

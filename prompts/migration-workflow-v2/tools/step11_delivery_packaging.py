@@ -75,12 +75,42 @@ def collect_package(workspace: Path) -> dict[str, Any]:
     source_copy = copy_file(source_candidates[0], delivery_dir / "workflows" / "source-workflow.json")
     copied.append(source_copy)
 
-    for src, dst in [
+    # Config-aware runnable-prompt selection. Under a reduced tier, the RUNNABLE API
+    # prompt a customer POSTs/imports MUST be the REDUCED one -- shipping the full-size
+    # 06b as `runtime-policy-api-prompt.json` makes a customer run OOM (real gap: task
+    # 0804a33f shipped a full-size prompt named `reduced-tier-prompt.json`). Read the
+    # hardened effective-run-config.json (single source of truth from the Step 07/08
+    # capacity ladder) and pick the runnable prompt accordingly; keep the full-size copy
+    # only under a clearly-named `source-*` reference (which the delivery-consistency
+    # guard treats as reference-only and never runs).
+    effective: dict[str, Any] = {}
+    try:
+        effective = read_json(artifact_dir / "effective-run-config.json")
+    except (OSError, json.JSONDecodeError):
+        effective = {}
+    reduced_tier = bool(effective.get("reduced_tier"))
+    reduced_prompt_path = effective.get("reduced_prompt_path")
+    vram_flags = [str(f) for f in (effective.get("vram_flags") or [])]
+
+    static_copies = [
         (artifact_dir / "06-source-preserving-prompt.json", delivery_dir / "workflows" / "source-preserving-api-prompt.json"),
-        (artifact_dir / "06b-runtime-policy-prompt.json", delivery_dir / "workflows" / "runtime-policy-api-prompt.json"),
         (artifact_dir / "06b-runtime-policy-changes.json", delivery_dir / "workflows" / "runtime-policy-changes.json"),
         (artifact_dir / "05-extra-model-paths.yaml", delivery_dir / "runtime" / "extra-model-paths.yaml"),
-    ]:
+    ]
+    runnable_prompt_dst = delivery_dir / "workflows" / "runtime-policy-api-prompt.json"
+    if reduced_tier and reduced_prompt_path and Path(reduced_prompt_path).is_file():
+        # RUNNABLE = the reduced prompt; the full-size 06b is kept only as a reference.
+        copied.append(copy_file(Path(reduced_prompt_path), runnable_prompt_dst))
+        ref = copy_if_exists(
+            artifact_dir / "06b-runtime-policy-prompt.json",
+            delivery_dir / "workflows" / "source-full-size-api-prompt.json",
+        )
+        if ref:
+            copied.append(ref)
+    else:
+        static_copies.append((artifact_dir / "06b-runtime-policy-prompt.json", runnable_prompt_dst))
+
+    for src, dst in static_copies:
         item = copy_if_exists(src, dst)
         if item:
             copied.append(item)
@@ -129,6 +159,8 @@ def collect_package(workspace: Path) -> dict[str, Any]:
         "delivery_dir": str(delivery_dir),
         "source_workflow": str(source_copy),
         "runtime_policy_prompt": str(delivery_dir / "workflows" / "runtime-policy-api-prompt.json"),
+        "reduced_tier": reduced_tier,
+        "vram_flags": vram_flags,
         "extra_model_paths": str(delivery_dir / "runtime" / "extra-model-paths.yaml"),
         "comfy_root": step05["comfy_root"],
         "comfy_commit": step05["repo"]["commit"],
@@ -189,6 +221,19 @@ def collect_package(workspace: Path) -> dict[str, Any]:
 
 
 def render_readme(package: dict[str, Any]) -> str:
+    flags = " ".join(package.get("vram_flags") or [])
+    reduced_run_note = (
+        f" — this is the **REDUCED-tier** prompt (the config validated to fit this GPU); "
+        f"launch ComfyUI with `{flags}`"
+        if package.get("reduced_tier")
+        else ""
+    )
+    full_size_ref_note = (
+        "\n- `workflows/source-full-size-api-prompt.json`: FULL-SIZE reference only — **do NOT run it, "
+        "it will OOM on this GPU.** Reduced tier is the delivered config."
+        if package.get("reduced_tier")
+        else ""
+    )
     return f"""# Zimage v2 Intel XPU delivery package
 
 This package contains the Step 11 engineering delivery artifacts for the Zimage v2 migration.
@@ -203,7 +248,7 @@ Not supported by this package: {", ".join(package["claim_boundary"]["not_support
 
 - `workflows/runtime-policy-gui-workflow.json` (added by Step 12): **import this into ComfyUI to actually run the migration.** Preserves the original node/link graph 1:1 and applies only the documented, strictly-required runtime-policy widget fixes for this target — see `GUI-IMPORT-README.md`.
 - `workflows/source-workflow.json`: preserved, unmodified source workflow copy — fidelity reference only, not for direct execution if `workflows/runtime-policy-changes.json` lists any required changes.
-- `workflows/runtime-policy-api-prompt.json`: validated runtime-policy API prompt for XPU execution (API format, not GUI-importable).
+- `workflows/runtime-policy-api-prompt.json`: **the validated runtime-policy API prompt to RUN** (API format, not GUI-importable){reduced_run_note}.{full_size_ref_note}
 - `runtime/extra-model-paths.yaml`: model path wiring used for validation.
 - `validation/`: prompt, branch smoke, full validation, tuning, and coverage evidence.
 - `ledgers/`: asset, custom-node, model wiring, and coverage ledgers.

@@ -183,6 +183,42 @@ function resolveVramFlags(node: GpuNode, vramFlags?: readonly string[]): string[
   return [...flags];
 }
 
+/**
+ * From a container's raw entrypoint args (docker inspect `.Args`, e.g.
+ * `["/comfyui/main.py","--port","8188","--listen","0.0.0.0","--reserve-vram","1","--lowvram"]`),
+ * extract just the VRAM flag tail (everything except the main.py path and the
+ * `--port`/`--listen` pair) so it can be compared against `resolveVramFlags`.
+ */
+function extractVramFlagTail(args: string[]): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a.endsWith("main.py")) continue;
+    if (a === "--port" || a === "--listen") { i++; continue; } // skip flag + its value
+    out.push(a);
+  }
+  return out;
+}
+
+/**
+ * The VRAM launch flags the RUNNING docker container was actually started with,
+ * read from `docker inspect -f '{{json .Args}}'`. Best-effort: returns undefined
+ * on a non-docker node, an unreachable/absent container, or unparseable output.
+ * Used to detect drift between the live container and the persisted VRAM policy.
+ */
+async function runningContainerVramFlags(node: GpuNode, container: string): Promise<string[] | undefined> {
+  if (node.runtime !== "docker") return undefined;
+  const r = await dockerOnNode(node, ["inspect", "-f", "{{json .Args}}", container]);
+  if (!r.ok) return undefined;
+  try {
+    const args = JSON.parse(r.stdout.trim());
+    if (!Array.isArray(args)) return undefined;
+    return extractVramFlagTail(args.map((x: unknown) => String(x)));
+  } catch {
+    return undefined;
+  }
+}
+
 export function buildDockerStartScript(
   node: GpuNode,
   port: number,
@@ -286,6 +322,38 @@ export interface EnsureComfyUiUpResult {
 }
 
 /**
+ * Tear down the container (docker only) and relaunch ComfyUI fresh with `vramFlags`.
+ * Shared by the `forceRelaunch` path and the flag-drift reconciliation path so both
+ * apply the escalated/persisted flags identically (a plain restart/`docker start`
+ * would reuse the old flags). Optionally resets the XPU between teardown and
+ * relaunch (a container relaunch frees VRAM but not a wedged `xe` driver).
+ */
+async function teardownAndRelaunch(input: {
+  node: GpuNode;
+  apiUrl: string;
+  container?: string;
+  vramFlags?: readonly string[];
+  resetXpu: boolean;
+  waitSec: number;
+}): Promise<{ up: boolean; resetDetail: string }> {
+  const { node, apiUrl, container, vramFlags, resetXpu, waitSec } = input;
+  let resetDetail = "";
+  if (node.runtime === "docker" && container) {
+    await dockerOnNode(node, ["rm", "-f", container], 60_000);
+    // Reset the wedged XPU AFTER the container is gone (device is now free) and
+    // BEFORE relaunch, so the fresh ComfyUI starts on a clean driver.
+    if (resetXpu) {
+      const r = await resetXpuDevice(node);
+      resetDetail = `; ${r.detail}`;
+    }
+  }
+  const listen = node.kind === "ssh" ? "0.0.0.0" : "127.0.0.1";
+  await startComfyUi(node, node.api_port, listen, container, vramFlags);
+  const up = await waitUp(apiUrl, waitSec);
+  return { up, resetDetail };
+}
+
+/**
  * High-level, single entry point: ensure this node's ComfyUI is reachable at
  * apiUrl, using the correct launch pattern deterministically. Reused by both
  * the CLI (scripts/remote-comfyui.mts) and the orchestrator's automatic
@@ -329,25 +397,30 @@ export async function ensureComfyUiUp(input: {
   // Capacity-ladder escalation: tear down whatever is running and relaunch fresh
   // with the escalated VRAM flags (restart/`docker start` would reuse old flags).
   if (forceRelaunch) {
-    let resetDetail = "";
-    if (node.runtime === "docker" && input.container) {
-      await dockerOnNode(node, ["rm", "-f", input.container], 60_000);
-      // Reset the wedged XPU AFTER the container is gone (device is now free) and
-      // BEFORE relaunch, so the fresh ComfyUI starts on a clean driver.
-      if (resetXpu) {
-        const r = await resetXpuDevice(node);
-        resetDetail = `; ${r.detail}`;
-      }
-    }
-    const listen = node.kind === "ssh" ? "0.0.0.0" : "127.0.0.1";
-    await startComfyUi(node, node.api_port, listen, input.container, vramFlags);
-    const up = await waitUp(apiUrl, waitSec);
+    const { up, resetDetail } = await teardownAndRelaunch({ node, apiUrl, container: input.container, vramFlags, resetXpu, waitSec });
     return up
       ? { ok: true, detail: `relaunched fresh with vram flags [${resolveVramFlags(node, vramFlags).join(" ")}]${resetDetail}`, action: "started_fresh" }
       : { ok: false, detail: `forced relaunch did not bring up /system_stats within ${waitSec}s${resetDetail}`, action: "failed" };
   }
 
   if (await objectInfoUp(apiUrl)) {
+    // Flag-drift reconciliation: the server is healthy, but if the live container
+    // was launched with different VRAM flags than the persisted policy wants,
+    // relaunch it to match. This closes a real drift: Step 08 escalates the live
+    // container to --novram while probing full size, then the accepted reduced tier
+    // pins --lowvram to disk -- but writing the file is not a relaunch, so steps
+    // that merely reuse a healthy server (09/10/11) inherited the stale --novram
+    // container (2026-08-16). Only checked when caller passed the intended flags.
+    if (vramFlags && node.runtime === "docker" && input.container) {
+      const desired = resolveVramFlags(node, vramFlags);
+      const running = await runningContainerVramFlags(node, input.container);
+      if (running && running.join(" ") !== desired.join(" ")) {
+        const { up, resetDetail } = await teardownAndRelaunch({ node, apiUrl, container: input.container, vramFlags, resetXpu, waitSec });
+        return up
+          ? { ok: true, detail: `reconciled drifted vram flags [${running.join(" ")}] -> [${desired.join(" ")}]${resetDetail}`, action: "started_fresh" }
+          : { ok: false, detail: `flag-drift relaunch did not bring up /system_stats within ${waitSec}s${resetDetail}`, action: "failed" };
+      }
+    }
     return { ok: true, detail: "already reachable", action: "already_up" };
   }
 

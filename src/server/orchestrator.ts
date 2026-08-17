@@ -334,8 +334,25 @@ export class MigrationOrchestrator {
     const task = await this.store.updateStep(taskId, stepId, status, patch);
     const decisions = await this.store.listDecisions(taskId);
     await writeTaskStateLedger(task, decisions);
-    if (stepId === "12b" && status === "completed") {
-      await this.archiveWorkflowIfAccepted(task);
+    if ((stepId === "11" || stepId === "12b") && status === "completed") {
+      // FINAL-DELIVERY consistency guard: the bundle is assembled by now; make sure
+      // every runnable prompt in it carries the validated reduced-tier config before
+      // it can be archived/handed off. Best-effort; never breaks step completion.
+      const hardStopped = await this.enforceReducedDeliveryConsistency(task, stepId).catch((err) => {
+        void this.emit({
+          taskId,
+          stepId,
+          type: "progress",
+          message: `Delivery-consistency guard errored (non-fatal, delivery left as-is): ${err instanceof Error ? err.message : String(err)}`,
+          data: { deliveryConsistency: "guard_error" }
+        });
+        return false;
+      });
+      // Only archive Step 12b's accepted bundle if the guard did NOT hard-stop it
+      // (never publish a bundle that still ships a full-size runnable prompt).
+      if (stepId === "12b" && !hardStopped) {
+        await this.archiveWorkflowIfAccepted(task);
+      }
     }
     // Second, later chance to archive: by Step 13 (the last step)
     // completing, the whole 00-13 pipeline is known to have finished. This
@@ -1018,7 +1035,16 @@ export class MigrationOrchestrator {
       }
     }
 
-    if (stepId === "07" || stepId === "08" || stepId === "12") {
+    // Every ComfyUI-RUNNING step (07..12) reconciles the live container to the
+    // persisted VRAM policy before running -- not just 07/08/12. This closes the
+    // drift where Step 08 escalated the container to --novram (probing full size),
+    // the accepted reduced tier pinned --lowvram to disk, but steps 09/10/11 (which
+    // used to be outside this guard) reused the stale --novram container. The
+    // reconcile is a cheap no-op when the live flags already match; it relaunches
+    // only on actual drift (see ensureComfyUiUp's flag-drift branch). Steps 05/06
+    // (env deploy + prompt/branch work) keep their own separate handling.
+    const comfyStepNum = Number(stepId);
+    if (Number.isFinite(comfyStepNum) && comfyStepNum >= 7 && comfyStepNum <= 12) {
       // Automatic, deterministic pre-check -- don't rely on the SDK agent to
       // read a skill doc and improvise the right relaunch command under time
       // pressure. Ensure the endpoint is reachable (reusing an existing
@@ -1053,20 +1079,21 @@ export class MigrationOrchestrator {
         // This is what makes the flags proven in the previous step carry through to
         // Step 12 verbatim (fixes the lowvram->novram drift).
         const persistedVramFlags = await this.effectiveVramFlags(taskId, task);
-        // Step 07/08/12 all launch ComfyUI deterministically. Step 12 (the final
-        // GUI demo) MUST run against the SAME validated docker container + NFS venv
-        // as Steps 05-08 -- which has llama_cpp (the VLM node dependency), the fp8
-        // keep-on-move patch, and the effective VRAM flags -- never an
-        // agent-improvised local/bare-metal ComfyUI (that env is missing llama_cpp
-        // and hangs the VLM node; real incident 2026-08-11). Force a fresh relaunch
-        // for Step 12 so a stray/wrong instance on the port can't be silently reused.
-        const needEnsure = stepId === "07" || stepId === "08" || stepId === "12" || vramLevel > 0;
-        if (needEnsure) {
+        // Step 12 (the final GUI demo) MUST run against the SAME validated docker
+        // container + NFS venv as Steps 05-08 -- which has llama_cpp (the VLM node
+        // dependency), the fp8 keep-on-move patch, and the effective VRAM flags --
+        // never an agent-improvised local/bare-metal ComfyUI (that env is missing
+        // llama_cpp and hangs the VLM node; real incident 2026-08-11). Force a fresh
+        // relaunch for Step 12 so a stray/wrong instance on the port can't be
+        // silently reused. Every other GPU step passes the persisted flags and lets
+        // ensureComfyUiUp relaunch ONLY on drift (carry-through without a needless
+        // cold start each step), plus a forced relaunch when the XPU needs a reset.
+        {
           const vramFlags = persistedVramFlags;
-          const forceRelaunch = stepId === "12" || vramLevel > 0;
           // Reset the XPU on this relaunch if a prior capacity OOM/DEVICE_LOST at
           // Step 07/08 flagged the driver as possibly wedged (consume-once).
           const resetXpu = this.xpuResetPending.has(taskId);
+          const forceRelaunch = stepId === "12" || resetXpu;
           if (resetXpu) this.xpuResetPending.delete(taskId);
           const ensureResult = await ensureComfyUiUp({
             node,
@@ -3725,14 +3752,7 @@ export class MigrationOrchestrator {
       return undefined;
     }
     const prompt = obj && typeof obj === "object" && obj.prompt && typeof obj.prompt === "object" ? obj.prompt : obj;
-    let applied = 0;
-    for (const change of changes) {
-      const node = prompt?.[String(change.node_id)];
-      if (node && node.inputs && typeof node.inputs === "object" && change.input in node.inputs) {
-        node.inputs[change.input] = change.new;
-        applied += 1;
-      }
-    }
+    const { applied } = applyReducedChangesToPrompt(prompt, changes);
     if (applied === 0) return undefined;
     const outPath = path.join(task.artifactPath, "reduced-runtime-policy-prompt.json");
     try {
@@ -3741,6 +3761,182 @@ export class MigrationOrchestrator {
       return undefined;
     }
     return outPath;
+  }
+
+  /**
+   * FINAL-DELIVERY consistency guard. After the delivery bundle is assembled (Step 11
+   * packaging + Step 12b final delivery), guarantee every RUNNABLE API-format prompt in
+   * the bundle carries the reduced-tier drivers -- the same config validated at Step
+   * 08->12 -- so a customer never runs a full-size prompt and OOMs. This closes a real
+   * gap: Step 11 shipped a file literally named `reduced-tier-prompt.json` that was
+   * actually full-size (ref_max_size=1280, length=81) (task 0804a33f, 2026-08-16).
+   *
+   * Auto-corrects a drifted runnable prompt to the reduced values (reusing the same
+   * deterministic apply as generateReducedWorkflow); HARD-STOPS the step if a full-size
+   * runnable prompt survives (never ship it). Reference-only files (basename matching
+   * /source/i) and non-API-format shapes are left untouched. GUI-format workflows are
+   * already reduced by guiWorkflowSync at Step 12. Returns true iff it hard-stopped.
+   * Best-effort: no-op when there is no bundle, no effective-run-config, or no reduced tier.
+   */
+  private async enforceReducedDeliveryConsistency(task: MigrationTask, stepId: string): Promise<boolean> {
+    let cfg: any;
+    try {
+      cfg = JSON.parse(await fs.readFile(path.join(task.artifactPath, "effective-run-config.json"), "utf8"));
+    } catch {
+      return false; // no effective-run-config -> nothing to enforce
+    }
+    if (cfg?.reduced_tier !== true) return false; // full-size delivery is legitimate
+    const changes = cfg?.recommended_reduced_setting?.changes;
+    const vramFlags: string[] = Array.isArray(cfg?.vram_flags) ? cfg.vram_flags.map(String) : [];
+    if (!Array.isArray(changes) || changes.length === 0) {
+      await this.emit({
+        taskId: task.id,
+        stepId,
+        type: "progress",
+        message:
+          "Delivery-consistency guard: reduced tier but no structured recommended_reduced_setting.changes -- " +
+          "cannot verify/repair bundled prompts here (Step 08's own never-ship guard covers the upstream case).",
+        data: { deliveryConsistency: "no_structured_changes" }
+      });
+      return false;
+    }
+
+    const bundleDirs = ["11-delivery", "12b-final-delivery"].map((d) => path.join(task.artifactPath, d));
+    const isReferenceOnly = (name: string) => /source/i.test(name);
+    const graphOf = (obj: any) =>
+      obj && typeof obj === "object" && obj.prompt && typeof obj.prompt === "object" ? obj.prompt : obj;
+    const looksLikeApiPrompt = (graph: any) =>
+      graph &&
+      typeof graph === "object" &&
+      !Array.isArray(graph) &&
+      Object.values(graph).some((n: any) => n && typeof n === "object" && typeof n.class_type === "string");
+
+    // Collect all *.json under the bundle dirs (recursive).
+    const jsonFiles: string[] = [];
+    for (const dir of bundleDirs) {
+      let entries: string[] = [];
+      try {
+        entries = (await fs.readdir(dir, { recursive: true })) as unknown as string[];
+      } catch {
+        continue; // dir may not exist for this step yet
+      }
+      for (const e of entries) {
+        const full = path.join(dir, String(e));
+        if (full.endsWith(".json")) jsonFiles.push(full);
+      }
+    }
+
+    // Pass 1: auto-correct drifted runnable prompts.
+    const repaired: string[] = [];
+    for (const file of jsonFiles) {
+      if (isReferenceOnly(path.basename(file))) continue;
+      let obj: any;
+      try {
+        obj = JSON.parse(await fs.readFile(file, "utf8"));
+      } catch {
+        continue;
+      }
+      const graph = graphOf(obj);
+      if (!looksLikeApiPrompt(graph)) continue;
+      const { applied, drifted } = applyReducedChangesToPrompt(graph, changes);
+      if (applied > 0 && drifted > 0) {
+        try {
+          await fs.writeFile(file, JSON.stringify(obj, null, 2) + "\n", "utf8");
+          repaired.push(path.relative(task.artifactPath, file));
+        } catch {
+          // couldn't write -> the verify pass below hard-stops if still drifted
+        }
+      }
+    }
+
+    // Pass 2: verify no runnable prompt still ships a full-size driver.
+    const stillFullSize: string[] = [];
+    for (const file of jsonFiles) {
+      if (isReferenceOnly(path.basename(file))) continue;
+      let obj: any;
+      try {
+        obj = JSON.parse(await fs.readFile(file, "utf8"));
+      } catch {
+        continue;
+      }
+      const graph = graphOf(obj);
+      if (!looksLikeApiPrompt(graph)) continue;
+      const probe = JSON.parse(JSON.stringify(graph));
+      const { drifted } = applyReducedChangesToPrompt(probe, changes);
+      if (drifted > 0) stillFullSize.push(path.relative(task.artifactPath, file));
+    }
+
+    if (repaired.length > 0) {
+      await this.emit({
+        taskId: task.id,
+        stepId,
+        type: "progress",
+        message:
+          `Delivery-consistency guard: auto-corrected ${repaired.length} bundled runnable prompt(s) to the ` +
+          `reduced tier (${changes.map((c: any) => `${c.input}->${c.new}`).join(", ")}): ${repaired.join(", ")}.`,
+        data: { deliveryConsistency: "repaired", files: repaired, changes }
+      });
+    }
+
+    if (stillFullSize.length > 0) {
+      const reason =
+        `Delivery-consistency HARD STOP: the reduced-tier delivery bundle still contains full-size runnable ` +
+        `prompt(s) that would OOM a customer run: ${stillFullSize.join(", ")}. Expected the reduced drivers ` +
+        `(${changes.map((c: any) => `${c.input}=${c.new}`).join(", ")}) but a full-size value survived ` +
+        `auto-correction (likely a file-write failure). Rebuild the bundle from reduced-runtime-policy-prompt.json.`;
+      // Use the low-level store update (NOT updateStepAndPersist) to avoid re-entering
+      // this same completion hook. Store state is authoritative; the emit records it.
+      await this.store.updateStep(task.id, stepId, "hard_stopped", { summary: reason, error: reason });
+      await this.emit({
+        taskId: task.id,
+        stepId,
+        type: "hard_stop",
+        message: reason,
+        data: { deliveryConsistency: "full_size_survived", files: stillFullSize }
+      });
+      return true;
+    }
+
+    // Advisory: runnable launch scripts / deployment guide should mention the delivery
+    // flags. Prose is NOT auto-rewritten (the 12b tool renders these from config); this
+    // only surfaces a regression where a customer might launch without offload and OOM.
+    const offloadFlags = vramFlags.filter((f) => f.startsWith("--") && f !== "--reserve-vram");
+    if (offloadFlags.length > 0) {
+      for (const dir of bundleDirs) {
+        let entries: string[] = [];
+        try {
+          entries = (await fs.readdir(dir, { recursive: true })) as unknown as string[];
+        } catch {
+          continue;
+        }
+        for (const e of entries) {
+          const name = String(e);
+          if (!name.endsWith(".sh") && !/deployment-guide\.md$/i.test(name)) continue;
+          const full = path.join(dir, name);
+          let text = "";
+          try {
+            text = await fs.readFile(full, "utf8");
+          } catch {
+            continue;
+          }
+          const missing = offloadFlags.filter((f) => !text.includes(f));
+          if (missing.length > 0) {
+            await this.emit({
+              taskId: task.id,
+              stepId,
+              type: "progress",
+              message:
+                `Delivery-consistency WARNING: ${path.relative(task.artifactPath, full)} does not mention delivery ` +
+                `flag(s) ${missing.join(" ")} -- a customer following it may launch without offload and OOM. ` +
+                `(Advisory; prose not auto-rewritten.)`,
+              data: { deliveryConsistency: "flags_missing_in_doc", file: path.relative(task.artifactPath, full), missing }
+            });
+          }
+        }
+      }
+    }
+
+    return false;
   }
 
   /**
@@ -5137,6 +5333,32 @@ export class MigrationOrchestrator {
 
 function hasPersistedActiveState(task: MigrationTask): boolean {
   return task.status === "running" || task.steps.some((step) => step.status === "running");
+}
+
+/**
+ * Deterministically apply reduced-tier changes to an API-format prompt graph
+ * (a dict of node_id -> { class_type, inputs }). For each {node_id, input, new},
+ * set prompt[node_id].inputs[input] = new. Returns how many were applied and how
+ * many were DRIFTED (present but not already at `new` -- i.e. a full-size value the
+ * bundle would otherwise ship to the customer). Mutates `prompt` in place; pure
+ * otherwise. Shared by generateReducedWorkflow (build) and the delivery-consistency
+ * guard (repair) so both apply the identical reduction.
+ */
+function applyReducedChangesToPrompt(
+  prompt: any,
+  changes: Array<{ node_id: string | number; input: string; new: unknown }>
+): { applied: number; drifted: number } {
+  let applied = 0;
+  let drifted = 0;
+  for (const change of changes) {
+    const node = prompt?.[String(change.node_id)];
+    if (node && node.inputs && typeof node.inputs === "object" && change.input in node.inputs) {
+      if (node.inputs[change.input] !== change.new) drifted += 1;
+      node.inputs[change.input] = change.new;
+      applied += 1;
+    }
+  }
+  return { applied, drifted };
 }
 
 function isTerminalPhase1Status(status: string): boolean {

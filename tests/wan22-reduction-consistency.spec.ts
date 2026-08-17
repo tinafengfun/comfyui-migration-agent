@@ -42,11 +42,57 @@ import {
 
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { execFileSync } from "node:child_process";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const FIXTURE_PATH = path.resolve(__dirname, "./fixtures/video-edit-wan22.json");
 const FIXTURE_NAME = "video-edit-wan22.json";
 const GPU_NODE = process.env.PW_GPU_NODE ?? "remote-124-12";
+// Opt-in LIVE container-flag check. The effective-run-config assertion below proves
+// the persisted POLICY is --lowvram; this proves the actual RUNNING container matches
+// it (the exact drift the operator hit: policy --lowvram, container --novram leftover).
+// Set PW_GPU_SSH="user@host" (and PW_GPU_SSH_PASS for password auth via sshpass) to
+// enable. When unset, the live check is skipped (the policy assertion still runs).
+const GPU_SSH = process.env.PW_GPU_SSH;
+const GPU_SSH_PASS = process.env.PW_GPU_SSH_PASS;
+
+/** Read the RUNNING task container's VRAM flag tail via `docker inspect` over SSH. */
+function readLiveContainerFlags(taskId: string): string[] | undefined {
+  if (!GPU_SSH) return undefined;
+  const remote = `docker inspect -f '{{json .Args}}' comfyui-${taskId}`;
+  const sshArgs = ["-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=15", GPU_SSH, remote];
+  try {
+    const out = GPU_SSH_PASS
+      ? execFileSync("sshpass", ["-e", "ssh", ...sshArgs], {
+          env: { ...process.env, SSHPASS: GPU_SSH_PASS },
+          encoding: "utf8",
+          timeout: 30_000,
+        })
+      : execFileSync("ssh", sshArgs, { encoding: "utf8", timeout: 30_000 });
+    const args = JSON.parse(out.trim());
+    if (!Array.isArray(args)) return undefined;
+    const tail: string[] = [];
+    for (let i = 0; i < args.length; i++) {
+      const a = String(args[i]);
+      if (a.endsWith("main.py")) continue;
+      if (a === "--port" || a === "--listen") { i++; continue; }
+      tail.push(a);
+    }
+    return tail;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Best-effort: assert the LIVE container is --lowvram (not the --novram leftover). */
+function assertContainerFlagsLive(where: string, taskId: string): string {
+  const flags = readLiveContainerFlags(taskId);
+  if (!flags) return "live container-flag check skipped (set PW_GPU_SSH to enable)";
+  const joined = flags.join(" ");
+  expect(flags.includes("--lowvram"), `[${where}] LIVE container flags must include --lowvram (got ${joined})`).toBe(true);
+  expect(flags.includes("--novram"), `[${where}] LIVE container flags must NOT include --novram (drift; got ${joined})`).toBe(false);
+  return `live container flags: ${joined}`;
+}
 
 const POLL_MS = 15_000;
 const BUDGET_MS = 8 * 60 * 60_000; // 8h to reach the Step 12 gate
@@ -276,8 +322,10 @@ test.describe("WAN2.2 reduction-config multi-step sync @wan22-consistency", () =
       try {
         assertReduced(where, c, captureBaseline ? null : baseline);
         if (captureBaseline) baseline = c;
-        consistency.push({ step: where, line: fmt(c), pass: true });
-        console.log(`  [sync] ${where}: PASS — ${fmt(c)}`);
+        // Policy asserted above; now confirm the LIVE container matches (opt-in).
+        const liveNote = assertContainerFlagsLive(where, taskId);
+        consistency.push({ step: where, line: `${fmt(c)} | ${liveNote}`, pass: true });
+        console.log(`  [sync] ${where}: PASS — ${fmt(c)} | ${liveNote}`);
       } catch (e) {
         consistency.push({ step: where, line: `${fmt(c)}  <<< ${e instanceof Error ? e.message : String(e)}`, pass: false });
         console.log(`  [sync] ${where}: FAIL — ${fmt(c)}`);

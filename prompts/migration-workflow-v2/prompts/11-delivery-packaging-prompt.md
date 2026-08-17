@@ -47,6 +47,17 @@ Create a delivery bundle with:
 - final migration result report
 - package manifest, completion decision, and Step 12 GUI/manual acceptance context
 
+## Reduced-tier consistency (must match effective-run-config.json)
+
+If `artifacts/effective-run-config.json` has `reduced_tier: true`, the **runnable** API prompt in the
+bundle (`workflows/runtime-policy-api-prompt.json`) MUST be the reduced one (`reduced-runtime-policy-prompt.json`,
+e.g. `ref_max_size=640, length=40`), NOT the full-size Step 06 prompt. Ship the full-size copy only under a
+clearly-named `source-*` reference and label it "do NOT run — will OOM". Document the delivered launch flags
+(`vram_flags`, e.g. `--lowvram`). `step11_delivery_packaging.py` now does this automatically; the backend also
+runs a deterministic delivery-consistency guard at Step 11/12b completion that auto-corrects any drifted
+runnable prompt and HARD-STOPS if a full-size runnable prompt survives. Never bundle a full-size prompt under a
+run-implying name (real incident: a file named `reduced-tier-prompt.json` that was actually full-size, task 0804a33f).
+
 ## Hard stops
 
 Stop delivery if the package cannot reproduce the claimed result or if customer-facing validation evidence is missing.

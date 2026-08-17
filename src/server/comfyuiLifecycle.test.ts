@@ -189,6 +189,75 @@ describe("ensureComfyUiUp", () => {
     expect(result.detail).toContain("xpu-smi reset GPU 0");
   }, 15_000);
 
+  it("reconciles drifted flags: relaunches a healthy container when its live flags differ from the persisted policy", async () => {
+    // Server is reachable (objectInfoUp true) AND the post-relaunch waitUp succeeds.
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true }));
+    const seen: string[] = [];
+    execFileMock.mockImplementation((cmd: string, args: string[]) => {
+      seen.push(`${cmd} ${Array.isArray(args) ? args.join(" ") : ""}`);
+      if (args?.[0] === "inspect" && args?.includes("{{json .Args}}")) {
+        // The live container was launched with --novram (a Step-08 full-size probe
+        // escalation) but the persisted policy wants --lowvram (the reduced tier).
+        return Promise.resolve({
+          stdout: JSON.stringify(["/comfyui/main.py", "--port", "8188", "--listen", "127.0.0.1", "--reserve-vram", "1", "--novram"]),
+          stderr: ""
+        });
+      }
+      return Promise.resolve({ stdout: "", stderr: "" });
+    });
+    writeFileSyncMock.mockReset();
+
+    const { ensureComfyUiUp } = await import("./comfyuiLifecycle");
+    const result = await ensureComfyUiUp({
+      node: dockerNode(),
+      apiUrl: "http://127.0.0.1:8188",
+      container: "comfyui-task-1",
+      waitSec: 5,
+      vramFlags: ["--reserve-vram", "1", "--lowvram"]
+    });
+
+    expect(result).toMatchObject({ ok: true, action: "started_fresh" });
+    expect(result.detail).toContain("reconciled drifted vram flags");
+    expect(result.detail).toContain("--novram");
+    expect(result.detail).toContain("--lowvram");
+    // It tore the drifted container down and relaunched with the persisted --lowvram flags.
+    expect(seen.some((s) => s.includes("rm -f") && s.includes("comfyui-task-1"))).toBe(true);
+    expect(writeFileSyncMock).toHaveBeenCalledWith(
+      expect.stringContaining("start-comfyui-docker"),
+      expect.stringContaining("--reserve-vram 1 --lowvram"),
+      expect.anything()
+    );
+  }, 15_000);
+
+  it("does NOT relaunch a healthy container whose live flags already match the persisted policy", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true }));
+    const seen: string[] = [];
+    execFileMock.mockImplementation((cmd: string, args: string[]) => {
+      seen.push(`${cmd} ${Array.isArray(args) ? args.join(" ") : ""}`);
+      if (args?.[0] === "inspect" && args?.includes("{{json .Args}}")) {
+        return Promise.resolve({
+          stdout: JSON.stringify(["/comfyui/main.py", "--port", "8188", "--listen", "127.0.0.1", "--reserve-vram", "1", "--lowvram"]),
+          stderr: ""
+        });
+      }
+      return Promise.resolve({ stdout: "", stderr: "" });
+    });
+    writeFileSyncMock.mockReset();
+
+    const { ensureComfyUiUp } = await import("./comfyuiLifecycle");
+    const result = await ensureComfyUiUp({
+      node: dockerNode(),
+      apiUrl: "http://127.0.0.1:8188",
+      container: "comfyui-task-1",
+      waitSec: 5,
+      vramFlags: ["--reserve-vram", "1", "--lowvram"]
+    });
+
+    expect(result).toMatchObject({ ok: true, action: "already_up" });
+    expect(seen.some((s) => s.includes("rm -f"))).toBe(false);
+    expect(writeFileSyncMock).not.toHaveBeenCalled();
+  });
+
   it("forceRelaunch WITHOUT resetXpu never calls xpu-smi", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false }));
     const seen: string[] = [];
