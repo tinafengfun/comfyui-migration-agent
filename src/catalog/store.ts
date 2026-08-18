@@ -37,6 +37,15 @@ export interface ResolveResult {
 
 const TIER_RANK: Record<CatalogTier, number> = { trusted: 3, candidate: 2, unsupported: 1 };
 
+export interface LeaseRow {
+  node_key: string;
+  holder: string;
+  lease_id: string;
+  acquired_at: number;
+  expires_at: number;
+  heartbeat_at: number;
+}
+
 export class CatalogStore {
   readonly dataDir: string;
   readonly nodesDir: string;
@@ -74,7 +83,64 @@ export class CatalogStore {
       );
       CREATE INDEX IF NOT EXISTS idx_node_prefixes_prefix ON node_prefixes(prefix);
       CREATE INDEX IF NOT EXISTS idx_node_prefixes_key ON node_prefixes(node_key);
+
+      CREATE TABLE IF NOT EXISTS leases (
+        node_key TEXT PRIMARY KEY,
+        holder TEXT NOT NULL,
+        lease_id TEXT NOT NULL,
+        acquired_at INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL,
+        heartbeat_at INTEGER NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS push_queue (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        sha TEXT,
+        enqueued_at TEXT NOT NULL,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        last_error TEXT
+      );
     `);
+  }
+
+  // ── Lease rows (time logic lives in the writer/LeaseManager) ──────────────
+  getLeaseRow(nodeKey: string): LeaseRow | undefined {
+    return this.db.prepare("SELECT * FROM leases WHERE node_key = ?").get(nodeKey) as
+      | LeaseRow
+      | undefined;
+  }
+
+  upsertLeaseRow(row: LeaseRow): void {
+    this.db
+      .prepare(
+        `INSERT INTO leases (node_key, holder, lease_id, acquired_at, expires_at, heartbeat_at)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(node_key) DO UPDATE SET
+           holder=excluded.holder, lease_id=excluded.lease_id, acquired_at=excluded.acquired_at,
+           expires_at=excluded.expires_at, heartbeat_at=excluded.heartbeat_at`
+      )
+      .run(row.node_key, row.holder, row.lease_id, row.acquired_at, row.expires_at, row.heartbeat_at);
+  }
+
+  deleteLeaseRow(nodeKey: string): void {
+    this.db.prepare("DELETE FROM leases WHERE node_key = ?").run(nodeKey);
+  }
+
+  // ── Push queue (writer drains it after each commit) ───────────────────────
+  enqueuePush(sha: string, enqueuedAt: string): void {
+    this.db.prepare("INSERT INTO push_queue (sha, enqueued_at) VALUES (?, ?)").run(sha, enqueuedAt);
+  }
+
+  pendingPushCount(): number {
+    return (this.db.prepare("SELECT COUNT(*) AS c FROM push_queue").get() as { c: number }).c;
+  }
+
+  clearPushQueue(): void {
+    this.db.exec("DELETE FROM push_queue");
+  }
+
+  recordPushError(message: string): void {
+    this.db.prepare("UPDATE push_queue SET attempts = attempts + 1, last_error = ?").run(message);
   }
 
   close(): void {
