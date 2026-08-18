@@ -14,7 +14,17 @@
  */
 import fs from "node:fs";
 import path from "node:path";
-import { nodeKeyFromRepo, type CatalogTier, type XpuNodeRecord } from "../catalog/schema";
+import {
+  nodeKeyFromRepo,
+  type CatalogTier,
+  type CatalogValidationEvidence,
+  type XpuNodeRecord
+} from "../catalog/schema";
+
+/** The catalog integration is opt-in (deploy dark). Off ⇒ resolve/write are no-ops. */
+export function catalogEnabled(): boolean {
+  return process.env.XPU_CATALOG_ENABLED === "1" || process.env.XPU_CATALOG_ENABLED === "true";
+}
 
 export type ResolveSource = "server" | "fallback";
 
@@ -116,4 +126,73 @@ export async function getByKey(nodeKey: string): Promise<XpuNodeRecord | null> {
     /* fall through to offline */
   }
   return fallbackResolveByKey(nodeKey)?.record ?? null;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Write path — best-effort. Writes have NO offline path; on failure the caller
+// still has the on-disk NN-catalog-writeback.json artifact to replay later, so a
+// failed write is logged and skipped, never fatal to a migration.
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function postJson(pathSuffix: string, body: unknown): Promise<Response | null> {
+  try {
+    return await fetch(`${serverUrl()}${pathSuffix}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(TIMEOUT_MS)
+    });
+  } catch {
+    return null;
+  }
+}
+
+/** Create/replace a record (structural upsert). Returns the stored record or null on failure/conflict. */
+export async function upsertRecord(record: XpuNodeRecord): Promise<XpuNodeRecord | null> {
+  const res = await postJson("/api/xpu-catalog/nodes", record);
+  if (!res || !res.ok) return null;
+  return (await res.json()) as XpuNodeRecord;
+}
+
+/** Append validation evidence (append-merge, idempotent server-side). */
+export async function appendValidation(
+  nodeKey: string,
+  evidence: CatalogValidationEvidence,
+  opts: { backfillRepository?: string; backfillNfsPath?: string } = {}
+): Promise<XpuNodeRecord | null> {
+  const res = await postJson(`/api/xpu-catalog/nodes/${encodeURIComponent(nodeKey)}/validation`, {
+    evidence,
+    ...opts
+  });
+  if (!res || !res.ok) return null;
+  return (await res.json()) as XpuNodeRecord;
+}
+
+export interface LeaseResult {
+  granted: boolean;
+  leaseId?: string;
+  holder?: string;
+  ttlSec?: number;
+}
+
+/** Acquire a per-nodeKey migration lease. granted=false ⇒ another agent holds it (wait+reuse). */
+export async function acquireLease(nodeKey: string, holder: string, ttlSec = 600): Promise<LeaseResult> {
+  const res = await postJson(`/api/xpu-catalog/nodes/${encodeURIComponent(nodeKey)}/lease`, { holder, ttlSec });
+  if (!res) return { granted: false };
+  const body = (await res.json()) as LeaseResult;
+  return body;
+}
+
+export async function releaseLease(nodeKey: string, leaseId: string): Promise<boolean> {
+  try {
+    const res = await fetch(`${serverUrl()}/api/xpu-catalog/nodes/${encodeURIComponent(nodeKey)}/lease`, {
+      method: "DELETE",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ leaseId }),
+      signal: AbortSignal.timeout(TIMEOUT_MS)
+    });
+    return res.ok ? Boolean((await res.json()).released) : false;
+  } catch {
+    return false;
+  }
 }

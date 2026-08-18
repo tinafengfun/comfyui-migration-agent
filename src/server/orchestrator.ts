@@ -62,6 +62,7 @@ import type { StateStore } from "./state";
 import { ensureStepArtifactScaffold } from "./stepArtifactScaffold";
 import { createTaskWorkspace, deleteTaskWorkspace, getLayoutForTask } from "./taskWorkspaces";
 import { writeTaskStateLedger } from "./taskStateLedger";
+import { applyCatalogWriteBack } from "./xpuCatalogWriteBack";
 import {
   appendAnswerDefault,
   appendAnswerLog,
@@ -353,6 +354,35 @@ export class MigrationOrchestrator {
       if (stepId === "12b" && !hardStopped) {
         await this.archiveWorkflowIfAccepted(task);
       }
+    }
+    // XPU-SUPPORT CATALOG write-back: after node install/patch (Step 05) or branch
+    // smoke (Step 07), fold any per-node validation evidence
+    // (<artifacts>/catalog-writeback.json, emitted by validate_node_xpu.py / Step 05)
+    // into the shared catalog so the next migration reuses trusted nodes. Additive +
+    // best-effort; no-op unless XPU_CATALOG_ENABLED. The single serialized writer is
+    // the catalog-server — this just POSTs to it.
+    if ((stepId === "05" || stepId === "07") && status === "completed") {
+      await applyCatalogWriteBack(task.artifactPath, { taskId: task.id, workflowName: task.name })
+        .then((s) => {
+          if (s.enabled && (s.created.length || s.validated.length)) {
+            void this.emit({
+              taskId,
+              stepId,
+              type: "progress",
+              message: `XPU catalog updated: ${s.created.length} new, ${s.validated.length} validated`,
+              data: { catalogWriteBack: s }
+            });
+          }
+        })
+        .catch((err) => {
+          void this.emit({
+            taskId,
+            stepId,
+            type: "progress",
+            message: `Catalog write-back errored (non-fatal): ${err instanceof Error ? err.message : String(err)}`,
+            data: { catalogWriteBack: "error" }
+          });
+        });
     }
     // Second, later chance to archive: by Step 13 (the last step)
     // completing, the whole 00-13 pipeline is known to have finished. This
