@@ -98,7 +98,10 @@ export const GLOBAL_DIRS = {
 export const SCHEMA_FILES = {
   skillFrontmatter: path.join(GLOBAL_DIRS.schemasRoot, "skill-frontmatter.schema.json"),
   recipe: path.join(GLOBAL_DIRS.schemasRoot, "recipe.schema.json"),
-  feedbackEvent: path.join(GLOBAL_DIRS.schemasRoot, "feedback-event.schema.json")
+  feedbackEvent: path.join(GLOBAL_DIRS.schemasRoot, "feedback-event.schema.json"),
+  // Custom-node XPU-support catalog record (see src/catalog/). Validated on every
+  // catalog-server write; a superset of recipe + knownCustomNodes.
+  xpuNode: path.join(GLOBAL_DIRS.schemasRoot, "xpu-node.schema.json")
 } as const;
 
 // ─────────────────────────────────────────────────────────────────────────────

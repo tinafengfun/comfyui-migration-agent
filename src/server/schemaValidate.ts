@@ -29,7 +29,7 @@ import { SCHEMA_FILES } from "./paths";
 // Public types
 // ─────────────────────────────────────────────────────────────────────────────
 
-export type SchemaKind = "skillFrontmatter" | "recipe" | "feedbackEvent";
+export type SchemaKind = "skillFrontmatter" | "recipe" | "feedbackEvent" | "xpuNode";
 
 export interface ValidationOk {
   ok: true;
@@ -146,6 +146,7 @@ export const validateSkillFrontmatter = (v: unknown): ValidationResult =>
 export const validateRecipe = (v: unknown): ValidationResult => validate("recipe", v);
 export const validateFeedbackEvent = (v: unknown): ValidationResult =>
   validate("feedbackEvent", v);
+export const validateXpuNode = (v: unknown): ValidationResult => validate("xpuNode", v);
 
 /**
  * Assert form: throws on invalid input. Use on write paths where invalid

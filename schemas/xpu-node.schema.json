@@ -1,0 +1,254 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/tinafengfun/comfyui-xpu-catalog/raw/main/schema/xpu-node.schema.json",
+  "title": "ComfyUI custom-node XPU-support catalog record",
+  "description": "One record per custom-node package describing its Intel-XPU support: source/storage, required changes (patches/pip/SYCL wheel/env), version support, xpu-vs-cpu execution, usable configs (reduction/launch flags), validation evidence, and trust tier. Superset of recipes/nodes/*.json (recipe.schema.json) + src/server/knownCustomNodes.ts. The catalog-server validates every write against this schema.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "nodeKey",
+    "packageName",
+    "repository",
+    "nodeTypePrefixes",
+    "execution",
+    "xpuSupport",
+    "tier",
+    "version",
+    "createdAt",
+    "updatedAt"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "type": "integer",
+      "const": 1,
+      "description": "Record schema version. Bump when the shape changes incompatibly."
+    },
+    "nodeKey": {
+      "type": "string",
+      "description": "Stable catalog key = normalized repo identity `<owner>__<repo>` lowercased, e.g. 'lihaoyun6__comfyui-llama-cpp_vlm'. One file nodes/<nodeKey>.json.",
+      "pattern": "^[a-z0-9][a-z0-9._-]*__[a-z0-9][a-z0-9._-]*$",
+      "minLength": 3,
+      "maxLength": 200
+    },
+    "packageName": {
+      "type": "string",
+      "description": "Canonical custom_nodes/ dir name, e.g. 'ComfyUI-llama-cpp_vlm'.",
+      "minLength": 1
+    },
+    "repository": {
+      "type": "string",
+      "description": "Git repo URL cloned into <nfs>/custom_nodes/<packageName> and symlinked into the run."
+    },
+    "nodeTypePrefixes": {
+      "type": "array",
+      "description": "class_type prefixes this package provides. A workflow node whose type starts with any of these belongs to this package (prefix, not exact — one entry covers a node family).",
+      "minItems": 1,
+      "items": { "type": "string" }
+    },
+    "onNfsShare": {
+      "type": "boolean",
+      "description": "Whether this package is published on the shared /nfs_share/custom_nodes tree (symlinked per node) vs a local-only clone."
+    },
+    "nfsPath": {
+      "type": "string",
+      "description": "Absolute path on the shared tree, e.g. /nfs_share/custom_nodes/ComfyUI-llama-cpp_vlm."
+    },
+    "symlinkModel": {
+      "type": "boolean",
+      "description": "True when the local custom_nodes/<name> entry is a symlink to nfsPath (the shared convention)."
+    },
+    "commit": {
+      "type": "string",
+      "description": "Pinned git commit/ref the recorded support was proven against."
+    },
+    "versionsSupported": {
+      "type": "array",
+      "description": "Git refs/tags/commits known to work on XPU with this record's changes.",
+      "items": { "type": "string" }
+    },
+    "modelSubdir": {
+      "type": "string",
+      "description": "ComfyUI models/<modelSubdir>/ folder this node loads weights from (e.g. 'LLM'). Routes acquired assets."
+    },
+    "execution": {
+      "type": "string",
+      "enum": ["xpu", "cpu", "hybrid"],
+      "description": "Where this node actually computes: xpu=on the Arc GPU; cpu=host CPU (e.g. llama.cpp VLM); hybrid=some ops XPU, some CPU."
+    },
+    "xpuSupport": {
+      "type": "string",
+      "enum": ["native", "patched", "cpu_offload", "unsupported", "unknown"],
+      "description": "native=works out of box on XPU; patched=needs a source patch; cpu_offload=runs on CPU by design; unsupported=no known path; unknown=not yet determined."
+    },
+    "patchClass": {
+      "type": "string",
+      "enum": ["registration_only", "functional_runtime_support", "runtime_policy", "none"],
+      "description": "Dominant patch class for this node (from Step 02/04 audit)."
+    },
+    "patches": {
+      "type": "array",
+      "description": "Source patches required to make this node work on XPU.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["file"],
+        "properties": {
+          "file": { "type": "string", "description": "Repo-relative path under patches/." },
+          "target": { "type": "string", "description": "File(s)/symbol(s) the patch modifies." },
+          "patchClass": {
+            "type": "string",
+            "enum": ["registration_only", "functional_runtime_support", "runtime_policy", "none"]
+          },
+          "baseVersion": { "type": "string", "description": "Package commit the patch was authored against." },
+          "validationCommand": { "type": "string", "description": "Shell command that exits 0 if the patch achieved its goal." }
+        }
+      }
+    },
+    "pip": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Dependency handling for this package.",
+      "required": ["backend"],
+      "properties": {
+        "backend": {
+          "type": "string",
+          "enum": ["xpu", "cpu"],
+          "description": "Which prebuilt backend the installed binary must target (e.g. cpu-built llama-cpp-python; xpu torch wheels)."
+        },
+        "skipRequirementsTxt": {
+          "type": "boolean",
+          "description": "When true, do NOT pip install -r the node's requirements.txt (it pins CUDA/Metal wheels wrong for this box); install the backend-appropriate wheel instead."
+        },
+        "extraWheels": {
+          "type": "array",
+          "description": "Prebuilt wheel paths/URLs to install instead of / in addition to requirements.txt (e.g. /nfs_share/wheels/llama-cpp-python/...whl).",
+          "items": { "type": "string" }
+        },
+        "note": { "type": "string" }
+      }
+    },
+    "syclWheel": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Whether this node needs a SYCL-backend native wheel compiled to run on XPU (vs a pure-Python patch or a CPU wheel).",
+      "required": ["required"],
+      "properties": {
+        "required": { "type": "boolean" },
+        "buildScript": { "type": "string", "description": "Repo-relative build script that compiles the SYCL wheel." },
+        "prebuiltWheelPath": { "type": "string", "description": "Path to a prebuilt SYCL wheel on /nfs_share/wheels to avoid recompiling." },
+        "note": { "type": "string" }
+      }
+    },
+    "envVars": {
+      "type": "object",
+      "description": "Environment variables required at launch for this node's XPU path (e.g. OMNI_FP8_KEEP_ON_MOVE=1).",
+      "additionalProperties": { "type": "string" }
+    },
+    "runtimePolicy": {
+      "type": "object",
+      "description": "Runtime-policy edits this node needs in the API prompt (e.g. device cuda->xpu, sage_attention disabled). Free-form key/value guidance.",
+      "additionalProperties": true
+    },
+    "providesEnumValues": {
+      "type": "array",
+      "description": "Enum widget values this package injects into host node dropdowns (e.g. RES4LYF adds res_2s/bong_tangent). A workflow using one needs this package installed.",
+      "items": { "type": "string" }
+    },
+    "enumSlots": {
+      "type": "array",
+      "description": "Host nodeType enum slots the values belong to, e.g. ['sampler_name','scheduler'].",
+      "items": { "type": "string" }
+    },
+    "usableConfigs": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Configurations proven usable on XPU for this node.",
+      "properties": {
+        "launchFlags": {
+          "type": "array",
+          "description": "ComfyUI launch flags this node was validated with (e.g. ['--reserve-vram','1','--lowvram']).",
+          "items": { "type": "string" }
+        },
+        "attnBackend": { "type": "string", "description": "Attention backend setting (e.g. sdpa; sage_attention disabled)." },
+        "reductionConfig": {
+          "type": "object",
+          "description": "Reduced-tier knobs proven to fit (ref_max_size caps, frame caps, resolution). Free-form to match effective-run-config.recommended_reduced_setting.",
+          "additionalProperties": true
+        },
+        "knownGoodInputs": {
+          "type": "object",
+          "description": "Minimal known-good widget inputs for this node's class_type, used to seed the per-node validation harness.",
+          "additionalProperties": true
+        }
+      }
+    },
+    "validation": {
+      "type": "array",
+      "description": "Append-only per-run validation evidence. Each entry is one proof that this node ran (or failed) on XPU.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["passed", "passedAt"],
+        "properties": {
+          "commit": { "type": "string" },
+          "taskId": { "type": "string" },
+          "workflowName": { "type": "string" },
+          "nodeType": { "type": "string" },
+          "promptRef": { "type": "string", "description": "Artifact path to the minimal prompt used." },
+          "historyResult": { "type": "string", "description": "success | failed_runtime | timeout | capacity_suspected." },
+          "passed": { "type": "boolean" },
+          "xpuUtilizationPct": { "type": "number", "description": "Peak XPU utilization sampled during the run; low => CPU-fallback suspected." },
+          "peakVramRatio": { "type": "number" },
+          "telemetryRef": { "type": "string" },
+          "passedAt": { "type": "string", "format": "date-time" }
+        }
+      }
+    },
+    "tier": {
+      "type": "string",
+      "enum": ["candidate", "trusted", "unsupported"],
+      "description": "candidate=auto-written, usable but re-validated; trusted=proven, drives deterministic no-re-audit deploy; unsupported=no XPU path."
+    },
+    "efficacy": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Effectiveness counters, updated on each validation.",
+      "properties": {
+        "appliedCount": { "type": "integer", "minimum": 0 },
+        "successCount": { "type": "integer", "minimum": 0 },
+        "lastAppliedAt": { "type": "string", "format": "date-time" }
+      }
+    },
+    "promotedBy": { "type": "string", "description": "'auto' (met promotion criteria) or a human username." },
+    "promotedAt": { "type": "string", "format": "date-time" },
+    "retireCondition": { "type": "string", "description": "Human-readable condition under which this record is obsolete." },
+    "knownIssues": {
+      "type": "array",
+      "description": "Concrete failure signatures, with root cause if known.",
+      "items": { "type": "string" }
+    },
+    "workarounds": {
+      "type": "array",
+      "description": "Ordered steps to try, most-preferred first.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["action"],
+        "properties": {
+          "action": { "type": "string" },
+          "rationale": { "type": "string" },
+          "tradeoff": { "type": "string" }
+        }
+      }
+    },
+    "originTaskId": { "type": "string", "description": "Task that first created this record." },
+    "createdAt": { "type": "string", "format": "date-time" },
+    "updatedAt": { "type": "string", "format": "date-time" },
+    "version": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Optimistic-lock counter. A write must carry the version it read; the server bumps it and rejects a stale write with 409."
+    }
+  }
+}
