@@ -28,7 +28,11 @@
 # no-op when already present. Opt out with --skip-image / DEPLOY_SKIP_IMAGE=1.
 #
 # Usage:
-#   bash scripts/deploy-agent-demo.sh --yes [--agent-demo /path/to/agent-demo] [--api http://127.0.0.1:3001] [--skip-image]
+#   bash scripts/deploy-agent-demo.sh --yes [--agent-demo /path/to/agent-demo] [--api http://127.0.0.1:3001] [--skip-image] [--skip-catalog]
+#
+# Catalog: also ensures the XPU-support catalog-server is up (+ bootstraps/pushes
+# its GitHub repo when XPU_CATALOG_REMOTE is set). Best-effort, self-skips on hosts
+# that don't use the catalog. Opt out with --skip-catalog / DEPLOY_SKIP_CATALOG=1.
 # ============================================================
 set -euo pipefail
 
@@ -56,6 +60,10 @@ CONFIRMED=0
 # of the deploy (idempotent -- a no-op when it's already present). Opt out with
 # --skip-image or DEPLOY_SKIP_IMAGE=1 when you only want to push code.
 SKIP_IMAGE="${DEPLOY_SKIP_IMAGE:-0}"
+# Ensure the XPU-support catalog-server is up (+ bootstrap/push its repo when
+# XPU_CATALOG_REMOTE is set). Self-skips on hosts that don't use the catalog.
+# Opt out with --skip-catalog or DEPLOY_SKIP_CATALOG=1.
+SKIP_CATALOG="${DEPLOY_SKIP_CATALOG:-0}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -63,6 +71,7 @@ while [[ $# -gt 0 ]]; do
     --agent-demo) AGENT_DEMO="$2"; shift 2 ;;
     --api) API="$2"; shift 2 ;;
     --skip-image) SKIP_IMAGE=1; shift ;;
+    --skip-catalog) SKIP_CATALOG=1; shift ;;
     *) echo "unknown arg: $1"; exit 2 ;;
   esac
 done
@@ -197,6 +206,16 @@ else
   # Run the freshly-synced helper against the LIVE agent-demo gpu-nodes.json
   # (gpu-nodes.json is local-only config, not synced by this script).
   GPU_NODES_PATH="$AGENT_DEMO/gpu-nodes.json" bash "$AGENT_DEMO/scripts/ensure-runtime-image.sh"
+fi
+
+echo ""
+if [ "$SKIP_CATALOG" -eq 1 ]; then
+  echo "==> XPU-support catalog ensure SKIPPED (--skip-catalog/DEPLOY_SKIP_CATALOG=1)."
+else
+  echo "==> Ensuring XPU-support catalog-server (idempotent, best-effort)..."
+  # Run from the canonical repo (has src/catalog + node deps); self-skips if the
+  # catalog isn't used on this host. Never aborts the deploy.
+  bash "$CMA_STAGING/scripts/ensure-catalog-server.sh" || true
 fi
 
 echo ""
