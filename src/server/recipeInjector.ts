@@ -25,6 +25,8 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { findRecipesForNode, type Recipe } from "./recipeLibrary";
 import { GLOBAL_DIRS } from "./paths";
+import { catalogEnabled, resolveNodeType } from "./xpuCatalogClient";
+import type { XpuNodeRecord } from "../catalog/schema";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Public API
@@ -105,7 +107,7 @@ export function findMatchingRecipes(
  * Format a list of recipes as a markdown section for prompt injection.
  * Compact: one block per recipe with id, support status, key workaround.
  */
-export function formatRecipesForPrompt(recipes: Recipe[]): string {
+export function formatRecipesForPrompt(recipes: Recipe[], title = "## Matched recipes (from recipe library)"): string {
   if (recipes.length === 0) return "";
   const blocks = recipes.map((r) => {
     const lines: string[] = [
@@ -130,7 +132,7 @@ export function formatRecipesForPrompt(recipes: Recipe[]): string {
     if (r.retireCondition) lines.push(`- retireCondition: ${r.retireCondition}`);
     return lines.join("\n");
   });
-  return ["## Matched recipes (from recipe library)", ...blocks].join("\n\n");
+  return [title, ...blocks].join("\n\n");
 }
 
 /**
@@ -177,6 +179,51 @@ function formatPatchProtocol(patchRecipes: Recipe[]): string {
   ].join("\n");
 }
 
+/** Convert a TRUSTED catalog record into a recipe-shaped block for prompt injection. */
+function catalogRecordToRecipe(rec: XpuNodeRecord, nodeType: string): Recipe {
+  return {
+    recipeId: `catalog-${rec.nodeKey.replace(/[^A-Za-z0-9_-]/g, "-")}`,
+    version: "1.0.0",
+    nodeType,
+    xpuSupport: rec.xpuSupport,
+    patchClass: rec.patchClass,
+    patchFile: rec.patches?.[0]?.file,
+    patchTarget: rec.patches?.[0]?.target,
+    baseVersion: rec.patches?.[0]?.baseVersion,
+    knownIssues: rec.knownIssues ?? [],
+    workarounds: rec.workarounds,
+    retireCondition: rec.retireCondition,
+    providesEnumValues: rec.providesEnumValues,
+    enumSlots: rec.enumSlots,
+    packageRepo: rec.repository || undefined,
+    provenance: { taskOrigin: rec.originTaskId ?? "catalog", createdAt: (rec.createdAt || "").slice(0, 10) }
+  } as Recipe;
+}
+
+/**
+ * Bridge: pull TRUSTED catalog records for the workflow's nodeTypes (that the
+ * recipe library didn't already match) so the DB's proven XPU knowledge drives
+ * the same steps. Best-effort + trusted-only; empty unless XPU_CATALOG_ENABLED.
+ */
+async function catalogRecipesForPairs(pairs: NodeModelPair[], existing: Recipe[]): Promise<Recipe[]> {
+  if (!catalogEnabled()) return [];
+  const existingTypes = new Set(existing.map((r) => r.nodeType));
+  const seenKeys = new Set<string>();
+  const out: Recipe[] = [];
+  for (const nodeType of [...new Set(pairs.map((p) => p.nodeType))]) {
+    if (existingTypes.has(nodeType)) continue;
+    try {
+      const hit = await resolveNodeType(nodeType);
+      if (!hit || hit.record.tier !== "trusted" || seenKeys.has(hit.record.nodeKey)) continue;
+      seenKeys.add(hit.record.nodeKey);
+      out.push(catalogRecordToRecipe(hit.record, nodeType));
+    } catch {
+      /* best-effort — catalog is advisory here */
+    }
+  }
+  return out.sort((a, b) => a.recipeId.localeCompare(b.recipeId));
+}
+
 /**
  * Top-level: read workflow, find recipes, format for prompt.
  * Returns "" (empty) when:
@@ -201,6 +248,14 @@ export async function injectRecipesForWorkflow(input: {
     const pairs = extractNodeModelPairs(workflow);
     const matches = findMatchingRecipes(pairs, input.recipesRoot);
     let result = formatRecipesForPrompt(matches);
+
+    // Bridge: append TRUSTED catalog records (that the recipe library didn't
+    // already cover) as an additional section. Off unless XPU_CATALOG_ENABLED.
+    const catalogRecipes = await catalogRecipesForPairs(pairs, matches);
+    if (catalogRecipes.length > 0) {
+      const section = formatRecipesForPrompt(catalogRecipes, "## Matched catalog records (trusted XPU-support DB)");
+      result = result ? `${result}\n\n${section}` : section;
+    }
 
     // Append patch adaptation protocol when patch-carrying recipes match at step 05.
     // Steps 02/04 still see patchFile in the recipe data block; they don't need

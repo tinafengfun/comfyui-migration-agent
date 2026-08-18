@@ -217,6 +217,54 @@ def validate_one_node(
     }
 
 
+def build_writeback_entries(args: argparse.Namespace, verdicts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """One write-back entry per validated node, carrying the package metadata."""
+    meta: dict[str, Any] = {}
+    if args.node_key:
+        meta["nodeKey"] = args.node_key
+    if args.repository:
+        meta["repository"] = args.repository
+    if args.package_name:
+        meta["packageName"] = args.package_name
+    if args.nfs_path:
+        meta["nfsPath"] = args.nfs_path
+    if args.commit:
+        meta["commit"] = args.commit
+    if args.xpu_support:
+        meta["xpuSupport"] = args.xpu_support
+    if args.package_execution:
+        meta["execution"] = args.package_execution
+    entries: list[dict[str, Any]] = []
+    for v in verdicts:
+        entries.append(
+            {
+                **meta,
+                "evidence": {
+                    "nodeType": v["nodeType"],
+                    "passed": v["passed"],
+                    "historyResult": v["historyResult"],
+                    "xpuUtilizationPct": v["xpuUtilizationPct"],
+                    "passedAt": v["passedAt"],
+                },
+            }
+        )
+    return entries
+
+
+def merge_writeback(path: Path, entries: list[dict[str, Any]]) -> None:
+    doc: dict[str, Any] = {"step": "05", "nodes": []}
+    if path.exists():
+        try:
+            loaded = read_json(path)
+            if isinstance(loaded, dict) and isinstance(loaded.get("nodes"), list):
+                doc = loaded
+        except Exception:  # noqa: BLE001 — a corrupt prior file must not lose this run
+            doc = {"step": "05", "nodes": []}
+    doc.setdefault("step", "05")
+    doc["nodes"].extend(entries)
+    write_json(path, doc)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Per-custom-node XPU validation harness")
     parser.add_argument("--api-url", required=True)
@@ -228,6 +276,15 @@ def main() -> int:
     parser.add_argument("--comfy-root", default=".")
     parser.add_argument("--report", default="node-validation.json")
     parser.add_argument("--node-key", default=None, help="Catalog nodeKey this validation is for (evidence label)")
+    # Catalog write-back: merge per-node evidence into an artifact the orchestrator
+    # folds into the XPU-support catalog (only acted on when XPU_CATALOG_ENABLED).
+    parser.add_argument("--writeback", default=None, help="Path to catalog-writeback.json to merge per-node evidence into")
+    parser.add_argument("--repository", default=None, help="Package git URL (for the catalog record + lazy backfill)")
+    parser.add_argument("--package-name", default=None)
+    parser.add_argument("--nfs-path", default=None)
+    parser.add_argument("--commit", default=None)
+    parser.add_argument("--xpu-support", default=None, choices=["native", "patched", "cpu_offload", "unsupported", "unknown"])
+    parser.add_argument("--package-execution", default=None, choices=["xpu", "cpu", "hybrid"])
     parser.add_argument("--timeout-seconds", type=int, default=600)
     parser.add_argument("--poll-interval", type=float, default=2.0)
     parser.add_argument("--no-reduce", action="store_true", help="Do not set sampler steps=1")
@@ -277,6 +334,11 @@ def main() -> int:
         "nodes": verdicts,
     }
     write_json(report_path, report)
+
+    if args.writeback:
+        merge_writeback(Path(args.writeback), build_writeback_entries(args, verdicts))
+        print(f"catalog write-back merged {len(verdicts)} entrie(s) -> {args.writeback}")
+
     print(f"validated {len(verdicts)} node(s); all_passed={all_passed}; report -> {report_path}")
     for v in verdicts:
         print(f"  {v['nodeType']}#{v['nodeId']}: {v['historyResult']} (util={v['xpuUtilizationPct']}) passed={v['passed']}")

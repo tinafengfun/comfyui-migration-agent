@@ -97,5 +97,48 @@ class GraphUnwrap(unittest.TestCase):
         self.assertEqual(v.graph_of({"1": {}}), {"1": {}})
 
 
+class WriteBackEmission(unittest.TestCase):
+    def _args(self, **over):
+        import argparse
+
+        base = dict(
+            node_key="acme__foo", repository="https://github.com/acme/Foo",
+            package_name="Foo", nfs_path="/nfs_share/custom_nodes/Foo", commit=None,
+            xpu_support="patched", package_execution="xpu",
+        )
+        base.update(over)
+        return argparse.Namespace(**base)
+
+    def test_build_entries_carries_package_meta_and_evidence(self):
+        verdicts = [{"nodeType": "FooNode", "passed": True, "historyResult": "success", "xpuUtilizationPct": 80.0, "passedAt": "2026-08-18T01:00:00Z"}]
+        entries = v.build_writeback_entries(self._args(), verdicts)
+        self.assertEqual(len(entries), 1)
+        e = entries[0]
+        self.assertEqual(e["nodeKey"], "acme__foo")
+        self.assertEqual(e["repository"], "https://github.com/acme/Foo")
+        self.assertEqual(e["xpuSupport"], "patched")
+        self.assertEqual(e["evidence"]["nodeType"], "FooNode")
+        self.assertTrue(e["evidence"]["passed"])
+
+    def test_merge_appends_and_survives_corrupt_prior(self):
+        import json
+        import tempfile
+        from pathlib import Path
+
+        verdicts = [{"nodeType": "FooNode", "passed": True, "historyResult": "success", "xpuUtilizationPct": 80.0, "passedAt": "2026-08-18T01:00:00Z"}]
+        entries = v.build_writeback_entries(self._args(), verdicts)
+        d = Path(tempfile.mkdtemp())
+        p = d / "catalog-writeback.json"
+        v.merge_writeback(p, entries)
+        v.merge_writeback(p, entries)  # append, not replace
+        doc = json.loads(p.read_text())
+        self.assertEqual(len(doc["nodes"]), 2)
+        self.assertEqual(doc["step"], "05")
+        # a corrupt prior file must not lose the new run
+        p.write_text("{ not json")
+        v.merge_writeback(p, entries)
+        self.assertEqual(len(json.loads(p.read_text())["nodes"]), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

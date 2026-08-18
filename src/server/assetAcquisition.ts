@@ -17,6 +17,7 @@ import { demoModelRoot } from "./config";
 import type { FuzzyJudgment } from "./assetFuzzyMatch";
 import { findRecipesForNode, type Recipe } from "./recipeLibrary";
 import { knownCustomNodeForType, knownCustomNodeForEvidence } from "./knownCustomNodes";
+import { catalogEnabled, resolveNodeType } from "./xpuCatalogClient";
 import type { CoreNodeDiscoveryResult } from "./coreNodeRecipeDiscovery";
 import { appendAssetResolution, lookupAssetResolution } from "./assetResolutionLedger";
 import { computeWorkflowSha256 } from "./workflowKnowledge";
@@ -1029,9 +1030,22 @@ async function resolveCustomNodeSource(input: {
   // Prefer the workflow/Step-01 explicit repository; otherwise fall back to the
   // deterministic known-custom-node registry so packages like ComfyUI-llama-cpp_vlm
   // auto-clone without a human providing the URL (see src/server/knownCustomNodes.ts).
-  const explicitRepo =
+  let explicitRepo =
     normalizedGitHubRepoUrl(input.customNode.repository) ??
     normalizedGitHubRepoUrl(knownCustomNodeForType(input.customNode.nodeType)?.repository);
+  // Catalog short-circuit ("命中就用"): when the workflow/knownCustomNodes gave no
+  // repo, consult the XPU-support catalog for a proven clone URL for this nodeType.
+  // Additive fallback; off unless XPU_CATALOG_ENABLED; best-effort.
+  if (!explicitRepo && catalogEnabled()) {
+    try {
+      const hit = await resolveNodeType(input.customNode.nodeType);
+      if (hit?.record.repository) {
+        explicitRepo = normalizedGitHubRepoUrl(hit.record.repository) ?? explicitRepo;
+      }
+    } catch {
+      /* best-effort — catalog is an optional source hint */
+    }
+  }
   if (explicitRepo) {
     const cloned = await cloneCustomNodeIfAllowed({
       repository: explicitRepo,
