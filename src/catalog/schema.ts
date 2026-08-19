@@ -98,6 +98,8 @@ export interface XpuNodeRecord {
   symlinkModel?: boolean;
   commit?: string;
   versionsSupported?: string[];
+  /** Model dtypes this record's XPU support was proven for (e.g. ["fp8_e4m3fn","bf16"]). Empty = any. */
+  supportedDtypes?: string[];
   modelSubdir?: string;
 
   execution: ExecutionTarget;

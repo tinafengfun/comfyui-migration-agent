@@ -67,6 +67,11 @@
       "description": "Git refs/tags/commits known to work on XPU with this record's changes.",
       "items": { "type": "string" }
     },
+    "supportedDtypes": {
+      "type": "array",
+      "description": "Model dtypes this record's XPU support was proven for (e.g. fp8_e4m3fn, bf16). Empty/absent means any dtype.",
+      "items": { "type": "string" }
+    },
     "modelSubdir": {
       "type": "string",
       "description": "ComfyUI models/<modelSubdir>/ folder this node loads weights from (e.g. 'LLM'). Routes acquired assets."
