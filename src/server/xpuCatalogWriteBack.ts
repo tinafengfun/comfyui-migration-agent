@@ -25,6 +25,7 @@ import {
   type XpuSupport
 } from "../catalog/schema";
 import { appendValidation, catalogEnabled, getByKey, upsertRecord } from "./xpuCatalogClient";
+import type { NodeVerdict } from "./nodeValidationRunner";
 
 /** One node's write-back payload (superset kept lenient; only evidence is required). */
 export interface CatalogWriteBackEntry {
@@ -42,6 +43,7 @@ export interface CatalogWriteBackEntry {
   envVars?: Record<string, string>;
   providesEnumValues?: string[];
   usableConfigs?: XpuNodeRecord["usableConfigs"];
+  supportedDtypes?: string[];
   evidence: CatalogValidationEvidence;
 }
 
@@ -89,6 +91,7 @@ function buildNewRecord(entry: CatalogWriteBackEntry, nodeKey: string, nowIso: s
     ...(entry.envVars ? { envVars: entry.envVars } : {}),
     ...(entry.providesEnumValues ? { providesEnumValues: entry.providesEnumValues } : {}),
     ...(entry.usableConfigs ? { usableConfigs: entry.usableConfigs } : {}),
+    ...(entry.supportedDtypes?.length ? { supportedDtypes: entry.supportedDtypes } : {}),
     tier: "candidate",
     version: 1,
     originTaskId: taskId,
@@ -118,6 +121,20 @@ export async function applyCatalogWriteBack(
     return summary;
   }
   const entries = Array.isArray(artifact?.nodes) ? artifact.nodes : [];
+  return applyEntries(entries, ctx);
+}
+
+/**
+ * Apply already-composed write-back entries (shared by the artifact path above and
+ * the ledger path below). For an EXISTING record only APPENDS evidence (no
+ * structural 409); a new node is created as a `candidate` first. Best-effort.
+ */
+export async function applyEntries(
+  entries: CatalogWriteBackEntry[],
+  ctx: { taskId?: string; workflowName?: string } = {}
+): Promise<WriteBackSummary> {
+  const summary: WriteBackSummary = { enabled: catalogEnabled(), created: [], validated: [], skipped: [] };
+  if (!summary.enabled) return summary;
   const nowIso = new Date().toISOString();
 
   for (const entry of entries) {
@@ -126,7 +143,7 @@ export async function applyCatalogWriteBack(
       summary.skipped.push(nodeKey ?? "(no key)");
       continue;
     }
-    // Enrich evidence with task/workflow context if the harness didn't.
+    // Enrich evidence with task/workflow context if the caller didn't.
     const evidence: CatalogValidationEvidence = {
       ...entry.evidence,
       taskId: entry.evidence.taskId ?? ctx.taskId,
@@ -149,4 +166,79 @@ export async function applyCatalogWriteBack(
     }
   }
   return summary;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Plan B: compose write-back from a Step-05 deploy ledger + isolated harness
+// verdicts (backend-driven; no agent-emitted artifact).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** One deployed custom node, recorded by Step 05 (what the agent actually applied). */
+export interface CatalogDeployLedgerNode {
+  nodeType: string;
+  nodeKey?: string;
+  repository?: string;
+  packageName?: string;
+  nfsPath?: string;
+  commit?: string;
+  /** The model dtype this node was deployed/used with (→ record.supportedDtypes). */
+  dtype?: string;
+  execution?: ExecutionTarget;
+  xpuSupport?: XpuSupport;
+  patches?: XpuNodeRecord["patches"];
+  pip?: XpuNodeRecord["pip"];
+}
+export interface CatalogDeployLedger {
+  nodes: CatalogDeployLedgerNode[];
+}
+export const CATALOG_DEPLOY_LEDGER_FILE = "05-catalog-deploy-ledger.json";
+
+/** Join a deploy ledger with per-node harness verdicts → write-back entries. Pure. */
+export function composeEntriesFromLedger(
+  ledger: CatalogDeployLedger,
+  verdicts: NodeVerdict[],
+  ctx: { taskId?: string; workflowName?: string; nowIso?: string } = {}
+): CatalogWriteBackEntry[] {
+  const nowIso = ctx.nowIso ?? new Date().toISOString();
+  const nodes = ledger?.nodes ?? [];
+  const byType = new Map(nodes.map((n) => [n.nodeType, n]));
+  const entries: CatalogWriteBackEntry[] = [];
+  for (const v of verdicts) {
+    const led = byType.get(v.nodeType) ?? nodes.find((n) => v.nodeType.startsWith(n.nodeType));
+    if (!led) continue; // no deploy record → can't key this node
+    if (!led.nodeKey && !led.repository) continue; // lazy-backfill needs a repo/key
+    entries.push({
+      nodeKey: led.nodeKey,
+      repository: led.repository,
+      packageName: led.packageName,
+      nfsPath: led.nfsPath,
+      commit: led.commit,
+      execution: led.execution,
+      xpuSupport: led.xpuSupport,
+      patches: led.patches,
+      pip: led.pip,
+      supportedDtypes: led.dtype ? [led.dtype] : undefined,
+      evidence: {
+        nodeType: v.nodeType,
+        passed: v.passed,
+        historyResult: v.historyResult,
+        xpuUtilizationPct: v.xpuUtilizationPct ?? undefined,
+        peakVramRatio: v.peakMemoryBudgetRatio ?? undefined,
+        passedAt: v.passedAt ?? nowIso,
+        commit: led.commit,
+        taskId: ctx.taskId,
+        workflowName: ctx.workflowName
+      }
+    });
+  }
+  return entries;
+}
+
+/** Compose from ledger + verdicts, then apply. */
+export async function applyCatalogWriteBackFromLedger(
+  ledger: CatalogDeployLedger,
+  verdicts: NodeVerdict[],
+  ctx: { taskId?: string; workflowName?: string } = {}
+): Promise<WriteBackSummary> {
+  return applyEntries(composeEntriesFromLedger(ledger, verdicts, ctx), ctx);
 }

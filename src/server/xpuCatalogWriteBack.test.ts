@@ -9,7 +9,13 @@ import { CatalogStore } from "../catalog/store";
 import { GitRepo } from "../catalog/gitRepo";
 import { CatalogWriter } from "../catalog/writer";
 import { createCatalogApp } from "../catalog/server";
-import { applyCatalogWriteBack } from "./xpuCatalogWriteBack";
+import {
+  applyCatalogWriteBack,
+  applyCatalogWriteBackFromLedger,
+  composeEntriesFromLedger,
+  type CatalogDeployLedger
+} from "./xpuCatalogWriteBack";
+import type { NodeVerdict } from "./nodeValidationRunner";
 
 let root: string;
 let artifactDir: string;
@@ -75,6 +81,40 @@ describe("applyCatalogWriteBack", () => {
     expect(rec.repository).toBe("https://github.com/acme/Foo");
     expect(rec.validation?.[0].xpuUtilizationPct).toBe(82);
     expect(rec.validation?.[0].taskId).toBe("t1"); // enriched from ctx
+  });
+
+  it("composeEntriesFromLedger joins ledger nodes with verdicts (pure; dtype→supportedDtypes; skips no-repo)", () => {
+    const ledger: CatalogDeployLedger = {
+      nodes: [
+        { nodeType: "FooNode", repository: "https://github.com/acme/Foo", commit: "abc", dtype: "fp8_e4m3fn", xpuSupport: "patched" },
+        { nodeType: "NoRepoNode" } // no repo/key → skipped
+      ]
+    };
+    const verdicts: NodeVerdict[] = [
+      { nodeType: "FooNode", passed: true, historyResult: "success", xpuUtilizationPct: 81, passedAt: "2026-08-19T01:00:00Z" },
+      { nodeType: "NoRepoNode", passed: true, passedAt: "2026-08-19T01:00:00Z" },
+      { nodeType: "UnknownNode", passed: true, passedAt: "2026-08-19T01:00:00Z" } // no ledger entry → skipped
+    ];
+    const entries = composeEntriesFromLedger(ledger, verdicts, { taskId: "t1", workflowName: "wf" });
+    expect(entries).toHaveLength(1);
+    expect(entries[0].repository).toBe("https://github.com/acme/Foo");
+    expect(entries[0].commit).toBe("abc");
+    expect(entries[0].supportedDtypes).toEqual(["fp8_e4m3fn"]);
+    expect(entries[0].evidence).toMatchObject({ nodeType: "FooNode", passed: true, xpuUtilizationPct: 81, taskId: "t1", workflowName: "wf" });
+  });
+
+  it("applyCatalogWriteBackFromLedger creates a candidate with the harness verdict as evidence", async () => {
+    process.env.XPU_CATALOG_ENABLED = "1";
+    const ledger: CatalogDeployLedger = {
+      nodes: [{ nodeType: "FooNode", repository: "https://github.com/acme/Foo", commit: "abc", dtype: "fp8_e4m3fn", xpuSupport: "patched" }]
+    };
+    const verdicts: NodeVerdict[] = [{ nodeType: "FooNode", passed: true, xpuUtilizationPct: 81, historyResult: "success", passedAt: "2026-08-19T01:00:00Z" }];
+    const s = await applyCatalogWriteBackFromLedger(ledger, verdicts, { taskId: "t1", workflowName: "wf" });
+    expect(s.created).toContain("acme__foo");
+    const rec = store.getByKey("acme__foo")!;
+    expect(rec.tier).toBe("candidate");
+    expect(rec.supportedDtypes).toEqual(["fp8_e4m3fn"]);
+    expect(rec.validation?.[0]).toMatchObject({ xpuUtilizationPct: 81, taskId: "t1" });
   });
 
   it("appends to an existing record without a structural overwrite (no 409)", async () => {

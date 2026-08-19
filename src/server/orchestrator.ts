@@ -62,7 +62,14 @@ import type { StateStore } from "./state";
 import { ensureStepArtifactScaffold } from "./stepArtifactScaffold";
 import { createTaskWorkspace, deleteTaskWorkspace, getLayoutForTask } from "./taskWorkspaces";
 import { writeTaskStateLedger } from "./taskStateLedger";
-import { applyCatalogWriteBack } from "./xpuCatalogWriteBack";
+import {
+  applyCatalogWriteBack,
+  applyCatalogWriteBackFromLedger,
+  CATALOG_DEPLOY_LEDGER_FILE,
+  type CatalogDeployLedger
+} from "./xpuCatalogWriteBack";
+import { runNodeValidation, type NodeVerdict } from "./nodeValidationRunner";
+import { catalogEnabled } from "./xpuCatalogClient";
 import {
   appendAnswerDefault,
   appendAnswerLog,
@@ -355,34 +362,21 @@ export class MigrationOrchestrator {
         await this.archiveWorkflowIfAccepted(task);
       }
     }
-    // XPU-SUPPORT CATALOG write-back: after node install/patch (Step 05) or branch
-    // smoke (Step 07), fold any per-node validation evidence
-    // (<artifacts>/catalog-writeback.json, emitted by validate_node_xpu.py / Step 05)
-    // into the shared catalog so the next migration reuses trusted nodes. Additive +
-    // best-effort; no-op unless XPU_CATALOG_ENABLED. The single serialized writer is
-    // the catalog-server — this just POSTs to it.
-    if ((stepId === "05" || stepId === "07") && status === "completed") {
-      await applyCatalogWriteBack(task.artifactPath, { taskId: task.id, workflowName: task.name })
-        .then((s) => {
-          if (s.enabled && (s.created.length || s.validated.length)) {
-            void this.emit({
-              taskId,
-              stepId,
-              type: "progress",
-              message: `XPU catalog updated: ${s.created.length} new, ${s.validated.length} validated`,
-              data: { catalogWriteBack: s }
-            });
-          }
-        })
-        .catch((err) => {
-          void this.emit({
-            taskId,
-            stepId,
-            type: "progress",
-            message: `Catalog write-back errored (non-fatal): ${err instanceof Error ? err.message : String(err)}`,
-            data: { catalogWriteBack: "error" }
-          });
+    // XPU-SUPPORT CATALOG validate + write-back (plan B): after Step 07 branch smoke
+    // (post Step-06 device policy, nodes executed in-context), precisely validate the
+    // newly-deployed custom nodes and fold results into the shared catalog so the next
+    // migration reuses trusted nodes. Best-effort; no-op unless XPU_CATALOG_ENABLED;
+    // never throws into step completion.
+    if (stepId === "07" && status === "completed") {
+      await this.catalogValidateAndWriteBack(task).catch((err) => {
+        void this.emit({
+          taskId,
+          stepId,
+          type: "progress",
+          message: `Catalog validate+write-back errored (non-fatal): ${err instanceof Error ? err.message : String(err)}`,
+          data: { catalogWriteBack: "error" }
         });
+      });
     }
     // Second, later chance to archive: by Step 13 (the last step)
     // completing, the whole 00-13 pipeline is known to have finished. This
@@ -3808,6 +3802,84 @@ export class MigrationOrchestrator {
    * already reduced by guiWorkflowSync at Step 12. Returns true iff it hard-stopped.
    * Best-effort: no-op when there is no bundle, no effective-run-config, or no reduced tier.
    */
+  /**
+   * Plan B: precisely validate newly-deployed custom nodes and fold results into the
+   * XPU catalog. Reads the Step-05 deploy ledger (05-catalog-deploy-ledger.json),
+   * drives the isolated harness per node (best-effort), composes + writes. Falls back
+   * to the agent-emitted catalog-writeback.json when no ledger exists. Flag-gated.
+   */
+  private async catalogValidateAndWriteBack(task: MigrationTask): Promise<void> {
+    if (!catalogEnabled()) return;
+    let ledger: CatalogDeployLedger | undefined;
+    try {
+      ledger = JSON.parse(await fs.readFile(path.join(task.artifactPath, CATALOG_DEPLOY_LEDGER_FILE), "utf8")) as CatalogDeployLedger;
+    } catch {
+      ledger = undefined;
+    }
+    let summary;
+    if (ledger && Array.isArray(ledger.nodes) && ledger.nodes.length > 0) {
+      const nodeTypes = [...new Set(ledger.nodes.map((n) => n.nodeType).filter(Boolean))];
+      const verdicts = await this.runCatalogNodeValidation(task, nodeTypes).catch(() => [] as NodeVerdict[]);
+      summary = await applyCatalogWriteBackFromLedger(ledger, verdicts, { taskId: task.id, workflowName: task.name });
+    } else {
+      summary = await applyCatalogWriteBack(task.artifactPath, { taskId: task.id, workflowName: task.name });
+    }
+    if (summary.enabled && (summary.created.length || summary.validated.length)) {
+      await this.emit({
+        taskId: task.id,
+        stepId: "07",
+        type: "progress",
+        message: `XPU catalog updated: ${summary.created.length} new, ${summary.validated.length} validated`,
+        data: { catalogWriteBack: summary }
+      });
+    }
+  }
+
+  /**
+   * Resolve a LOCAL-node harness context + run validate_node_xpu for the given node
+   * types. Precise per-node validation must run where xpu-smi + the API are
+   * co-located; MVP handles the local node (ssh / container-xpu-smi plumbing is a
+   * follow-up). Returns [] (skip) when a context can't be built.
+   */
+  private async runCatalogNodeValidation(task: MigrationTask, nodeTypes: string[]): Promise<NodeVerdict[]> {
+    if (nodeTypes.length === 0) return [];
+    const node = pickNode(loadGpuNodes(this.config), task.gpuNode);
+    if (node.kind !== "local") return [];
+    // Locate the Step-06 runtime-policy prompt (device cuda→xpu already applied).
+    let variantPromptPath: string | undefined;
+    try {
+      const s06 = JSON.parse(
+        await fs.readFile(path.join(task.artifactPath, "06-prompt-validation-summary.json"), "utf8")
+      );
+      if (typeof s06?.variant_prompt_path === "string") variantPromptPath = s06.variant_prompt_path;
+    } catch {
+      // fall through to the default artifact name
+    }
+    const candidates = [variantPromptPath, path.join(task.artifactPath, "06b-runtime-policy-prompt.json")].filter(
+      (p): p is string => Boolean(p)
+    );
+    let prompt: string | undefined;
+    for (const p of candidates) {
+      try {
+        await fs.access(p);
+        prompt = p;
+        break;
+      } catch {
+        // try next
+      }
+    }
+    if (!prompt) return [];
+    const harnessPath = path.join(this.config.draftDocRoot, "migration-workflow-v2", "tools", "validate_node_xpu.py");
+    return runNodeValidation({
+      pythonPath: "python3", // stdlib-only harness; xpu-smi via subprocess
+      harnessPath,
+      apiUrl: nodeApiUrl(node),
+      promptPath: prompt,
+      comfyRoot: node.comfyui_root,
+      nodeTypes
+    });
+  }
+
   private async enforceReducedDeliveryConsistency(task: MigrationTask, stepId: string): Promise<boolean> {
     let cfg: any;
     try {
