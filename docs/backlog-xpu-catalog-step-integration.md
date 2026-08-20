@@ -1,8 +1,26 @@
 # Backlog: wire the XPU-support catalog into the agent STEP instructions (P4 last mile)
 
-Status: **open** — logged 2026-08-18. The catalog backend (P0–P4b) is built, tested (649 green),
-committed + pushed, and LIVE/enabled on the dev host. But the agent-facing **step prompts/skills do
-not yet invoke it**, so the learning loop does not actually turn in a real migration.
+Status: **WIRED 2026-08-20** (commits 455b0ba→…; 686 green) — the loop is now closed in code:
+Step 05 prompt+skill route each node via the catalog, take the pessimistic clone-lease
+(`scripts/catalog-lease.mts`), bound exploration ≤3 → `ask_user` gate (`scripts/catalog-explore.mts`),
+and emit `05-catalog-deploy-ledger.json`; the orchestrator (`catalogValidateAndWriteBack`, Step 07)
+drives the isolated harness per node and folds results back (plan B). All flag-gated on
+`XPU_CATALOG_ENABLED`. Deterministic core: `classifyCatalogMatch` (commit/dtype routing),
+`nodeValidationRunner`, `composeEntriesFromLedger`, `exploreBudget`, lease client + CLIs — each unit-tested.
+
+**Remaining (live proof, opt-in — not CI gates):**
+1. **Threshold calibration** — run the real isolated harness on a node forced-XPU vs forced-CPU
+   (172.16.120.111 / remote-124-12), record `xpuUtilizationPct` for both, and set the CPU-fallback
+   threshold (currently 15%) from real data. NOTE: for docker-runtime nodes `xpu-smi` lives inside the
+   container, so the orchestrator harness on the host may see util=None (gate toothless) — either run
+   the harness inside the container or ensure host `xpu-smi`. (Tracked here as the MVP limitation in
+   `orchestrator.runCatalogNodeValidation`, which currently handles the local node only.)
+2. **Playwright `@migration`** with `XPU_CATALOG_ENABLED=1` — a full live run that creates/updates a real
+   catalog record: the ultimate end-to-end proof the loop turns on hardware.
+3. **ssh-node + container-xpu-smi** support in `runCatalogNodeValidation` (MVP is local node only).
+
+---
+Original gap (now closed) below for history.
 
 ## What IS integrated (deterministic TS, fires automatically)
 - `assetAcquisition.ts` resolve short-circuit — Step 01 uses a catalog record's repo as a clone hint.
