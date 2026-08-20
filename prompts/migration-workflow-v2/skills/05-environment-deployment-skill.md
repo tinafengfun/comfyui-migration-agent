@@ -263,6 +263,38 @@ bash /nfs_share/bin/with-shared-venv-lock.sh <venv_python> install \
 ```
 (the canonical CPU wheel is staged under `/nfs_share/wheels/llama-cpp-python/`; if absent, build once from the JamePeng fork with no GPU backend and stage it there — never install the CUDA wheel). The VLM then runs on **CPU** (host RAM, not XPU VRAM), which is intended: it leaves the XPU free for fp8 diffusion. Ensure this node's model `.gguf` **and** its `mmproj` `.gguf` resolve under **`models/LLM/`** (Step 01 routing places them there); if a prior run left them in `text_encoders/`, symlink/move them into `models/LLM/`.
 
+### Catalog-driven custom-node migration (only when `XPU_CATALOG_ENABLED`)
+
+Migrate each custom node **catalog-first**. A trusted record for a node's `class_type` (if any) is
+injected into your prompt as "Matched catalog records (trusted XPU-support DB)". This is the deterministic
+per-node state machine — the backend owns validation + the catalog write; you own the read + migrate:
+
+1. **Route by the injected record vs what you deploy (node commit + model dtype):**
+   - **trusted + commit-match + dtype-match** → apply the recipe as-is (clone @ its commit; apply its
+     patches / pip backend / config). **No re-exploration** — it is proven.
+   - **trusted + commit-drift (dtype ok)** → **adapt** the recorded patch via the injected
+     patch-adaptation protocol (three layers: text → structural → semantic). Never blind-apply a stale patch.
+   - **dtype-drift / candidate / miss** → migrate. A **candidate** record is a hint you apply but must
+     still validate; **dtype-drift / miss** is a fresh exploration.
+2. **Clone-lease (pessimistic) around the shared-tree clone.** Before cloning into
+   `${NFS_SHARE}/custom_nodes/<name>`: `npx tsx scripts/catalog-lease.mts --node-key <k> --action acquire
+   --holder "${TASK_ID}"`. exit 3 (held by another agent) → **wait + reuse** their result; do not clone in
+   parallel (would corrupt the shared git tree). `--action heartbeat --lease-id <id>` during a long clone;
+   `--action release --lease-id <id>` immediately after. Keep this short — the lease covers only the clone.
+3. **Bounded exploration (≤ 3 rounds → human gate).** Before each exploration attempt:
+   `npx tsx scripts/catalog-explore.mts --workspace <artifacts> --node-key <k> --action record`. exit 4 =
+   EXHAUSTED → open an `ask_user` gate with your 3 attempts + evidence + a concrete suggested fix and
+   co-decide with the human (apply their fix and re-validate, or mark `unsupported` + gap and CONTINUE the
+   other nodes — never wedge the pipeline). Use the injected catalog patterns / recipes / known issues +
+   the meta-patterns (`cuda→xpu`, fp8 keep-on-move, cpu-offload) as your migration playbook.
+4. **Emit the deploy ledger.** Write `<artifacts>/05-catalog-deploy-ledger.json` =
+   `{ "nodes": [ { "nodeType", "nodeKey", "repository", "commit", "dtype", "xpuSupport", "execution",
+   "patches": [{file,target}], "pip": {backend} }, … ] }` for every custom node you deployed. The backend
+   reads it after Step 07 to run the isolated per-node XPU harness (`validate_node_xpu.py`) and fold the
+   result into the catalog (candidate → trusted after repeat validation). **You never open the catalog
+   SQLite or commit its git — you POST via the lease/explore CLIs and emit the ledger; the single
+   catalog-server owns every write.**
+
 ### Hidden runtime asset pre-stage check (do this BEFORE downloading anything Step 02 flagged)
 
 If Step 02 identified a hidden runtime asset (a custom node's model suite loaded dynamically from its own code — e.g. IndexTTS2's ~14GB model suite) and got human sign-off to defer acquisition, the backend may have already started downloading it in the background as soon as Step 02 finished, specifically so Step 05 doesn't have to fetch a multi-GB model suite live inside its own session. Before you acquire any such asset yourself:

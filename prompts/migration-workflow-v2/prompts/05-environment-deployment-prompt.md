@@ -52,6 +52,41 @@ Prepare a reproducible fresh ComfyUI Intel XPU environment for migration validat
 11. Record actual software and driver versions; use `unknown` rather than guessed versions when a value cannot be verified.
 12. End with a `completion_decision` block containing `status`, checked success criteria, evidence artifacts, unresolved gaps, any human-gate prompt, and `next_step_allowed`.
 
+## Catalog-driven custom-node migration (only when `XPU_CATALOG_ENABLED`)
+
+When the XPU-support catalog is enabled, migrate each custom node **catalog-first** instead of always
+re-discovering from scratch. Trusted catalog records for this workflow's node types are injected into
+your context as a "Matched catalog records (trusted XPU-support DB)" section. Per custom node:
+
+1. **Consult the catalog record** (if one is injected for its `class_type`) and compare to what you are
+   deploying — the node's git **commit** and the model **dtype** in use:
+   - **trusted record, commit + dtype match** → **APPLY the known recipe deterministically**: clone at
+     the recorded commit, apply exactly its patches / pip backend / config. **Do NOT re-explore.**
+   - **trusted record, dtype matches but commit drifted** → **ADAPT** the known patch via the
+     patch-adaptation protocol (do not blind-apply a stale patch).
+   - **dtype drift**, a **candidate** record, or **no record (miss)** → **migrate**: a candidate is a
+     hint you still validate; a miss / dtype-drift is a fresh migration (explore).
+2. **Take the clone-lease before touching `/nfs_share/custom_nodes/<name>`** (pessimistic lock, so two
+   agents never clone/patch the same shared node at once):
+   ```bash
+   npx tsx scripts/catalog-lease.mts --node-key <nodeKey> --action acquire --holder "${TASK_ID}"
+   ```
+   exit 0 = granted (proceed, `--action release` when done). **exit 3 = held by another agent →
+   WAIT and reuse its result** (poll the catalog for the updated record; do not clone in parallel).
+3. **Bound your exploration to 3 rounds.** Before each exploration attempt for a node, record it:
+   ```bash
+   npx tsx scripts/catalog-explore.mts --workspace <artifacts-dir> --node-key <nodeKey> --action record
+   ```
+   **exit 4 = EXHAUSTED (3 rounds spent)** → you MUST open an `ask_user` gate presenting your attempted
+   strategies + a suggested fix, and solve it together with the human (or mark the node `unsupported`).
+   Do not keep looping. Draw on the injected catalog patterns / recipes / known issues + the meta
+   patterns (device `cuda→xpu`, fp8 keep-on-move, cpu-offload) rather than guessing blindly.
+4. **Record what you deployed** per custom node into `<artifacts>/05-catalog-deploy-ledger.json`:
+   `{ "nodes": [ { "nodeType", "nodeKey", "repository", "commit", "dtype", "xpuSupport", "execution",
+   "patches", "pip" }, … ] }`. The backend reads this after Step 07 to precisely validate each node on
+   XPU and write the result back to the catalog — so the next migration reuses it. (You do not write the
+   catalog yourself; the backend owns that write.)
+
 ## Reusable tool
 
 When the repository contains `tools/step05_environment_readiness.py`, use it to prepare and collect the Step 05 evidence:
