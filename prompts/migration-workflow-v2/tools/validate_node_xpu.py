@@ -104,7 +104,8 @@ def judge_verdict(
     *,
     completed: bool,
     status_success: bool,
-    has_outputs: bool,
+    node_ran: bool,
+    executed_fresh: bool,
     capacity_signature: str | None,
     peak_gpu_util: float | None,
     expect_execution: str,
@@ -113,13 +114,18 @@ def judge_verdict(
     """
     Pure verdict logic (the novel part — unit tested). Priority:
       capacity signature > runtime failure > CPU-fallback-on-XPU > success.
-    A node expected to run on XPU whose peak GPU utilization stayed below
-    `threshold` is a suspected silent CPU fallback and FAILS.
+
+    Per-node success = the run completed with status "success" AND the TARGET node
+    actually ran (executed or was cached). We do NOT require output *files*: an
+    intermediate/loader node (VAELoader, CLIPLoader, …) produces graph objects, not
+    files, so an output-file gate false-fails it. The CPU-fallback util gate only
+    applies when the node executed FRESH (a cached node produces no telemetry).
     """
-    ran_ok = bool(completed and status_success and has_outputs)
+    ran_ok = bool(completed and status_success and node_ran)
     capacity_suspected = capacity_signature is not None
     cpu_fallback_suspected = (
         expect_execution == "xpu"
+        and executed_fresh
         and peak_gpu_util is not None
         and peak_gpu_util < threshold
     )
@@ -172,8 +178,11 @@ def validate_one_node(
     submit_error: str | None = None
     history: dict[str, Any] = {}
     try:
-        post_json(f"{api_url}/prompt", payload)
-        history = wait_history(api_url, prompt_id, timeout_seconds, poll_interval)
+        resp = post_json(f"{api_url}/prompt", payload)
+        # ComfyUI assigns its OWN prompt_id (ours is ignored unless it's a valid
+        # uuid); /history is keyed by the assigned id, so poll the RETURNED one.
+        assigned = resp.get("prompt_id") if isinstance(resp, dict) else None
+        history = wait_history(api_url, assigned or prompt_id, timeout_seconds, poll_interval)
     except Exception as exc:  # noqa: BLE001 — surface any submit/poll error as a verdict
         submit_error = str(exc)
     finally:
@@ -195,10 +204,16 @@ def validate_one_node(
         summary: dict[str, Any] = {}
     else:
         summary = summarize_history(history, comfy_root)
+        # summarize_history nests the run status under "status" (ComfyUI's raw
+        # {status_str, completed, messages}) and lists executed/cached node ids.
+        status = summary.get("status") or {}
+        executed = set(summary.get("executed_nodes", []))
+        cached = set(summary.get("cached_nodes", []))
         verdict = judge_verdict(
-            completed=bool(summary.get("completed")),
-            status_success=summary.get("status_str") == "success",
-            has_outputs=bool(summary.get("output_files")),
+            completed=bool(status.get("completed")),
+            status_success=status.get("status_str") == "success",
+            node_ran=str(node_id) in executed or str(node_id) in cached,
+            executed_fresh=str(node_id) in executed,
             capacity_signature=capacity_sig,
             peak_gpu_util=peak_util,
             expect_execution=expect_execution,

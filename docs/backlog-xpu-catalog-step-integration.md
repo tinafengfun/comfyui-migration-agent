@@ -8,6 +8,18 @@ drives the isolated harness per node and folds results back (plan B). All flag-g
 `XPU_CATALOG_ENABLED`. Deterministic core: `classifyCatalogMatch` (commit/dtype routing),
 `nodeValidationRunner`, `composeEntriesFromLedger`, `exploreBudget`, lease client + CLIs — each unit-tested.
 
+**Live-test findings (2026-08-20, on 172.16.120.111 —档2):**
+- FIXED 3 real harness bugs the mocked unit tests couldn't catch (commit follows): (1) `validate_one_node`
+  read `status_str`/`completed` at the top level but `summarize_history` nests them under `status` → every
+  node was judged `failed_runtime`; (2) success gated on output *files* → intermediate/loader nodes
+  (VAELoader) false-failed — now success = node executed + status success; (3) polled `/history` on a
+  self-generated non-UUID `prompt_id` that ComfyUI ignores → now polls the id ComfyUI *returns*.
+- OPEN harness limitation: per-node validation submits the FULL workflow prompt + `partial_execution_targets`,
+  but ComfyUI validates EVERY node on `/prompt`, so one missing sibling node (live: `BerniniPromptEnhancer`
+  not installed on 120.111) rejects the whole submission (`missing_node_type`) and you can't validate even a
+  present node. FIX: PRUNE the prompt to the target node's subgraph (target + required upstream) before
+  submitting. Until then, live calibration needs a prompt whose node types are all installed on the box.
+
 **Remaining (live proof, opt-in — not CI gates):**
 1. **Threshold calibration** — run the real isolated harness on a node forced-XPU vs forced-CPU
    (172.16.120.111 / remote-124-12), record `xpuUtilizationPct` for both, and set the CPU-fallback

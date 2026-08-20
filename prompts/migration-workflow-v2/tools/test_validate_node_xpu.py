@@ -14,7 +14,8 @@ class JudgeVerdict(unittest.TestCase):
         args = dict(
             completed=True,
             status_success=True,
-            has_outputs=True,
+            node_ran=True,
+            executed_fresh=True,
             capacity_signature=None,
             peak_gpu_util=80.0,
             expect_execution="xpu",
@@ -48,10 +49,23 @@ class JudgeVerdict(unittest.TestCase):
         self.assertFalse(r["passed"])
         self.assertEqual(r["historyResult"], "failed_runtime")
 
-    def test_no_outputs_is_failed_runtime(self):
-        r = self.base(has_outputs=False)
+    def test_node_did_not_run_is_failed_runtime(self):
+        r = self.base(node_ran=False)
         self.assertFalse(r["passed"])
         self.assertEqual(r["historyResult"], "failed_runtime")
+
+    def test_intermediate_node_with_no_output_files_passes(self):
+        # A loader/intermediate node runs successfully but produces NO output files;
+        # per-node success is "node ran + status success", not output files.
+        r = self.base(peak_gpu_util=70.0)
+        self.assertTrue(r["passed"])
+        self.assertEqual(r["historyResult"], "success")
+
+    def test_cached_node_not_flagged_cpu_fallback(self):
+        # Node was cached (not fresh) → no telemetry → do NOT flag CPU-fallback.
+        r = self.base(executed_fresh=False, peak_gpu_util=1.0)
+        self.assertTrue(r["passed"])
+        self.assertFalse(r["cpuFallbackSuspected"])
 
     def test_capacity_signature_takes_priority(self):
         # Even with a "success"-looking history, a capacity signature fails it.
