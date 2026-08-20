@@ -16,6 +16,7 @@ import {
   type CatalogDeployLedger
 } from "./xpuCatalogWriteBack";
 import type { NodeVerdict } from "./nodeValidationRunner";
+import { acquireLease, heartbeatLease, releaseLease } from "./xpuCatalogClient";
 
 let root: string;
 let artifactDir: string;
@@ -81,6 +82,23 @@ describe("applyCatalogWriteBack", () => {
     expect(rec.repository).toBe("https://github.com/acme/Foo");
     expect(rec.validation?.[0].xpuUtilizationPct).toBe(82);
     expect(rec.validation?.[0].taskId).toBe("t1"); // enriched from ctx
+  });
+
+  it("lease client: acquire → heartbeat → release round-trip against the server", async () => {
+    const g = await acquireLease("owner__pkg", "agentA", 300);
+    expect(g.granted).toBe(true);
+    expect(g.leaseId).toBeTruthy();
+    // a second holder is denied
+    const g2 = await acquireLease("owner__pkg", "agentB", 300);
+    expect(g2.granted).toBe(false);
+    expect(g2.holder).toBe("agentA");
+    // heartbeat only works with the matching leaseId
+    expect(await heartbeatLease("owner__pkg", "wrong", 300)).toBe(false);
+    expect(await heartbeatLease("owner__pkg", g.leaseId!, 300)).toBe(true);
+    // release frees it for the next holder
+    expect(await releaseLease("owner__pkg", g.leaseId!)).toBe(true);
+    const g3 = await acquireLease("owner__pkg", "agentB", 300);
+    expect(g3.granted).toBe(true);
   });
 
   it("composeEntriesFromLedger joins ledger nodes with verdicts (pure; dtype→supportedDtypes; skips no-repo)", () => {

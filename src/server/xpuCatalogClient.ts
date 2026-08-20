@@ -183,6 +183,17 @@ export async function acquireLease(nodeKey: string, holder: string, ttlSec = 600
   return body;
 }
 
+/** Extend the clone-lease during a long clone/patch window (keeps TTL from reclaiming it). */
+export async function heartbeatLease(nodeKey: string, leaseId: string, ttlSec = 600): Promise<boolean> {
+  const res = await postJson(`/api/xpu-catalog/nodes/${encodeURIComponent(nodeKey)}/lease/heartbeat`, { leaseId, ttlSec });
+  if (!res || !res.ok) return false;
+  try {
+    return Boolean(((await res.json()) as { ok?: boolean }).ok);
+  } catch {
+    return false;
+  }
+}
+
 export async function releaseLease(nodeKey: string, leaseId: string): Promise<boolean> {
   try {
     const res = await fetch(`${serverUrl()}/api/xpu-catalog/nodes/${encodeURIComponent(nodeKey)}/lease`, {
