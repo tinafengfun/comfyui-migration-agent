@@ -58,7 +58,11 @@ const LEDGER = {
   ]
 };
 
-async function makeOrchestratorTask(opts: { withStep07?: boolean } = { withStep07: true }) {
+async function makeOrchestratorTask(
+  opts: { withStep07?: boolean; withLedger?: boolean; objectInfo?: unknown } = {}
+) {
+  const withStep07 = opts.withStep07 !== false;
+  const withLedger = opts.withLedger !== false;
   const { MigrationOrchestrator } = await import("./orchestrator");
   const gpuNodesPath = path.join(root, "gpu-nodes.json");
   await ensureDir(root);
@@ -71,8 +75,13 @@ async function makeOrchestratorTask(opts: { withStep07?: boolean } = { withStep0
   const task = await orch.createTask({ name: "wf", workflowFileName: "wf.json", workflowJson: { nodes: [], links: [] } });
   await ensureDir(task.artifactPath);
   await fs.writeFile(path.join(task.artifactPath, "06b-runtime-policy-prompt.json"), JSON.stringify(PROMPT_06B), "utf8");
-  await fs.writeFile(path.join(task.artifactPath, "05-catalog-deploy-ledger.json"), JSON.stringify(LEDGER), "utf8");
-  if (opts.withStep07 !== false) {
+  if (withLedger) {
+    await fs.writeFile(path.join(task.artifactPath, "05-catalog-deploy-ledger.json"), JSON.stringify(LEDGER), "utf8");
+  }
+  if (opts.objectInfo) {
+    await fs.writeFile(path.join(task.artifactPath, "05-object_info_workflow_nodes.json"), JSON.stringify(opts.objectInfo), "utf8");
+  }
+  if (withStep07) {
     await fs.writeFile(path.join(task.artifactPath, "07-branch-smoke-summary.json"), JSON.stringify(STEP07_SUMMARY), "utf8");
   }
   return { orch, task };
@@ -124,6 +133,59 @@ describe("orchestrator.catalogValidateAndWriteBack — option B (branch harvest 
     expect(foo!.validation?.[0]).toMatchObject({ nodeType: "FooNode", passed: true, taskId: task.id });
     // ...BarNode (id 8) only ran on a FAILED branch → NOT recorded (not truly tested).
     expect(catalogStore.getByKey("acme__bar")).toBeUndefined();
+  });
+
+  it("SYNTHESIZES the ledger from object_info + registry when the agent skipped it (soft-layer fallback)", async () => {
+    process.env.XPU_CATALOG_ENABLED = "1";
+    // A registry-known node (llama_cpp_*) on a PASSED branch, but NO agent ledger.
+    const { orch, task } = await makeOrchestratorTask({
+      withLedger: false,
+      objectInfo: {
+        llama_cpp_model_loader: { python_module: "custom_nodes.ComfyUI-llama-cpp_vlm" },
+        SaveImage: { python_module: "nodes" }
+      }
+    });
+    // Rewrite the graph + branch smoke so node 3 (llama_cpp) is on the passed branch node-16.
+    await fs.writeFile(
+      path.join(task.artifactPath, "06b-runtime-policy-prompt.json"),
+      JSON.stringify({ prompt: { "3": { class_type: "llama_cpp_model_loader", inputs: {} }, "16": { class_type: "SaveImage", inputs: { x: ["3", 0] } } } }),
+      "utf8"
+    );
+    await fs.writeFile(
+      path.join(task.artifactPath, "07-branch-smoke-summary.json"),
+      JSON.stringify({ branch_summaries: [{ branch: "node-16", status: "passed" }] }),
+      "utf8"
+    );
+    await callWriteBack(orch, task);
+    // Synthesized from the registry (no git needed) → recorded as candidate.
+    const rec = catalogStore.getByKey("lihaoyun6__comfyui-llama-cpp_vlm");
+    expect(rec, "llama_cpp synthesized + recorded").toBeTruthy();
+    expect(rec!.tier).toBe("candidate");
+    expect(rec!.validation?.[0]).toMatchObject({ nodeType: "llama_cpp_model_loader", passed: true, taskId: task.id });
+  });
+
+  it("synthesis still honors the fresh-tested gate (unattributed + failed-branch nodes excluded)", async () => {
+    process.env.XPU_CATALOG_ENABLED = "1";
+    const { orch, task } = await makeOrchestratorTask({
+      withLedger: false,
+      objectInfo: {
+        llama_cpp_model_loader: { python_module: "custom_nodes.ComfyUI-llama-cpp_vlm" },
+        JjkText: { python_module: "custom_nodes.comfyui-workflow-encrypt" }
+      }
+    });
+    // llama_cpp (id 3) under a FAILED branch; JjkText (id 4) unattributed anyway.
+    await fs.writeFile(
+      path.join(task.artifactPath, "06b-runtime-policy-prompt.json"),
+      JSON.stringify({ prompt: { "3": { class_type: "llama_cpp_model_loader", inputs: {} }, "9": { class_type: "PreviewAny", inputs: { x: ["3", 0] } }, "4": { class_type: "JjkText", inputs: {} } } }),
+      "utf8"
+    );
+    await fs.writeFile(
+      path.join(task.artifactPath, "07-branch-smoke-summary.json"),
+      JSON.stringify({ branch_summaries: [{ branch: "node-9", status: "failed_runtime" }] }),
+      "utf8"
+    );
+    await callWriteBack(orch, task);
+    expect(catalogStore.count()).toBe(0); // failed branch → nothing recorded
   });
 
   it("records nothing when Step 07 has not run (can't confirm → don't enter DB)", async () => {

@@ -70,6 +70,7 @@ import {
 } from "./xpuCatalogWriteBack";
 import type { NodeVerdict } from "./nodeValidationRunner";
 import { branchValidatedNodeTypes, type PromptGraph } from "./catalogBranchHarvest";
+import { synthesizeLedgerNodes, parseWorkflowNodeTypes, type ProvenanceMap } from "./deployLedgerSynthesis";
 import { catalogEnabled } from "./xpuCatalogClient";
 import {
   appendAnswerDefault,
@@ -3817,6 +3818,27 @@ export class MigrationOrchestrator {
     } catch {
       ledger = undefined;
     }
+    // Hard-layer fallback: the Step-05 AGENT sometimes skips emitting the deploy
+    // ledger (soft layer), which would zero the whole loop. Reconstruct it
+    // deterministically from object_info + registry + real container git provenance
+    // so a successful migration still teaches the catalog. Only provenance-known
+    // nodes are synthesized; the branch-harvest gate below still decides what enters.
+    if (!ledger || !Array.isArray(ledger.nodes) || ledger.nodes.length === 0) {
+      const synthesized = await this.synthesizeDeployLedger(task).catch(() => undefined);
+      if (synthesized && synthesized.ledger.nodes.length > 0) {
+        ledger = synthesized.ledger;
+        await this.emit({
+          taskId: task.id,
+          stepId: "07",
+          type: "progress",
+          message:
+            `XPU catalog: Step-05 deploy ledger missing — synthesized ${synthesized.ledger.nodes.length} ` +
+            `provenance-known custom node(s) from object_info + registry + container git` +
+            (synthesized.unattributed.length ? `; ${synthesized.unattributed.length} unattributed (skipped: ${synthesized.unattributed.join(", ")})` : ""),
+          data: { synthesizedLedger: synthesized.ledger.nodes.map((n) => n.nodeType), unattributed: synthesized.unattributed }
+        }).catch(() => undefined);
+      }
+    }
     let summary;
     if (ledger && Array.isArray(ledger.nodes) && ledger.nodes.length > 0) {
       // Option B: harvest which custom nodes executed FRESH on a SUCCESSFUL Step-07
@@ -3881,6 +3903,61 @@ export class MigrationOrchestrator {
       }
     }
     return {};
+  }
+
+  /**
+   * Hard-layer deploy-ledger synthesis: reconstruct `05-catalog-deploy-ledger.json`
+   * from artifacts + ground truth the orchestrator controls, for the case where the
+   * Step-05 agent didn't emit one. Sources: `05-object_info_workflow_nodes.json`
+   * (class_type → python_module, i.e. which nodes are custom + their dir) + the
+   * static registry + real git provenance harvested from the deployed container.
+   * Best-effort; returns undefined when object_info is unreadable.
+   */
+  private async synthesizeDeployLedger(
+    task: MigrationTask
+  ): Promise<{ ledger: CatalogDeployLedger; unattributed: string[] } | undefined> {
+    let objectInfo: unknown;
+    try {
+      objectInfo = JSON.parse(
+        await fs.readFile(path.join(task.artifactPath, "05-object_info_workflow_nodes.json"), "utf8")
+      );
+    } catch {
+      return undefined;
+    }
+    const types = parseWorkflowNodeTypes(objectInfo);
+    const provenance = await this.harvestContainerGitProvenance(task).catch(() => ({}) as ProvenanceMap);
+    const { nodes, unattributed } = synthesizeLedgerNodes(types, provenance);
+    return { ledger: { nodes }, unattributed };
+  }
+
+  /**
+   * Best-effort: harvest `remote.origin.url` + HEAD for every `custom_nodes/<dir>`
+   * that has a git checkout in the deployed per-task container. Only runtime=docker
+   * kind=local is supported (a `docker exec`); other node kinds return {} → the
+   * synthesizer then relies on the static registry alone. Never throws.
+   */
+  private async harvestContainerGitProvenance(task: MigrationTask): Promise<ProvenanceMap> {
+    const node = this.lookupTaskNode(task);
+    if (!(node?.runtime === "docker" && node.kind !== "ssh")) return {};
+    const container = MigrationOrchestrator.dockerContainerName(task);
+    const root = "/comfyui"; // the docker launch flow always mounts the core at /comfyui
+    // For each custom_nodes dir with a remote: emit "<dir>\t<url>\t<sha>".
+    const script =
+      `for d in ${root}/custom_nodes/*/; do ` +
+      `u=$(git -C "$d" config --get remote.origin.url 2>/dev/null); ` +
+      `[ -n "$u" ] && printf '%s\\t%s\\t%s\\n' "$(basename "$d")" "$u" "$(git -C "$d" rev-parse HEAD 2>/dev/null)"; ` +
+      `done`;
+    const stdout = await new Promise<string>((resolve) => {
+      execFile("docker", ["exec", container, "sh", "-c", script], { timeout: 30_000 }, (err, out) => {
+        resolve(err ? "" : out);
+      });
+    });
+    const map: ProvenanceMap = {};
+    for (const line of stdout.split("\n")) {
+      const [dir, url, sha] = line.split("\t");
+      if (dir && url) map[dir] = { repository: url.trim(), ...(sha?.trim() ? { commit: sha.trim() } : {}) };
+    }
+    return map;
   }
 
   private async enforceReducedDeliveryConsistency(task: MigrationTask, stepId: string): Promise<boolean> {
