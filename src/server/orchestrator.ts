@@ -69,7 +69,7 @@ import {
   type CatalogDeployLedger
 } from "./xpuCatalogWriteBack";
 import type { NodeVerdict } from "./nodeValidationRunner";
-import { freshValidatedNodeTypes, type PromptGraph } from "./catalogBranchHarvest";
+import { branchValidatedNodeTypes, type PromptGraph } from "./catalogBranchHarvest";
 import { catalogEnabled } from "./xpuCatalogClient";
 import {
   appendAnswerDefault,
@@ -3855,7 +3855,7 @@ export class MigrationOrchestrator {
       return new Set();
     }
     const graph = await this.loadPromptGraph(task);
-    return freshValidatedNodeTypes(step07 as never, graph);
+    return branchValidatedNodeTypes(step07 as never, graph);
   }
 
   /** Load the workflow API graph (id→class_type) from the Step-06 runtime-policy prompt. */

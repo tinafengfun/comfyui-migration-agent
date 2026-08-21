@@ -35,19 +35,20 @@ let root: string;
 let catalogStore: CatalogStore;
 let server: Server;
 
-// FooNode (id 7) executed FRESH on a PASSED branch → validated.
-// BarNode (id 8) never executed on a successful branch → must NOT be recorded.
+// FooNode (id 7) is on the path of a PASSED output branch (node-16) → validated.
+// BarNode (id 8) is only under a FAILED branch (node-99) → must NOT be recorded.
 const STEP07_SUMMARY = {
   branch_summaries: [
-    { status: "passed", history_summary: { executed_nodes: ["16", "7"], cached_nodes: [] } },
-    { status: "failed_runtime", history_summary: { executed_nodes: ["8"], cached_nodes: [] } }
+    { branch: "node-16", status: "passed" },
+    { branch: "node-99", status: "failed_runtime" }
   ]
 };
 const PROMPT_06B = {
   prompt: {
     "7": { class_type: "FooNode", inputs: {} },
     "8": { class_type: "BarNode", inputs: {} },
-    "16": { class_type: "SaveImage", inputs: {} }
+    "16": { class_type: "SaveImage", inputs: { images: ["7", 0] } },
+    "99": { class_type: "PreviewAny", inputs: { x: ["8", 0] } }
   }
 };
 const LEDGER = {

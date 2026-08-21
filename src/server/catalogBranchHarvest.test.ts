@@ -1,43 +1,53 @@
 import { describe, expect, it } from "vitest";
-import { freshValidatedNodeIds, freshValidatedNodeTypes } from "./catalogBranchHarvest";
+import { branchValidatedNodeTypes, subgraphIds } from "./catalogBranchHarvest";
 
+// A workflow: SaveImage(16) ← VAEDecode(15) ← {VAELoader(7), Sampler(14) ← UNet(5)};
+// PreviewAny(52) ← BarNode(8). Two output branches: node-16 and node-52.
 const GRAPH = {
-  "3": { class_type: "BerniniConditioning" },
-  "7": { class_type: "VAELoader" },
-  "9": { class_type: "CLIPLoader" },
-  "16": { class_type: "VAEDecode" }
+  "5": { class_type: "UNETLoader", inputs: {} },
+  "7": { class_type: "VAELoader", inputs: {} },
+  "14": { class_type: "SamplerCustom", inputs: { model: ["5", 0] } },
+  "15": { class_type: "VAEDecode", inputs: { samples: ["14", 0], vae: ["7", 0] } },
+  "16": { class_type: "SaveImage", inputs: { images: ["15", 0] } },
+  "8": { class_type: "BarNode", inputs: {} },
+  "52": { class_type: "PreviewAny", inputs: { x: ["8", 0] } }
 };
 
-// Branch A: passed, freshly executed 16 (VAEDecode) + 3; 7 was cached.
-// Branch B: failed — its executed nodes must NOT count.
-// Branch C: cache_assisted_pass, freshly executed 9 (CLIPLoader).
-const SUMMARY = {
-  branch_summaries: [
-    { status: "passed", history_summary: { executed_nodes: ["16", "3"], cached_nodes: ["7"] } },
-    { status: "failed_runtime", history_summary: { executed_nodes: ["9", "99"], cached_nodes: [] } },
-    { status: "cache_assisted_pass", history_summary: { executed_nodes: ["9"], cached_nodes: ["3"] } }
-  ]
-};
+describe("subgraphIds", () => {
+  it("collects the target + transitive upstream", () => {
+    expect(subgraphIds(GRAPH, "16")).toEqual(new Set(["16", "15", "14", "7", "5"]));
+    expect(subgraphIds(GRAPH, "52")).toEqual(new Set(["52", "8"]));
+  });
+});
 
-describe("catalog branch harvest (option B)", () => {
-  it("collects only node IDs executed fresh on a SUCCESSFUL branch", () => {
-    const ids = freshValidatedNodeIds(SUMMARY);
-    expect([...ids].sort()).toEqual(["16", "3", "9"]); // 7 cached-only, 99 from a FAILED branch → excluded
+describe("branchValidatedNodeTypes (option B, graph-based)", () => {
+  it("records node types on a SUCCESSFUL branch's path (both branches passed)", () => {
+    const summary = {
+      branch_summaries: [
+        { branch: "node-16", status: "passed" },
+        { branch: "node-52", status: "cache_assisted_pass" }
+      ]
+    };
+    expect(branchValidatedNodeTypes(summary, GRAPH)).toEqual(
+      new Set(["SaveImage", "VAEDecode", "SamplerCustom", "VAELoader", "UNETLoader", "PreviewAny", "BarNode"])
+    );
   });
 
-  it("maps fresh IDs to class_types via the graph", () => {
-    const types = freshValidatedNodeTypes(SUMMARY, GRAPH);
-    expect(types).toEqual(new Set(["VAEDecode", "BerniniConditioning", "CLIPLoader"]));
-    expect(types.has("VAELoader")).toBe(false); // node 7 only cached → not fresh-validated
+  it("excludes nodes only on a FAILED branch (the DB-entry gate)", () => {
+    const summary = {
+      branch_summaries: [
+        { branch: "node-16", status: "passed" }, // path: 16,15,14,7,5
+        { branch: "node-52", status: "failed_runtime" } // BarNode(8)/PreviewAny(52) NOT validated
+      ]
+    };
+    const types = branchValidatedNodeTypes(summary, GRAPH);
+    expect(types.has("VAEDecode")).toBe(true);
+    expect(types.has("BarNode")).toBe(false);
+    expect(types.has("PreviewAny")).toBe(false);
   });
 
-  it("a node on ONLY a failed branch is not validated", () => {
-    const onlyFailed = { branch_summaries: [{ status: "failed_runtime", history_summary: { executed_nodes: ["16"] } }] };
-    expect(freshValidatedNodeTypes(onlyFailed, GRAPH).size).toBe(0);
-  });
-
-  it("empty/absent summary → empty set", () => {
-    expect(freshValidatedNodeTypes({}, GRAPH).size).toBe(0);
-    expect(freshValidatedNodeIds({ branch_summaries: [] }).size).toBe(0);
+  it("empty when no branch succeeded / summary missing", () => {
+    expect(branchValidatedNodeTypes({ branch_summaries: [{ branch: "node-16", status: "failed_runtime" }] }, GRAPH).size).toBe(0);
+    expect(branchValidatedNodeTypes({}, GRAPH).size).toBe(0);
   });
 });
