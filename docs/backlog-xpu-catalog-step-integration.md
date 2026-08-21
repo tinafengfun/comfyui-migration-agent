@@ -39,6 +39,26 @@ drives the isolated harness per node and folds results back (plan B). All flag-g
   COMPUTE node (sampler/decode), which on the WAN2.2 prompt needs `BerniniPromptEnhancer` installed on
   the box (not present on 120.111) or a fully-installed workflow.
 
+**Design decision (2026-08-21): per-node validation = OUTPUT-branch harvest (option B), with a strict
+DB-entry gate.** Instead of running a bare intermediate node (blocked by prompt_no_outputs, #6), validate
+the OUTPUT branch(es) that USE the custom node and attribute success to the nodes on the executed path:
+- For each deployed custom node, find an output node whose subgraph includes it; prune to that OUTPUT's
+  subgraph (has an output → submittable), bust cache (fresh), run on XPU.
+- **DB-entry gate (hard):** a node is confirmed "migration complete → written to the catalog" ONLY if it
+  was **executed FRESH** (in `executed_nodes`, not merely cached/skipped) on a branch whose run status is
+  **success** on XPU. Cached / skipped / not-on-any-successful-branch → NOT recorded (no false "complete").
+  One successful branch run can confirm multiple custom nodes on its path at once.
+- Trade-off (accepted): per-node XPU-util attribution is branch-level (Step 08 telemetry), not isolated;
+  the strong signal is "node executed fresh on a successful XPU branch". Implementation = redesign
+  `nodeValidationRunner`/`catalogValidateAndWriteBack` to run/harvest output branches + gate write-back on
+  fresh-execution + success. (Supersedes the isolated-per-node harness for intermediate nodes.)
+
+**Env fix (2026-08-21): `BerniniPromptEnhancer` missing on 120.111** — the package `comfyui-rh-bernini`
+was on `/nfs_share/custom_nodes` but not symlinked into `comfyui-core/custom_nodes`; fixed by
+`ln -s /nfs_share/custom_nodes/comfyui-rh-bernini …/comfyui-core/custom_nodes/` + `docker restart
+comfyui-local-xpu` → now registered (820 nodes). This is the exact deployment gap the catalog/Step-05
+flow auto-resolves.
+
 **Remaining (live proof, opt-in — not CI gates):**
 1. **Threshold calibration** — run the real isolated harness on a node forced-XPU vs forced-CPU
    (172.16.120.111 / remote-124-12), record `xpuUtilizationPct` for both, and set the CPU-fallback
