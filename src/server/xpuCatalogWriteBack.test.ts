@@ -113,8 +113,10 @@ describe("applyCatalogWriteBack", () => {
       { nodeType: "NoRepoNode", passed: true, passedAt: "2026-08-19T01:00:00Z" },
       { nodeType: "UnknownNode", passed: true, passedAt: "2026-08-19T01:00:00Z" } // no ledger entry → skipped
     ];
+    // a cached-not-fresh verdict must NOT become evidence
+    verdicts.push({ nodeType: "FooNode", passed: false, cachedNotFresh: true, passedAt: "2026-08-19T02:00:00Z" });
     const entries = composeEntriesFromLedger(ledger, verdicts, { taskId: "t1", workflowName: "wf" });
-    expect(entries).toHaveLength(1);
+    expect(entries).toHaveLength(1); // still only the fresh FooNode verdict; cached one skipped
     expect(entries[0].repository).toBe("https://github.com/acme/Foo");
     expect(entries[0].commit).toBe("abc");
     expect(entries[0].supportedDtypes).toEqual(["fp8_e4m3fn"]);

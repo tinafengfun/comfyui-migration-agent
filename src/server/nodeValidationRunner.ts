@@ -26,6 +26,8 @@ export interface NodeVerdict {
   xpuUtilizationPct?: number | null;
   cpuFallbackSuspected?: boolean;
   capacitySuspected?: boolean;
+  /** Ran only from ComfyUI's cache (not fresh) → not valid XPU evidence. */
+  cachedNotFresh?: boolean;
   peakMemoryBudgetRatio?: number | null;
   passedAt?: string;
 }
@@ -81,6 +83,7 @@ export function parseHarnessReport(report: unknown): NodeVerdict[] {
       xpuUtilizationPct: (v.xpuUtilizationPct ?? null) as number | null,
       cpuFallbackSuspected: Boolean(v.cpuFallbackSuspected),
       capacitySuspected: Boolean(v.capacitySuspected),
+      cachedNotFresh: Boolean(v.cachedNotFresh),
       peakMemoryBudgetRatio: (v.peakMemoryBudgetRatio ?? null) as number | null,
       passedAt: v.passedAt as string | undefined
     };

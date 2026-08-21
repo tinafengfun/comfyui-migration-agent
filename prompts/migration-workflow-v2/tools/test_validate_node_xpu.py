@@ -61,10 +61,13 @@ class JudgeVerdict(unittest.TestCase):
         self.assertTrue(r["passed"])
         self.assertEqual(r["historyResult"], "success")
 
-    def test_cached_node_not_flagged_cpu_fallback(self):
-        # Node was cached (not fresh) → no telemetry → do NOT flag CPU-fallback.
+    def test_cached_node_is_not_fresh_evidence(self):
+        # Node ran only from cache (not fresh) → NOT recorded as validation evidence
+        # (cache-masking guard): passed False, result "cached", not a cpu-fallback flag.
         r = self.base(executed_fresh=False, peak_gpu_util=1.0)
-        self.assertTrue(r["passed"])
+        self.assertFalse(r["passed"])
+        self.assertEqual(r["historyResult"], "cached")
+        self.assertTrue(r["cachedNotFresh"])
         self.assertFalse(r["cpuFallbackSuspected"])
 
     def test_capacity_signature_takes_priority(self):
@@ -109,6 +112,30 @@ class GraphUnwrap(unittest.TestCase):
     def test_unwraps_prompt_envelope(self):
         self.assertEqual(v.graph_of({"prompt": {"1": {}}}), {"1": {}})
         self.assertEqual(v.graph_of({"1": {}}), {"1": {}})
+
+
+class PruneAndBust(unittest.TestCase):
+    GRAPH = {
+        "1": {"class_type": "Loader", "inputs": {}},                          # upstream of target
+        "2": {"class_type": "UnrelatedLoader", "inputs": {}},                 # sibling — drop
+        "3": {"class_type": "Target", "inputs": {"model": ["1", 0], "x": 5}},  # target
+        "9": {"class_type": "BrokenSibling", "inputs": {}},                   # missing/broken — drop
+    }
+
+    def test_prune_keeps_target_plus_upstream_drops_siblings(self):
+        pruned = v.prune_to_subgraph(self.GRAPH, ["3"])
+        self.assertEqual(set(pruned.keys()), {"1", "3"})  # unrelated 2 and broken 9 gone
+        # original untouched
+        self.assertIn("9", self.GRAPH)
+
+    def test_bust_cache_uniqueizes_seeds_deterministically(self):
+        import copy
+        g = copy.deepcopy({"5": {"class_type": "KSampler", "inputs": {"seed": 123, "steps": 20}}})
+        out = v.bust_cache(g, "nonce-abc")
+        self.assertNotEqual(out["5"]["inputs"]["seed"], 123)      # seed changed → cache miss
+        self.assertEqual(out["5"]["inputs"]["steps"], 20)        # non-seed input untouched
+        again = v.bust_cache(copy.deepcopy({"5": {"class_type": "KSampler", "inputs": {"seed": 123}}}), "nonce-abc")
+        self.assertEqual(out["5"]["inputs"]["seed"], again["5"]["inputs"]["seed"])  # deterministic in nonce
 
 
 class WriteBackEmission(unittest.TestCase):

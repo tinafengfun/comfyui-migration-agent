@@ -29,8 +29,10 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import json
 import sys
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -100,6 +102,51 @@ def reduce_steps(graph: dict[str, Any]) -> dict[str, Any]:
     return reduced
 
 
+def prune_to_subgraph(graph: dict[str, Any], target_ids: list[str]) -> dict[str, Any]:
+    """
+    Keep only the target node(s) + their transitive upstream dependencies, drop
+    every unrelated node. ComfyUI validates the ENTIRE prompt on /prompt (even with
+    partial_execution_targets), so a single missing/broken SIBLING node would reject
+    the whole submission and block validating a present node. Pruning to the target's
+    subgraph makes per-node validation robust to unrelated missing nodes.
+    """
+    keep: set[str] = set()
+    stack = [str(t) for t in target_ids]
+    while stack:
+        nid = stack.pop()
+        if nid in keep or nid not in graph:
+            continue
+        keep.add(nid)
+        for value in (graph[nid].get("inputs", {}) or {}).values():
+            # a wired input is [source_node_id, output_index]
+            if isinstance(value, list) and value and isinstance(value[0], (str, int)):
+                src = str(value[0])
+                if src in graph and src not in keep:
+                    stack.append(src)
+    return {nid: graph[nid] for nid in keep}
+
+
+SEED_INPUT_KEYS = ("seed", "noise_seed", "rand_seed")
+
+
+def bust_cache(graph: dict[str, Any], nonce: str) -> dict[str, Any]:
+    """
+    Force a FRESH execution: give any seed-bearing node in the (pruned) subgraph a
+    unique value derived from `nonce`, so ComfyUI's per-input execution cache misses
+    and the node actually runs on the XPU this time. Without this a node cached from
+    a prior Step-07/08 run would report "success" with NO fresh XPU proof — cached
+    would silently masquerade as validated. Deterministic in `nonce` (unit-testable).
+    """
+    seed = int(hashlib.sha256(nonce.encode()).hexdigest()[:12], 16)
+    for node in graph.values():
+        inputs = node.get("inputs") if isinstance(node, dict) else None
+        if isinstance(inputs, dict):
+            for key in SEED_INPUT_KEYS:
+                if isinstance(inputs.get(key), int):
+                    inputs[key] = seed
+    return graph
+
+
 def judge_verdict(
     *,
     completed: bool,
@@ -122,6 +169,9 @@ def judge_verdict(
     applies when the node executed FRESH (a cached node produces no telemetry).
     """
     ran_ok = bool(completed and status_success and node_ran)
+    # ran, but only from ComfyUI's cache (not executed fresh) → no fresh XPU proof;
+    # must NOT be recorded as validation evidence (cache-masking guard).
+    cached_not_fresh = bool(node_ran and not executed_fresh)
     capacity_suspected = capacity_signature is not None
     cpu_fallback_suspected = (
         expect_execution == "xpu"
@@ -134,6 +184,8 @@ def judge_verdict(
         result, passed = "capacity_suspected", False
     elif not ran_ok:
         result, passed = "failed_runtime", False
+    elif cached_not_fresh:
+        result, passed = "cached", False
     elif cpu_fallback_suspected:
         result, passed = "cpu_fallback_suspected", False
     else:
@@ -145,6 +197,7 @@ def judge_verdict(
         "xpuUtilizationPct": peak_gpu_util,
         "cpuFallbackSuspected": cpu_fallback_suspected,
         "capacitySuspected": capacity_suspected,
+        "cachedNotFresh": cached_not_fresh,
     }
 
 
@@ -164,8 +217,11 @@ def validate_one_node(
 ) -> dict[str, Any]:
     """Execute just this node's subgraph, sample telemetry, and judge."""
     free_memory(api_url)  # unload models from the previous node
-    submission = reduce_steps(graph) if reduce else copy.deepcopy(graph)
-    prompt_id = f"nodeval-{node_id}-{utc_now().replace(':', '').replace('-', '')}"
+    base = reduce_steps(graph) if reduce else copy.deepcopy(graph)
+    # Prune to the target's subgraph (robust to unrelated missing nodes) + bust the
+    # execution cache (force a FRESH XPU run, not a cached "success").
+    submission = bust_cache(prune_to_subgraph(base, [node_id]), uuid.uuid4().hex)
+    prompt_id = uuid.uuid4().hex
     payload = {
         "prompt": submission,
         "prompt_id": prompt_id,
@@ -199,6 +255,7 @@ def validate_one_node(
             "xpuUtilizationPct": peak_util,
             "cpuFallbackSuspected": False,
             "capacitySuspected": capacity_sig is not None,
+            "cachedNotFresh": False,
             "error": submit_error,
         }
         summary: dict[str, Any] = {}

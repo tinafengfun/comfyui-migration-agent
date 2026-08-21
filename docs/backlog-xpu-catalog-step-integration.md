@@ -20,6 +20,25 @@ drives the isolated harness per node and folds results back (plan B). All flag-g
   present node. FIX: PRUNE the prompt to the target node's subgraph (target + required upstream) before
   submitting. Until then, live calibration needs a prompt whose node types are all installed on the box.
 
+**Live-test round 2 (2026-08-21): fixed prune + cache-guard; found the no-output blocker.**
+- DONE #1 prune-to-subgraph (`prune_to_subgraph`): submit only target + upstream, so an unrelated
+  missing/broken SIBLING node no longer rejects the whole prompt. Improves OUTPUT-node branch validation
+  (robust vs Step 07 submitting the full prompt).
+- DONE #2 force-fresh + cache-guard (`bust_cache` uniquifies seeds; `judge_verdict` marks
+  `cachedNotFresh`; write-back SKIPS cached verdicts): a node that only hit ComfyUI's cache is NOT
+  recorded as XPU evidence (closes the cache-masking hole).
+- OPEN #6 (found live): ComfyUI **rejects any prompt with no output node** (`prompt_no_outputs`), and
+  `partial_execution_targets` does NOT bypass it. Prune keeps target + UPSTREAM, so validating a bare
+  INTERMEDIATE node (VAELoader/CLIPLoader/conditioning) yields a no-output graph → rejected. FIX: append
+  a universal output SINK on the target's output (e.g. `PreviewAny`) so ComfyUI executes it — but the
+  sink choice is non-trivial (output type varies: VAE/CONDITIONING/MODEL/IMAGE; sink node availability
+  varies). Alternative design: validate the OUTPUT node whose branch USES the custom node (Step-07-style)
+  and attribute to the node on that path. Needs fresh design. Until then, per-node validation only works
+  for OUTPUT-reaching targets; loaders/intermediate nodes can't be validated in isolation.
+- Also: loader/fast nodes don't sustain XPU util → the util threshold must be calibrated on a
+  COMPUTE node (sampler/decode), which on the WAN2.2 prompt needs `BerniniPromptEnhancer` installed on
+  the box (not present on 120.111) or a fully-installed workflow.
+
 **Remaining (live proof, opt-in — not CI gates):**
 1. **Threshold calibration** — run the real isolated harness on a node forced-XPU vs forced-CPU
    (172.16.120.111 / remote-124-12), record `xpuUtilizationPct` for both, and set the CPU-fallback

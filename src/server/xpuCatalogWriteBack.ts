@@ -204,6 +204,7 @@ export function composeEntriesFromLedger(
   const byType = new Map(nodes.map((n) => [n.nodeType, n]));
   const entries: CatalogWriteBackEntry[] = [];
   for (const v of verdicts) {
+    if (v.cachedNotFresh) continue; // ran only from cache → not fresh XPU evidence, don't record
     const led = byType.get(v.nodeType) ?? nodes.find((n) => v.nodeType.startsWith(n.nodeType));
     if (!led) continue; // no deploy record → can't key this node
     if (!led.nodeKey && !led.repository) continue; // lazy-backfill needs a repo/key
