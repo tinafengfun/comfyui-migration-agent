@@ -63,6 +63,16 @@ export interface KnownCustomNode {
  */
 export const KNOWN_CUSTOM_NODES: KnownCustomNode[] = [
   {
+    // One of the most common ComfyUI packages (video I/O). The `VHS_` class_type
+    // prefix is unambiguous — always ComfyUI-VideoHelperSuite — even when a
+    // workflow bundle re-registers the nodes under its own module (which defeats
+    // object_info-based attribution). Pure-python (opencv/imageio-ffmpeg), no XPU
+    // patch needed; no model weights → no modelSubdir.
+    packageName: "ComfyUI-VideoHelperSuite",
+    repository: "https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite",
+    nodeTypePrefixes: ["VHS_"],
+  },
+  {
     packageName: "ComfyUI-llama-cpp_vlm",
     repository: "https://github.com/lihaoyun6/ComfyUI-llama-cpp_vlm",
     nodeTypePrefixes: ["llama_cpp_"],

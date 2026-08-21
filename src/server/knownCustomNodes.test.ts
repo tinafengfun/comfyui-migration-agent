@@ -19,6 +19,14 @@ describe("knownCustomNodes registry", () => {
     expect(knownCustomNodeForType("llama_cpp_some_new_node")?.packageName).toBe("ComfyUI-llama-cpp_vlm");
   });
 
+  it("resolves every VHS_* node type to ComfyUI-VideoHelperSuite by prefix", () => {
+    for (const type of ["VHS_LoadVideo", "VHS_VideoCombine", "VHS_VideoInfo"]) {
+      const known = knownCustomNodeForType(type);
+      expect(known?.packageName).toBe("ComfyUI-VideoHelperSuite");
+      expect(known?.repository).toBe("https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite");
+    }
+  });
+
   it("returns undefined for unrelated / empty node types", () => {
     expect(knownCustomNodeForType("KSampler")).toBeUndefined();
     expect(knownCustomNodeForType("CLIPLoader")).toBeUndefined();
