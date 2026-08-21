@@ -68,7 +68,8 @@ import {
   CATALOG_DEPLOY_LEDGER_FILE,
   type CatalogDeployLedger
 } from "./xpuCatalogWriteBack";
-import { runNodeValidation, type NodeVerdict } from "./nodeValidationRunner";
+import type { NodeVerdict } from "./nodeValidationRunner";
+import { freshValidatedNodeTypes, type PromptGraph } from "./catalogBranchHarvest";
 import { catalogEnabled } from "./xpuCatalogClient";
 import {
   appendAnswerDefault,
@@ -3818,8 +3819,14 @@ export class MigrationOrchestrator {
     }
     let summary;
     if (ledger && Array.isArray(ledger.nodes) && ledger.nodes.length > 0) {
-      const nodeTypes = [...new Set(ledger.nodes.map((n) => n.nodeType).filter(Boolean))];
-      const verdicts = await this.runCatalogNodeValidation(task, nodeTypes).catch(() => [] as NodeVerdict[]);
+      // Option B: harvest which custom nodes executed FRESH on a SUCCESSFUL Step-07
+      // output branch, and record ONLY those (strict "truly tested before complete"
+      // gate). No isolated per-node run → avoids ComfyUI's prompt_no_outputs.
+      const freshTypes = await this.harvestFreshValidatedTypes(task);
+      const now = new Date().toISOString();
+      const verdicts: NodeVerdict[] = ledger.nodes
+        .filter((n) => n.nodeType && freshTypes.has(n.nodeType))
+        .map((n) => ({ nodeType: n.nodeType, passed: true, historyResult: "success", passedAt: now }));
       summary = await applyCatalogWriteBackFromLedger(ledger, verdicts, { taskId: task.id, workflowName: task.name });
     } else {
       summary = await applyCatalogWriteBack(task.artifactPath, { taskId: task.id, workflowName: task.name });
@@ -3836,16 +3843,23 @@ export class MigrationOrchestrator {
   }
 
   /**
-   * Resolve a LOCAL-node harness context + run validate_node_xpu for the given node
-   * types. Precise per-node validation must run where xpu-smi + the API are
-   * co-located; MVP handles the local node (ssh / container-xpu-smi plumbing is a
-   * follow-up). Returns [] (skip) when a context can't be built.
+   * Option B: the custom-node class_types that executed FRESH on a SUCCESSFUL Step-07
+   * output branch (the DB-entry gate). Reads 07-branch-smoke-summary.json + the
+   * Step-06 runtime-policy prompt (id→class_type). Empty set when either is missing.
    */
-  private async runCatalogNodeValidation(task: MigrationTask, nodeTypes: string[]): Promise<NodeVerdict[]> {
-    if (nodeTypes.length === 0) return [];
-    const node = pickNode(loadGpuNodes(this.config), task.gpuNode);
-    if (node.kind !== "local") return [];
-    // Locate the Step-06 runtime-policy prompt (device cuda→xpu already applied).
+  private async harvestFreshValidatedTypes(task: MigrationTask): Promise<Set<string>> {
+    let step07: unknown;
+    try {
+      step07 = JSON.parse(await fs.readFile(path.join(task.artifactPath, "07-branch-smoke-summary.json"), "utf8"));
+    } catch {
+      return new Set();
+    }
+    const graph = await this.loadPromptGraph(task);
+    return freshValidatedNodeTypes(step07 as never, graph);
+  }
+
+  /** Load the workflow API graph (id→class_type) from the Step-06 runtime-policy prompt. */
+  private async loadPromptGraph(task: MigrationTask): Promise<PromptGraph> {
     let variantPromptPath: string | undefined;
     try {
       const s06 = JSON.parse(
@@ -3858,26 +3872,15 @@ export class MigrationOrchestrator {
     const candidates = [variantPromptPath, path.join(task.artifactPath, "06b-runtime-policy-prompt.json")].filter(
       (p): p is string => Boolean(p)
     );
-    let prompt: string | undefined;
     for (const p of candidates) {
       try {
-        await fs.access(p);
-        prompt = p;
-        break;
+        const doc = JSON.parse(await fs.readFile(p, "utf8"));
+        return (doc?.prompt ?? doc ?? {}) as PromptGraph;
       } catch {
-        // try next
+        // try next candidate
       }
     }
-    if (!prompt) return [];
-    const harnessPath = path.join(this.config.draftDocRoot, "migration-workflow-v2", "tools", "validate_node_xpu.py");
-    return runNodeValidation({
-      pythonPath: "python3", // stdlib-only harness; xpu-smi via subprocess
-      harnessPath,
-      apiUrl: nodeApiUrl(node),
-      promptPath: prompt,
-      comfyRoot: node.comfyui_root,
-      nodeTypes
-    });
+    return {};
   }
 
   private async enforceReducedDeliveryConsistency(task: MigrationTask, stepId: string): Promise<boolean> {

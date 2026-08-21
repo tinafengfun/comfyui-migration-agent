@@ -14,11 +14,6 @@ import { GitRepo } from "../catalog/gitRepo";
 import { CatalogWriter } from "../catalog/writer";
 import { createCatalogApp } from "../catalog/server";
 
-// Mock the harness runner so no python/GPU is spawned; the orchestrator's
-// runCatalogNodeValidation still runs (local node + 06b prompt present).
-vi.mock("./nodeValidationRunner", () => ({ runNodeValidation: vi.fn() }));
-import { runNodeValidation } from "./nodeValidationRunner";
-const PASS = [{ nodeType: "FooNode", passed: true, historyResult: "success", xpuUtilizationPct: 84, passedAt: "2026-08-19T01:00:00Z" }];
 vi.mock("./comfyuiLifecycle", () => ({
   ensureComfyUiUp: vi.fn().mockResolvedValue({ ok: true, action: "already_up", detail: "mock" }),
   VRAM_ESCALATION_LADDER: [["--reserve-vram", "1"]]
@@ -40,7 +35,29 @@ let root: string;
 let catalogStore: CatalogStore;
 let server: Server;
 
-async function makeOrchestratorTask() {
+// FooNode (id 7) executed FRESH on a PASSED branch → validated.
+// BarNode (id 8) never executed on a successful branch → must NOT be recorded.
+const STEP07_SUMMARY = {
+  branch_summaries: [
+    { status: "passed", history_summary: { executed_nodes: ["16", "7"], cached_nodes: [] } },
+    { status: "failed_runtime", history_summary: { executed_nodes: ["8"], cached_nodes: [] } }
+  ]
+};
+const PROMPT_06B = {
+  prompt: {
+    "7": { class_type: "FooNode", inputs: {} },
+    "8": { class_type: "BarNode", inputs: {} },
+    "16": { class_type: "SaveImage", inputs: {} }
+  }
+};
+const LEDGER = {
+  nodes: [
+    { nodeType: "FooNode", repository: "https://github.com/acme/Foo", commit: "abc", dtype: "fp8_e4m3fn", xpuSupport: "patched" },
+    { nodeType: "BarNode", repository: "https://github.com/acme/Bar", commit: "def", xpuSupport: "patched" }
+  ]
+};
+
+async function makeOrchestratorTask(opts: { withStep07?: boolean } = { withStep07: true }) {
   const { MigrationOrchestrator } = await import("./orchestrator");
   const gpuNodesPath = path.join(root, "gpu-nodes.json");
   await ensureDir(root);
@@ -52,13 +69,11 @@ async function makeOrchestratorTask() {
   const orch = new MigrationOrchestrator(config, store, STEPS, { runStep: async () => ({ sessionId: "s", summary: "x" }) });
   const task = await orch.createTask({ name: "wf", workflowFileName: "wf.json", workflowJson: { nodes: [], links: [] } });
   await ensureDir(task.artifactPath);
-  // Step-06 runtime-policy prompt + Step-05 deploy ledger.
-  await fs.writeFile(path.join(task.artifactPath, "06b-runtime-policy-prompt.json"), JSON.stringify({ prompt: { "1": { class_type: "FooNode", inputs: {} } } }), "utf8");
-  await fs.writeFile(
-    path.join(task.artifactPath, "05-catalog-deploy-ledger.json"),
-    JSON.stringify({ nodes: [{ nodeType: "FooNode", repository: "https://github.com/acme/Foo", commit: "abc", dtype: "fp8_e4m3fn", xpuSupport: "patched" }] }),
-    "utf8"
-  );
+  await fs.writeFile(path.join(task.artifactPath, "06b-runtime-policy-prompt.json"), JSON.stringify(PROMPT_06B), "utf8");
+  await fs.writeFile(path.join(task.artifactPath, "05-catalog-deploy-ledger.json"), JSON.stringify(LEDGER), "utf8");
+  if (opts.withStep07 !== false) {
+    await fs.writeFile(path.join(task.artifactPath, "07-branch-smoke-summary.json"), JSON.stringify(STEP07_SUMMARY), "utf8");
+  }
   return { orch, task };
 }
 
@@ -86,7 +101,10 @@ afterEach(async () => {
   fsSync.rmSync(root, { recursive: true, force: true });
 });
 
-describe("orchestrator.catalogValidateAndWriteBack (plan B)", () => {
+const callWriteBack = (orch: unknown, task: unknown): Promise<void> =>
+  (orch as { catalogValidateAndWriteBack: (t: unknown) => Promise<void> }).catalogValidateAndWriteBack(task);
+
+describe("orchestrator.catalogValidateAndWriteBack — option B (branch harvest + fresh gate)", () => {
   it("no-op when XPU_CATALOG_ENABLED is off", async () => {
     delete process.env.XPU_CATALOG_ENABLED;
     const { orch, task } = await makeOrchestratorTask();
@@ -94,47 +112,31 @@ describe("orchestrator.catalogValidateAndWriteBack (plan B)", () => {
     expect(catalogStore.count()).toBe(0);
   });
 
-  it("reads the deploy ledger, validates (mocked harness), and writes a candidate record", async () => {
+  it("records ONLY nodes executed fresh on a successful branch (the DB-entry gate)", async () => {
     process.env.XPU_CATALOG_ENABLED = "1";
-    vi.mocked(runNodeValidation).mockResolvedValue(PASS);
     const { orch, task } = await makeOrchestratorTask();
     await callWriteBack(orch, task);
-    const rec = catalogStore.getByKey("acme__foo");
-    expect(rec, "record should be created from ledger + verdict").toBeTruthy();
-    expect(rec!.tier).toBe("candidate");
-    expect(rec!.supportedDtypes).toEqual(["fp8_e4m3fn"]);
-    expect(rec!.validation?.[0]).toMatchObject({ nodeType: "FooNode", passed: true, xpuUtilizationPct: 84, taskId: task.id });
+    // FooNode (id 7) ran fresh on a PASSED branch → recorded candidate...
+    const foo = catalogStore.getByKey("acme__foo");
+    expect(foo, "FooNode should be recorded").toBeTruthy();
+    expect(foo!.tier).toBe("candidate");
+    expect(foo!.validation?.[0]).toMatchObject({ nodeType: "FooNode", passed: true, taskId: task.id });
+    // ...BarNode (id 8) only ran on a FAILED branch → NOT recorded (not truly tested).
+    expect(catalogStore.getByKey("acme__bar")).toBeUndefined();
   });
 
-  it("drives the harness against the Step-06 runtime-policy prompt (not the raw workflow)", async () => {
+  it("records nothing when Step 07 has not run (can't confirm → don't enter DB)", async () => {
     process.env.XPU_CATALOG_ENABLED = "1";
-    vi.mocked(runNodeValidation).mockResolvedValue(PASS);
-    const { orch, task } = await makeOrchestratorTask();
-    await callWriteBack(orch, task);
-    expect(runNodeValidation).toHaveBeenCalled();
-    const opts = vi.mocked(runNodeValidation).mock.calls[0][0] as { promptPath: string; nodeTypes: string[] };
-    expect(opts.promptPath).toContain("06b-runtime-policy-prompt.json");
-    expect(opts.nodeTypes).toContain("FooNode");
-  });
-
-  it("writes nothing when the harness yields no verdicts (no evidence → no record)", async () => {
-    process.env.XPU_CATALOG_ENABLED = "1";
-    vi.mocked(runNodeValidation).mockResolvedValue([]);
-    const { orch, task } = await makeOrchestratorTask();
+    const { orch, task } = await makeOrchestratorTask({ withStep07: false });
     await callWriteBack(orch, task);
     expect(catalogStore.count()).toBe(0);
   });
 
-  it("is best-effort when the catalog-server is unreachable (no throw, no partial state)", async () => {
+  it("best-effort when the catalog-server is unreachable (no throw, no partial state)", async () => {
     process.env.XPU_CATALOG_ENABLED = "1";
-    process.env.XPU_CATALOG_SERVER_URL = "http://127.0.0.1:1"; // unroutable
-    vi.mocked(runNodeValidation).mockResolvedValue(PASS);
+    process.env.XPU_CATALOG_SERVER_URL = "http://127.0.0.1:1";
     const { orch, task } = await makeOrchestratorTask();
-    await expect(callWriteBack(orch, task)).resolves.toBeUndefined(); // never throws
+    await expect(callWriteBack(orch, task)).resolves.toBeUndefined();
     expect(catalogStore.count()).toBe(0);
   });
 });
-
-function callWriteBack(orch: unknown, task: unknown): Promise<void> {
-  return (orch as { catalogValidateAndWriteBack: (t: unknown) => Promise<void> }).catalogValidateAndWriteBack(task);
-}

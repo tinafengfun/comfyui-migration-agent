@@ -289,11 +289,12 @@ per-node state machine — the backend owns validation + the catalog write; you 
    the meta-patterns (`cuda→xpu`, fp8 keep-on-move, cpu-offload) as your migration playbook.
 4. **Emit the deploy ledger.** Write `<artifacts>/05-catalog-deploy-ledger.json` =
    `{ "nodes": [ { "nodeType", "nodeKey", "repository", "commit", "dtype", "xpuSupport", "execution",
-   "patches": [{file,target}], "pip": {backend} }, … ] }` for every custom node you deployed. The backend
-   reads it after Step 07 to run the isolated per-node XPU harness (`validate_node_xpu.py`) and fold the
-   result into the catalog (candidate → trusted after repeat validation). **You never open the catalog
-   SQLite or commit its git — you POST via the lease/explore CLIs and emit the ledger; the single
-   catalog-server owns every write.**
+   "patches": [{file,target}], "pip": {backend} }, … ] }` for every custom node you deployed. After Step 07
+   the backend confirms each node via the branch-smoke results — a node is written to the catalog ONLY if
+   it executed FRESH on a SUCCESSFUL XPU output branch (cached/skipped/failed → not recorded) — and folds
+   the result in (candidate → trusted after repeat validation). So: make sure the custom nodes are actually
+   exercised by the output branches Step 07 runs. **You never open the catalog SQLite or commit its git —
+   you POST via the lease/explore CLIs and emit the ledger; the single catalog-server owns every write.**
 
 ### Hidden runtime asset pre-stage check (do this BEFORE downloading anything Step 02 flagged)
 
