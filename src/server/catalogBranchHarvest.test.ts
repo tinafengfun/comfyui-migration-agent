@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { branchValidatedNodeTypes, subgraphIds } from "./catalogBranchHarvest";
+import { branchValidatedNodeTypes, mainSmokeValidatedNodeTypes, subgraphIds } from "./catalogBranchHarvest";
 
 // A workflow: SaveImage(16) ← VAEDecode(15) ← {VAELoader(7), Sampler(14) ← UNet(5)};
 // PreviewAny(52) ← BarNode(8). Two output branches: node-16 and node-52.
@@ -49,5 +49,33 @@ describe("branchValidatedNodeTypes (option B, graph-based)", () => {
   it("empty when no branch succeeded / summary missing", () => {
     expect(branchValidatedNodeTypes({ branch_summaries: [{ branch: "node-16", status: "failed_runtime" }] }, GRAPH).size).toBe(0);
     expect(branchValidatedNodeTypes({}, GRAPH).size).toBe(0);
+  });
+});
+
+// A single-output workflow: LoadImage(200) -> llama loader/params/instruct -> PreviewAny(52).
+const MAIN_GRAPH = {
+  "200": { class_type: "LoadImage", inputs: {} },
+  "93": { class_type: "llama_cpp_model_loader", inputs: {} },
+  "94": { class_type: "llama_cpp_parameters", inputs: {} },
+  "92": { class_type: "llama_cpp_instruct_adv", inputs: { images: ["200", 0], llama_model: ["93", 0], parameters: ["94", 0] } },
+  "52": { class_type: "PreviewAny", inputs: { source: ["92", 0] } }
+};
+
+describe("mainSmokeValidatedNodeTypes (single-output main smoke)", () => {
+  it("validates the terminal output's whole subgraph when the smoke produced output", () => {
+    const types = mainSmokeValidatedNodeTypes({ output_files: [{ node_id: "52", type: "text" } as never] }, MAIN_GRAPH);
+    expect(types).toEqual(
+      new Set(["PreviewAny", "llama_cpp_instruct_adv", "LoadImage", "llama_cpp_model_loader", "llama_cpp_parameters"])
+    );
+  });
+
+  it("records NOTHING when the smoke produced no output (did not pass)", () => {
+    expect(mainSmokeValidatedNodeTypes({ output_files: [] }, MAIN_GRAPH).size).toBe(0);
+    expect(mainSmokeValidatedNodeTypes({}, MAIN_GRAPH).size).toBe(0);
+  });
+
+  it("tolerates numeric node_id", () => {
+    const types = mainSmokeValidatedNodeTypes({ output_files: [{ node_id: 52 } as never] }, MAIN_GRAPH);
+    expect(types.has("llama_cpp_instruct_adv")).toBe(true);
   });
 });

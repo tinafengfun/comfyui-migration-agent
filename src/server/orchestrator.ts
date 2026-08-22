@@ -69,7 +69,7 @@ import {
   type CatalogDeployLedger
 } from "./xpuCatalogWriteBack";
 import type { NodeVerdict } from "./nodeValidationRunner";
-import { branchValidatedNodeTypes, type PromptGraph } from "./catalogBranchHarvest";
+import { branchValidatedNodeTypes, mainSmokeValidatedNodeTypes, type PromptGraph } from "./catalogBranchHarvest";
 import { synthesizeLedgerNodes, parseWorkflowNodeTypes, type ProvenanceMap } from "./deployLedgerSynthesis";
 import { catalogEnabled } from "./xpuCatalogClient";
 import {
@@ -3870,14 +3870,22 @@ export class MigrationOrchestrator {
    * Step-06 runtime-policy prompt (id→class_type). Empty set when either is missing.
    */
   private async harvestFreshValidatedTypes(task: MigrationTask): Promise<Set<string>> {
-    let step07: unknown;
-    try {
-      step07 = JSON.parse(await fs.readFile(path.join(task.artifactPath, "07-branch-smoke-summary.json"), "utf8"));
-    } catch {
-      return new Set();
-    }
     const graph = await this.loadPromptGraph(task);
-    return branchValidatedNodeTypes(step07 as never, graph);
+    try {
+      const step07 = JSON.parse(await fs.readFile(path.join(task.artifactPath, "07-branch-smoke-summary.json"), "utf8"));
+      return branchValidatedNodeTypes(step07 as never, graph);
+    } catch {
+      // Single-output workflows run one whole-graph "main smoke" and emit
+      // 07-main-smoke-evidence.json instead of a branch summary → harvest that so the
+      // catalog loop still turns (the multi-branch WAN2.2 path always had a summary,
+      // which hid this gap until a single-output workflow was migrated).
+      try {
+        const ev = JSON.parse(await fs.readFile(path.join(task.artifactPath, "07-main-smoke-evidence.json"), "utf8"));
+        return mainSmokeValidatedNodeTypes(ev as never, graph);
+      } catch {
+        return new Set();
+      }
+    }
   }
 
   /** Load the workflow API graph (id→class_type) from the Step-06 runtime-policy prompt. */

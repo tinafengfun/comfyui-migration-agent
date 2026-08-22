@@ -102,7 +102,11 @@ export function expectedArtifactGroups(step: MigrationStepDefinition): string[][
         ["06-prompt-validation.json", "06-source-preserving-prompt.json"]
       ];
     case "07":
-      return [["07-first-stage-smoke.md"], ["07-branch-1-smoke.md"], ["07-branch-smoke.md"], ["07-branch-smoke-summary.json"]];
+      // A single-output workflow runs one whole-graph "main smoke" (07-main-smoke.md +
+      // 07-main-smoke-evidence.json) rather than per-branch smokes, so it never emits a
+      // branch summary — accept it as a valid Step 07 result (a real, complete,
+      // correctly-shaped smoke), else the step falsely fails on a naming technicality.
+      return [["07-first-stage-smoke.md"], ["07-branch-1-smoke.md"], ["07-branch-smoke.md"], ["07-branch-smoke-summary.json"], ["07-main-smoke.md"]];
     case "08":
       return [["08-full-validation.md"], ["08-full-validation-report.md"]];
     case "09":

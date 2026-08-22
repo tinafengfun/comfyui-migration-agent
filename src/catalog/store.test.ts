@@ -24,7 +24,9 @@ afterEach(() => {
 
 describe("CatalogStore", () => {
   it("rebuilds the index from the working-clone JSON", () => {
-    expect(store.count()).toBe(10);
+    // Count tracks the seed set (recipes ∪ KNOWN_CUSTOM_NODES) rather than a
+    // hardcoded number, so adding a registry entry (e.g. VHS) doesn't false-fail this.
+    expect(store.count()).toBe(buildSeedRecords("2026-08-18T00:00:00Z").length);
   });
 
   it("resolves by nodeType via class_type prefix (llama_cpp_* → the VLM package)", () => {

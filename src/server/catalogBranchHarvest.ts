@@ -75,3 +75,29 @@ export function branchValidatedNodeTypes(summary: Step07Summary, graph: PromptGr
   }
   return types;
 }
+
+/** 07-main-smoke-evidence.json: a single whole-graph smoke (single-output workflow). */
+export interface MainSmokeEvidence {
+  /** Output artifacts produced by the run; non-empty ⟺ the smoke passed. */
+  output_files?: Array<{ node_id?: string | number }>;
+}
+
+/**
+ * A workflow with a SINGLE output node makes Step 07 run one whole-graph "main
+ * smoke" (07-main-smoke-evidence.json) instead of per-branch smokes — so there is no
+ * 07-branch-smoke-summary.json to harvest. Treat each produced output file's node as
+ * one SUCCESSFUL branch and reuse the exact branch-subgraph gate: a main smoke is
+ * "passed" iff it produced at least one output (the same evidence the agent uses),
+ * and then every node on that output's dependency subgraph is validated. Keeps the
+ * "truly tested fresh on XPU this task" guarantee (fresh per-task container) identical
+ * to the multi-branch path.
+ */
+export function mainSmokeValidatedNodeTypes(evidence: MainSmokeEvidence, graph: PromptGraph): Set<string> {
+  const outputs = evidence?.output_files ?? [];
+  if (!outputs.length) return new Set(); // no output ⟹ did not pass ⟹ record nothing
+  const branch_summaries: BranchSummary[] = [];
+  for (const o of outputs) {
+    if (o?.node_id != null) branch_summaries.push({ branch: `node-${o.node_id}`, status: "passed" });
+  }
+  return branchValidatedNodeTypes({ branch_summaries }, graph);
+}
