@@ -643,6 +643,77 @@ def apply_named_reduced_changes(
     return reduced, applied
 
 
+def classify_reduced_validation(
+    rv_status: str,
+    status_str: str | None,
+    ratio: float | None,
+    signature: str | None,
+    output_written: bool,
+) -> dict[str, Any]:
+    """Tri-state classifier for a reduced-config validation run (shared by the inline
+    probe and the standalone ``--run-level reduced-validation`` pass).
+
+    Preserves the invariant that ``validated`` is only ``True`` on a MEASURED clean fit:
+    a real output artifact was written AND a peak/budget ratio was measured below the
+    over-budget line. Telemetry gaps (e.g. a Level-Zero "error: 39" that suppresses the
+    peak) must NOT be laundered into a fit claim -- they stay ``None`` and defer the call
+    to Step 12.
+
+      validated True  -> success + output written + measured ratio < over-budget
+      validated False -> failed / OOM signature / over-budget offload-thrash survival
+      validated None  -> ran to completion but VRAM fit could not be measured (unknown)
+    """
+    succeeded = (
+        rv_status == "history_available" and status_str == "success" and bool(output_written)
+    )
+    telemetry_available = ratio is not None
+    telemetry_unconfirmed = False
+    if signature or (rv_status in {"history_timeout", "submit_failed"}):
+        tier, validated = "insufficient", False
+    elif ratio is None:
+        if succeeded:
+            # Ran clean but telemetry gave no peak -- we cannot assert a fit that was
+            # never measured. Keep the tri-state at None and defer the fit call.
+            tier, validated = "unknown", None
+            telemetry_unconfirmed = True
+        else:
+            # Ran but never reached a verified success (non-capacity node error / no
+            # output) -- an honest failure, not an unknown.
+            tier, validated = "unknown", False
+    elif ratio >= CAPACITY_RATIO_OVER_BUDGET:
+        tier, validated = "reduced", False  # over budget: survived via offload thrash, not a clean fit
+    elif ratio >= CAPACITY_RATIO_TIGHT:
+        tier, validated = "tight", bool(succeeded)
+    else:
+        tier, validated = "ok", bool(succeeded)
+
+    if telemetry_unconfirmed:
+        note = (
+            f"Reduced config ran to completion (run_status={rv_status}), VRAM fit unconfirmed "
+            "(telemetry unavailable), deferred to Step 12."
+        )
+    else:
+        note = (
+            f"Reduced config actually RAN at Step 08 (peak/budget={ratio}, tier='{tier}', "
+            f"run_status={rv_status}, signature={signature}). "
+            + (
+                "It clears OOM at the current VRAM tier -- Step 12 can run it safely."
+                if validated
+                else "It did NOT clear cleanly -- reduce frames further or escalate the VRAM tier before Step 12."
+            )
+        )
+    return {
+        "validated": validated,
+        "reduced_capacity_tier": tier,
+        "reduced_peak_memory_budget_ratio": ratio,
+        "reduced_run_status": rv_status,
+        "reduced_run_succeeded": succeeded,
+        "telemetry_available": telemetry_available,
+        "capacity_error_signature": signature,
+        "note": note,
+    }
+
+
 def run_reduced_validation_probe(
     api_url: str,
     source_prompt: dict[str, Any],
@@ -706,40 +777,20 @@ def run_reduced_validation_probe(
         ratio = rv_telemetry.get("peak_memory_budget_ratio")
         signature = scan_capacity_signature(hist_summary)
         status_obj = (hist_summary or {}).get("status") or {}
-        succeeded = rv_status == "history_available" and status_obj.get("status_str") == "success"
-
-        # Purpose-built classification for the REDUCED footprint (not classify_capacity's
-        # full-size semantics): does the reduced config actually fit without OOM?
-        if signature or (rv_status in {"history_timeout", "submit_failed"}):
-            tier, validated = "insufficient", False
-        elif ratio is None:
-            tier, validated = "unknown", None
-        elif ratio >= CAPACITY_RATIO_OVER_BUDGET:
-            tier, validated = "reduced", False  # over budget: survived via offload thrash, not a clean fit
-        elif ratio >= CAPACITY_RATIO_TIGHT:
-            tier, validated = "tight", bool(succeeded)
-        else:
-            tier, validated = "ok", bool(succeeded)
-
-        note = (
-            f"Reduced config actually RAN at Step 08 (peak/budget={ratio}, tier='{tier}', "
-            f"run_status={rv_status}, signature={signature}). "
-            + (
-                "It clears OOM at the current VRAM tier -- Step 12 can run it safely."
-                if validated
-                else "It did NOT clear cleanly -- reduce frames further or escalate the VRAM tier before Step 12."
-            )
+        status_str = status_obj.get("status_str") if isinstance(status_obj, dict) else None
+        # A clean-fit (validated=True) verdict must be backed by an actual output artifact:
+        # a "success" status that wrote no file is not a proven run (13-003).
+        output_written = any(
+            isinstance(item, dict) and item.get("exists") and (item.get("size_bytes") or 0) > 0
+            for item in ((hist_summary or {}).get("output_files") or [])
+        )
+        classification = classify_reduced_validation(
+            rv_status, status_str, ratio, signature, output_written
         )
         return {
-            "validated": validated,
-            "reduced_capacity_tier": tier,
-            "reduced_peak_memory_budget_ratio": ratio,
+            **classification,
             "reduced_peak_memory_used_mib": rv_telemetry.get("peak_memory_used_mib"),
-            "reduced_run_status": rv_status,
-            "reduced_run_succeeded": succeeded,
-            "capacity_error_signature": signature,
             "applied_changes": applied,
-            "note": note,
         }
     except Exception as exc:  # noqa: BLE001 - best-effort, surfaced not swallowed
         return {
@@ -1039,6 +1090,54 @@ def make_report(summary: dict[str, Any], report_path: Path) -> None:
     report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def merge_reduced_validation_into_aggregate(
+    summary: dict[str, Any],
+    prior_probe_summary: dict[str, Any] | None,
+    reduced_validation: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """FIX 13-009: a deferred ``--run-level reduced-validation`` pass must NOT redefine
+    full-size capacity in the run-level-shared aggregate summary.
+
+    The capacity-probe already classified full-size capacity (e.g. ``insufficient`` +
+    a ``recommended_reduced_setting``); a reduced-validation run's own ``classify_capacity``
+    returns ``unknown``/``None`` (it does not exercise full size). Writing that straight to
+    the aggregate would clobber the probe's evidence. So carry the probe's
+    ``capacity_classification`` + ``step12_context`` (incl. ``recommended_reduced_setting``)
+    forward and attach ONLY this run's ``reduced_validation`` verdict.
+
+    Mutates and returns ``summary``. Degrades gracefully when the probe summary is
+    missing: leaves this run's own view in place, still attaches the reduced verdict, and
+    records a note.
+    """
+    if not isinstance(prior_probe_summary, dict):
+        summary.setdefault("notes", []).append(
+            "reduced-validation: no capacity-probe run summary available to carry full-size "
+            "capacity forward; aggregate keeps this run's own (full-size-unexercised) capacity view."
+        )
+        step12 = summary.get("step12_context")
+        if isinstance(step12, dict):
+            step12["reduced_validation"] = reduced_validation
+        return summary
+
+    prior_capacity = prior_probe_summary.get("capacity_classification") or {}
+    prior_step12 = prior_probe_summary.get("step12_context") or {}
+
+    if isinstance(prior_capacity, dict) and prior_capacity:
+        carried = {**prior_capacity, "carried_forward_from": "08-capacity-probe-run-summary.json"}
+        summary["capacity_classification"] = carried
+        decision = summary.get("completion_decision")
+        if isinstance(decision, dict):
+            decision["capacity"] = carried
+            decision["capacity_tier"] = prior_capacity.get("capacity_tier")
+            decision["full_size_supported"] = prior_capacity.get("full_size_supported")
+
+    merged_step12 = {**prior_step12} if isinstance(prior_step12, dict) else {}
+    merged_step12["reduced_validation"] = reduced_validation
+    merged_step12["reduced_validation_carried_forward"] = True
+    summary["step12_context"] = merged_step12
+    return summary
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--workspace", type=Path, default=WORKSPACE_DEFAULT)
@@ -1262,37 +1361,21 @@ def main() -> int:
             }
     elif args.run_level == "reduced-validation":
         # This whole run IS the reduced-config validation (deferred from a prior
-        # capacity-probe that DEVICE_LOST'd). Classify THIS run's reduced footprint.
+        # capacity-probe that DEVICE_LOST'd). Classify THIS run's reduced footprint via
+        # the same tri-state classifier as the inline probe (13-003).
         signature = scan_capacity_signature(history_summary)
         status_obj = (history_summary or {}).get("status") or {}
-        succeeded = run_status == "history_available" and status_obj.get("status_str") == "success"
+        status_str = status_obj.get("status_str") if isinstance(status_obj, dict) else None
         ratio = telemetry.get("peak_memory_budget_ratio")
-        if signature or run_status in {"history_timeout", "submit_failed"}:
-            rv_tier, rv_validated = "insufficient", False
-        elif ratio is None:
-            rv_tier, rv_validated = "unknown", None
-        elif ratio >= CAPACITY_RATIO_OVER_BUDGET:
-            rv_tier, rv_validated = "reduced", False
-        elif ratio >= CAPACITY_RATIO_TIGHT:
-            rv_tier, rv_validated = "tight", bool(succeeded)
-        else:
-            rv_tier, rv_validated = "ok", bool(succeeded)
+        output_written = any(
+            isinstance(item, dict) and item.get("exists") and (item.get("size_bytes") or 0) > 0
+            for item in ((history_summary or {}).get("output_files") or [])
+        )
         reduced_validation = {
-            "validated": rv_validated,
+            **classify_reduced_validation(run_status, status_str, ratio, signature, output_written),
             "needs_reset": False,
-            "reduced_capacity_tier": rv_tier,
-            "reduced_peak_memory_budget_ratio": ratio,
             "reduced_peak_memory_used_mib": telemetry.get("peak_memory_used_mib"),
-            "reduced_run_status": run_status,
-            "reduced_run_succeeded": succeeded,
-            "capacity_error_signature": signature,
             "applied_changes": setting_changes,
-            "note": (
-                f"Standalone reduced-validation run (peak/budget={ratio}, tier='{rv_tier}', "
-                f"status={run_status}). "
-                + ("Reduced config clears OOM on a clean server -- Step 12 can run it safely."
-                   if rv_validated else "Reduced config did NOT clear cleanly -- reduce frames further / escalate.")
-            ),
         }
 
     cache_assisted = bool(cached_nodes)
@@ -1425,7 +1508,31 @@ def main() -> int:
         },
         "completion_decision": decision,
     }
+    # The per-run summary (run_dir/08-<level>-run-summary.json) is run-level-scoped and
+    # keeps THIS run's own view; write it before merging so a reduced-validation pass
+    # never clobbers the capacity-probe's own per-run record.
     write_json(run_summary_path, summary)
+
+    if args.run_level == "reduced-validation":
+        # FIX 13-009: fold the capacity-probe's surviving full-size capacity + reduced
+        # recommendation back into the shared aggregate so this reduced-validation pass
+        # only ATTACHES its verdict instead of overwriting the probe's evidence.
+        probe_summary_path = run_dir / "08-capacity-probe-run-summary.json"
+        prior_probe_summary: dict[str, Any] | None = None
+        if probe_summary_path.is_file():
+            try:
+                prior_probe_summary = read_json(probe_summary_path)
+            except (OSError, json.JSONDecodeError) as exc:  # noqa: PERF203 - surfaced in note
+                summary.setdefault("notes", []).append(
+                    f"reduced-validation: failed to read capacity-probe run summary: {exc}"
+                )
+        merge_reduced_validation_into_aggregate(summary, prior_probe_summary, reduced_validation)
+        # These aggregate artifacts have no rolling archive; snapshot the prior copies
+        # before this pass overwrites them so the probe's aggregate is recoverable.
+        for aggregate in (summary_path, report_path, manifest_path):
+            if aggregate.exists():
+                shutil.copy2(aggregate, aggregate.parent / (aggregate.name + ".prev"))
+
     write_json(summary_path, summary)
     make_report(summary, report_path)
 

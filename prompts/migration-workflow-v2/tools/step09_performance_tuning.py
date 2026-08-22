@@ -275,11 +275,31 @@ def choose_config(candidates: list[dict[str, Any]], cfg: dict[str, Any], baselin
         )
     else:
         selected = "reduced-lowvram-unvalidated"
+        ran = baseline.get("reduced_run_succeeded")
+        telemetry_available = baseline.get("telemetry_available")
+        if ran:
+            # The reduced config DID run to completion; we just could not measure its
+            # peak. Say so honestly ("ran OK, fit unconfirmed") rather than "never ran".
+            fit_state = (
+                "The reduced config RAN to completion on the delivered flags, but its VRAM fit "
+                "is unconfirmed"
+                + (
+                    " (telemetry unavailable -- no peak/budget ratio was measured)"
+                    if telemetry_available is False
+                    else ""
+                )
+                + "; the Step 12 acceptance run confirms it."
+            )
+        else:
+            fit_state = (
+                "The reduced config was NOT run here (empirical same-config telemetry is "
+                f"{baseline.get('source', 'unavailable')}); the Step 12 acceptance run confirms "
+                "the reduced config on the delivered flags."
+            )
         reason = (
-            f"Capacity-locked to the reduced tier + `{flags}`. Empirical same-config telemetry "
-            f"is {baseline.get('source', 'unavailable')} ({baseline.get('note', '')}); the Step 12 "
-            "acceptance run confirms the reduced config on the delivered flags. No lossless tuning "
-            "headroom is claimed without a same-config sample."
+            f"Capacity-locked to the reduced tier + `{flags}`. {fit_state} "
+            f"({baseline.get('note', '')}). No lossless tuning headroom is claimed without a "
+            "same-config sample."
         )
 
     return {
@@ -293,6 +313,8 @@ def choose_config(candidates: list[dict[str, Any]], cfg: dict[str, Any], baselin
             "reduced_peak_memory_budget_ratio": ratio,
             "reduced_peak_memory_used_mib": peak_mib,
             "reduced_run_status": baseline.get("reduced_run_status"),
+            "reduced_run_succeeded": baseline.get("reduced_run_succeeded"),
+            "telemetry_available": baseline.get("telemetry_available"),
             "note": baseline.get("note") or baseline.get("error"),
         },
         "fastest_observed_candidate": fastest,
