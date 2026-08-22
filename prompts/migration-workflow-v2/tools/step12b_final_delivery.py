@@ -148,7 +148,14 @@ docker start "comfyui-${{TASK_ID}}"
 def render_deployment_guide(bundle: dict[str, Any]) -> str:
     asset_rows = [["Requested asset", "Resolved path"], ["---", "---"]]
     for row in bundle["asset_rows"]:
-        asset_rows.append([row.get("requested_asset", row.get("asset", "")), row.get("resolved_path", "")])
+        # 01-assets.csv (written by src/server/assetAcquisition.ts) uses the headers
+        # asset_name, requested_name, resolved_path, source, state, staged_path — NOT
+        # requested_asset/asset. Reading the old keys rendered a blank "Requested asset"
+        # column for every real delivery. Prefer the true headers, keep the old ones as
+        # last-resort fallbacks for any legacy ledger.
+        name = row.get("asset_name") or row.get("requested_name") or row.get("requested_asset") or row.get("asset", "")
+        path = row.get("resolved_path") or row.get("staged_path", "")
+        asset_rows.append([name, path])
 
     node_rows = [["Custom node", "Location"], ["---", "---"]]
     for row in bundle["custom_node_rows"]:
@@ -195,11 +202,20 @@ stand up a working ComfyUI service and validate the migrated workflow.
 """
 
 
+# Frontend-only node types have NO Python backend class: they never register in
+# /object_info and are never submitted in an API prompt. Diffing workflow node types
+# against /object_info must exclude them, or a delivery that is actually complete gets
+# a false `missing_node_types` -> false hard_stop (this workflow's MarkdownNote did).
+FRONTEND_ONLY_NODES = {"MarkdownNote", "Note", "Reroute", "PrimitiveString", "PrimitiveBoolean"}
+
+
 def build_dry_run_verification(bundle: dict[str, Any], api_url: str) -> dict[str, Any]:
     system_stats, system_error = http_json(f"{api_url}/system_stats")
     object_info, object_error = http_json(f"{api_url}/object_info")
     object_keys = set(object_info.keys()) if object_info else set()
-    missing_node_types = [t for t in bundle["node_types"] if t not in object_keys]
+    missing_node_types = [
+        t for t in bundle["node_types"] if t not in object_keys and t not in FRONTEND_ONLY_NODES
+    ]
     return {
         "api_url": api_url,
         "system_stats_reachable": system_stats is not None,
