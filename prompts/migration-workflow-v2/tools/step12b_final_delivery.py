@@ -86,8 +86,13 @@ def collect_final_delivery(workspace: Path) -> dict[str, Any]:
         "workspace": str(workspace),
         "bundle_dir": str(bundle_dir),
         "task_id": task_id,
-        "comfy_root": step05["comfy_root"],
-        "comfy_commit": step05["repo"]["commit"],
+        # Step 05's summary is agent-written and inconsistent: some runs emit `comfy_root`,
+        # others only `comfyui_root`; `repo.commit` may be absent for a simpler pipeline.
+        # A hard step05["comfy_root"] / step05["repo"]["commit"] KeyError'd the whole tool
+        # (seen live on a single-output workflow) and forced a manual bypass. Degrade
+        # gracefully instead — the delivery guide is best-effort context, not a gate.
+        "comfy_root": step05.get("comfy_root") or step05.get("comfyui_root", ""),
+        "comfy_commit": (step05.get("repo") or {}).get("commit", "unknown"),
         "runtime": runtime,
         "docker_image": docker_image,
         "api_url": api_url,
