@@ -62,20 +62,20 @@ const MAIN_GRAPH = {
 };
 
 describe("mainSmokeValidatedNodeTypes (single-output main smoke)", () => {
-  it("validates the terminal output's whole subgraph when the smoke produced output", () => {
-    const types = mainSmokeValidatedNodeTypes({ output_files: [{ node_id: "52", type: "text" } as never] }, MAIN_GRAPH);
-    expect(types).toEqual(
-      new Set(["PreviewAny", "llama_cpp_instruct_adv", "LoadImage", "llama_cpp_model_loader", "llama_cpp_parameters"])
-    );
+  const ALL = new Set(["LoadImage", "llama_cpp_model_loader", "llama_cpp_parameters", "llama_cpp_instruct_adv", "PreviewAny"]);
+
+  it("validates the WHOLE graph when classification is pass (output_files null/absent)", () => {
+    // The real, brittle case: agent wrote classification:"pass" but output_files:null.
+    expect(mainSmokeValidatedNodeTypes({ classification: "pass", output_files: null }, MAIN_GRAPH)).toEqual(ALL);
+    expect(mainSmokeValidatedNodeTypes({ classification: "PASS" }, MAIN_GRAPH)).toEqual(ALL);
   });
 
-  it("records NOTHING when the smoke produced no output (did not pass)", () => {
-    expect(mainSmokeValidatedNodeTypes({ output_files: [] }, MAIN_GRAPH).size).toBe(0);
+  it("also passes on non-empty output_files (fallback signal)", () => {
+    expect(mainSmokeValidatedNodeTypes({ output_files: [{ node_id: "52" } as never] }, MAIN_GRAPH)).toEqual(ALL);
+  });
+
+  it("records NOTHING when the smoke did not pass", () => {
+    expect(mainSmokeValidatedNodeTypes({ classification: "fail", output_files: [] }, MAIN_GRAPH).size).toBe(0);
     expect(mainSmokeValidatedNodeTypes({}, MAIN_GRAPH).size).toBe(0);
-  });
-
-  it("tolerates numeric node_id", () => {
-    const types = mainSmokeValidatedNodeTypes({ output_files: [{ node_id: 52 } as never] }, MAIN_GRAPH);
-    expect(types.has("llama_cpp_instruct_adv")).toBe(true);
   });
 });

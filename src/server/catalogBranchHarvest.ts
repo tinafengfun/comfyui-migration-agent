@@ -76,28 +76,38 @@ export function branchValidatedNodeTypes(summary: Step07Summary, graph: PromptGr
   return types;
 }
 
-/** 07-main-smoke-evidence.json: a single whole-graph smoke (single-output workflow). */
+/**
+ * 07-main-smoke-evidence.json: a single whole-graph smoke (single-output workflow).
+ * The file is AGENT-WRITTEN and its shape varies run to run (`output_files` may be a
+ * list, null, or absent; `executed_nodes` may be an object or a free-text string), so
+ * the only stable pass signal is the agent's `classification` verdict — with a
+ * produced-output fallback.
+ */
 export interface MainSmokeEvidence {
-  /** Output artifacts produced by the run; non-empty ⟺ the smoke passed. */
-  output_files?: Array<{ node_id?: string | number }>;
+  /** Agent verdict for the whole-graph smoke, e.g. "pass". */
+  classification?: string;
+  /** Output artifacts produced by the run (when the agent populated it). */
+  output_files?: Array<{ node_id?: string | number }> | null;
 }
+
+const MAIN_SMOKE_PASS = new Set(["pass", "passed", "cache_assisted_pass"]);
 
 /**
  * A workflow with a SINGLE output node makes Step 07 run one whole-graph "main
  * smoke" (07-main-smoke-evidence.json) instead of per-branch smokes — so there is no
- * 07-branch-smoke-summary.json to harvest. Treat each produced output file's node as
- * one SUCCESSFUL branch and reuse the exact branch-subgraph gate: a main smoke is
- * "passed" iff it produced at least one output (the same evidence the agent uses),
- * and then every node on that output's dependency subgraph is validated. Keeps the
- * "truly tested fresh on XPU this task" guarantee (fresh per-task container) identical
- * to the multi-branch path.
+ * 07-branch-smoke-summary.json to harvest. A main smoke runs the ENTIRE graph, so on a
+ * pass every node in the graph executed successfully → every class_type is validated.
+ * Pass is read from the agent's `classification` (stable) or a non-empty `output_files`
+ * (fallback). Keeps the "truly tested fresh on XPU this task" guarantee (fresh per-task
+ * container) identical to the multi-branch path; a non-pass records nothing.
  */
 export function mainSmokeValidatedNodeTypes(evidence: MainSmokeEvidence, graph: PromptGraph): Set<string> {
-  const outputs = evidence?.output_files ?? [];
-  if (!outputs.length) return new Set(); // no output ⟹ did not pass ⟹ record nothing
-  const branch_summaries: BranchSummary[] = [];
-  for (const o of outputs) {
-    if (o?.node_id != null) branch_summaries.push({ branch: `node-${o.node_id}`, status: "passed" });
+  const cls = typeof evidence?.classification === "string" ? evidence.classification.toLowerCase() : "";
+  const producedOutput = Array.isArray(evidence?.output_files) && evidence.output_files.length > 0;
+  if (!MAIN_SMOKE_PASS.has(cls) && !producedOutput) return new Set(); // did not pass ⟹ record nothing
+  const types = new Set<string>();
+  for (const node of Object.values(graph)) {
+    if (node?.class_type) types.add(node.class_type);
   }
-  return branchValidatedNodeTypes({ branch_summaries }, graph);
+  return types;
 }
