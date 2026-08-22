@@ -48,6 +48,7 @@ Each improvement in `13-agent-improvement.json` must include:
   "category": "apply_now_phase1_contract | apply_now_step_prompt_skill | deterministic_tool_candidate | phase2_supervisor_router | phase3_split_runner | workflow_specific_do_not_generalize",
   "target_files": [],
   "root_cause": "",
+  "evidence": [],
   "proposed_change": "",
   "approval_required": true,
   "required_validation": [],
@@ -55,7 +56,20 @@ Each improvement in `13-agent-improvement.json` must include:
 }
 ```
 
-`13-playbook-patch-plan.md` must group items by risk tier. For low-risk items, include ready-to-apply diff snippets when safe. For medium-risk items, include the exact human approval question. For high-risk items, include required test/build commands and review notes.
+## Verification requirement (mandatory for medium and high risk)
+
+Do NOT propose a `medium_prompt_skill_contract` or `high_backend_tool_behavior` change from a symptom alone. Before you record such an item you MUST verify the root cause against the CURRENT source and fill `evidence` with concrete, checkable citations:
+
+- **Read the actual target file** and cite the exact `path:line` you are diagnosing. If the change concerns an artifact (e.g. "reads `01-acquisition-summary.json`"), `grep` the repo to confirm which code PRODUCES and which CONSUMES that artifact, and cite both. Do not assert a file/field is "wrong" or "missing" without having opened the producer.
+- **Never reference a file, artifact, field, or flag that you have not confirmed exists.** Inventing a plausible-sounding input (or naming the wrong file for a behavior) is the most common failure of this step.
+- **Do not "fix" code that is already correct.** Confirm the buggy behavior is actually in the cited lines (run the tool, or trace it) — not merely consistent with the symptom.
+- **A proposed rule must not weaken a safety check.** State explicitly what the change could make WORSE (e.g. marking an over-budget run as validated, shipping a blank field) and why it does not.
+
+`evidence` is an array of strings, each a `path:line — what it shows` citation backing `root_cause`. An item whose `evidence` is empty or uncheckable must be downgraded to `low_risk_doc_only` (a suggestion to investigate) or dropped — it is not an approved-ready high/medium proposal.
+
+This requirement exists because a real Step 13 pass emitted six `high_backend_tool_behavior` items that were later refuted line-by-line: every one was misdiagnosed — it named a nonexistent input file (`00-step-job.json`), demanded reading the wrong artifact (the mandated `01-acquisition-summary.json` swapped for a CSV that lacks its aggregate fields), "fixed" history parsing that was already correct repo-wide, targeted the wrong file for a telemetry change (`taskStateLedger.ts`, which has nothing to do with telemetry), and proposed one rule that would have falsely marked an over-budget (thrash-survival) run as a clean VRAM fit. Symptom-driven proposals that skip code verification waste the human approval gate and are dangerous at the high tier.
+
+`13-playbook-patch-plan.md` must group items by risk tier. For low-risk items, include ready-to-apply diff snippets when safe. For medium-risk items, include the exact human approval question. For high-risk items, include the `evidence` citations plus required test/build commands and review notes.
 
 Leave `apply_status` at `patch_plan_only` for every item you want a human to consider (the default) -- do not try to seek approval yourself via `ask_user`. The backend automatically gates the task right after this step's session ends if any item is still `patch_plan_only`, asking the human which ids to approve; it records the answer as `approved_to_apply`/`do_not_apply` per item and only then completes this step. A human later runs `scripts/apply-agent-improvements.mts` to apply `approved_to_apply` items inside an isolated git worktree (which then moves to `awaiting_merge_review`, and finally `applied` once a human merges) -- nothing is ever applied, committed, or merged automatically.
 
