@@ -1,5 +1,15 @@
 #!/usr/bin/env python3
-"""Convert and validate a ComfyUI workflow API prompt for Step 06."""
+"""Convert and validate a ComfyUI workflow API prompt for Step 06.
+
+Dependency contract: this tool performs live ComfyUI validation (it imports
+``server``/``nodes``/``execution`` and thus torch) against the checkout given by
+``--comfy-root``. It therefore REQUIRES a torch-enabled ComfyUI on
+``--comfy-root`` and must be run under the project's torch-enabled ComfyUI venv
+(e.g. ``scripts/xpu-python.sh``). Running it under a plain ``python3`` without
+torch, or against a path that is not a ComfyUI checkout, is a configuration
+error; ``main()`` runs a preflight (see ``preflight_comfy_runtime``) that fails
+fast with an actionable message instead of a deep ImportError traceback.
+"""
 
 from __future__ import annotations
 
@@ -69,6 +79,45 @@ def setup_comfy_imports(comfy_root: Path) -> None:
     os.chdir(comfy_root)
     if str(comfy_root) not in sys.path:
         sys.path.insert(0, str(comfy_root))
+
+
+def preflight_comfy_runtime(comfy_root: Path) -> str | None:
+    """Fail fast (with a clear message) if the ComfyUI runtime is unusable.
+
+    The validation this tool performs imports ``server``/``nodes``/``execution``
+    (and, transitively, torch) from ``comfy_root``. When invoked without a
+    torch-enabled ComfyUI venv, or with a ``--comfy-root`` that is not a ComfyUI
+    checkout, those deep imports fail with an opaque ImportError that reads as a
+    tool bug. This preflight is a lightweight guard run in ``main()`` BEFORE any
+    validation: it returns ``None`` when the runtime looks importable, otherwise
+    a single actionable error string. It never raises and never touches
+    ``server``/``nodes``/``execution`` (importing them parses ComfyUI's own
+    ``cli_args``, which would choke on this tool's argv), so it cannot itself
+    leak a raw traceback.
+    """
+    hint = (
+        "Run this tool under the project's torch-enabled ComfyUI venv "
+        "(e.g. scripts/xpu-python.sh) or pass --comfy-root pointing at a "
+        "ComfyUI checkout with torch installed."
+    )
+    prefix = f"ComfyUI runtime not found or not importable at {comfy_root}"
+    if not comfy_root.exists():
+        return f"{prefix}: path does not exist. {hint}"
+    if not comfy_root.is_dir():
+        return f"{prefix}: path is not a directory. {hint}"
+    # Cheap structural check for a real ComfyUI checkout before any import.
+    for marker in ("main.py", "execution.py", "nodes.py"):
+        if not (comfy_root / marker).is_file():
+            return f"{prefix}: missing expected file '{marker}'. {hint}"
+    # Confirm the actual missing-dependency failure mode (a non-torch python)
+    # without triggering ComfyUI's argv-parsing module imports.
+    try:
+        import importlib
+
+        importlib.import_module("torch")
+    except Exception as exc:  # noqa: BLE001 - report, never propagate
+        return f"{prefix}: torch is not importable ({type(exc).__name__}: {exc}). {hint}"
+    return None
 
 
 def load_workflow(path: Path) -> dict[str, Any]:
@@ -740,6 +789,16 @@ def main() -> int:
     args = parser.parse_args()
 
     comfy_root = args.comfy_root.resolve()
+
+    # Preflight: this tool does live ComfyUI validation (imports
+    # server/nodes/execution + torch from comfy_root). Fail fast with an
+    # actionable message instead of a deep ImportError if the runtime is not
+    # importable, so callers switch to the torch-enabled venv rather than
+    # abandoning the tool.
+    preflight_error = preflight_comfy_runtime(comfy_root)
+    if preflight_error is not None:
+        print(f"ERROR: {preflight_error}", file=sys.stderr)
+        return 1
 
     # Resolve paths: CLI args are primary; --workspace task-state.json is a
     # convenience fallback (handles dict- and list-based step layouts).
