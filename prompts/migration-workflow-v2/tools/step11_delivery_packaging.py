@@ -14,14 +14,77 @@ from typing import Any
 from step07_branch_smoke import artifact_record, read_json, write_json
 
 
-WORKSPACE_DEFAULT = Path(
-    "/home/intel/tianfeng/comfy/demo/workspaces-zimage-v2/"
-    "zimage-v2-step00-20260518T134746Z"
-)
+# Generic ComfyUI localhost fallback (canonical default port) used only when a
+# real Step 05 environment summary did not record an API URL. NOT task-specific.
+DEFAULT_API_URL = "http://127.0.0.1:8188"
 
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def require_json(path: Path, step: str) -> Any:
+    """Read a mandated prerequisite artifact or hard-fail with a clear message.
+
+    A missing required input means an upstream step was never run; surface that
+    loudly instead of letting a KeyError explode deep inside rendering.
+    """
+    if not path.is_file():
+        raise SystemExit(
+            f"Step {step} artifact missing at {path} — run Step {step} first"
+        )
+    return read_json(path)
+
+
+def require_field(data: Any, keys: list[str], source: str) -> Any:
+    """Return a nested field from a prerequisite artifact or hard-fail loudly.
+
+    A valid Step 05 run always emits these fields; if one is absent the package
+    must NOT ship with a blank/"unknown" value — fail as a missing prerequisite.
+    """
+    cur = data
+    trail: list[str] = []
+    for key in keys:
+        trail.append(key)
+        if not isinstance(cur, dict) or key not in cur:
+            raise SystemExit(
+                f"{source} missing required field '{'.'.join(trail)}' — "
+                f"rerun the producing step before packaging"
+            )
+        cur = cur[key]
+    return cur
+
+
+def derive_task_name(step01: dict[str, Any], fallback: str) -> str:
+    """Task/workflow name from data in hand — never a hardcoded product name.
+
+    Prefer an explicit workflow-name field carried by the Step 01 acquisition
+    summary; otherwise fall back to the source workflow filename stem.
+    """
+    for key in ("workflow_name", "task_name", "name"):
+        val = step01.get(key)
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+    workflow = step01.get("workflow")
+    if isinstance(workflow, dict):
+        val = workflow.get("name")
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+    return fallback
+
+
+def substitute_node_ids(step01: dict[str, Any]) -> list[str]:
+    """Flatten source_node_ids across approved substitute assets (list or scalar)."""
+    ids: list[str] = []
+    for item in step01.get("approved_substitute_assets", []) or []:
+        if not isinstance(item, dict):
+            continue
+        nid = item.get("source_node_ids")
+        if isinstance(nid, (list, tuple)):
+            ids.extend(str(x) for x in nid if str(x).strip())
+        elif nid not in (None, ""):
+            ids.append(str(nid))
+    return ids
 
 
 def read_csv(path: Path) -> list[dict[str, str]]:
@@ -62,18 +125,27 @@ def collect_package(workspace: Path) -> dict[str, Any]:
         shutil.rmtree(delivery_dir)
     delivery_dir.mkdir(parents=True)
 
-    step01 = read_json(artifact_dir / "01-acquisition-summary.json")
-    step05 = read_json(artifact_dir / "05-environment-summary.json")
-    step06 = read_json(artifact_dir / "06-prompt-validation-summary.json")
-    step07 = read_json(artifact_dir / "07-branch-smoke-summary.json")
-    step08 = read_json(artifact_dir / "08-full-validation-summary.json")
-    step09 = read_json(artifact_dir / "09-tuning-analysis.json")
-    step10 = read_json(artifact_dir / "10-coverage-summary.json")
+    step01 = require_json(artifact_dir / "01-acquisition-summary.json", "01")
+    step05 = require_json(artifact_dir / "05-environment-summary.json", "05")
+    step06 = require_json(artifact_dir / "06-prompt-validation-summary.json", "06")
+    step07 = require_json(artifact_dir / "07-branch-smoke-summary.json", "07")
+    step08 = require_json(artifact_dir / "08-full-validation-summary.json", "08")
+    step09 = require_json(artifact_dir / "09-tuning-analysis.json", "09")
+    step10 = require_json(artifact_dir / "10-coverage-summary.json", "10")
 
     copied: list[Path] = []
     source_candidates = sorted((workspace / "source").glob("*.json"))
+    if not source_candidates:
+        raise SystemExit(
+            f"No source workflow found under {workspace / 'source'} — run Step 00/01 first"
+        )
     source_copy = copy_file(source_candidates[0], delivery_dir / "workflows" / "source-workflow.json")
     copied.append(source_copy)
+
+    # Task/workflow name and substitute-backed node IDs are derived from data in
+    # hand (Step 01 summary + source filename) — never a hardcoded product name.
+    task_name = derive_task_name(step01, source_candidates[0].stem)
+    substitute_ids = substitute_node_ids(step01)
 
     # Config-aware runnable-prompt selection. Under a reduced tier, the RUNNABLE API
     # prompt a customer POSTs/imports MUST be the REDUCED one -- shipping the full-size
@@ -150,11 +222,26 @@ def collect_package(workspace: Path) -> dict[str, Any]:
         if src.is_file():
             copied.append(copy_file(src, delivery_dir / "outputs" / src.name))
 
+    # Data-driven runtime-policy patch rows: iterate the already-copied 06b change
+    # ledger instead of hardcoding task-specific node/schema patches.
+    runtime_policy_changes: list[dict[str, Any]] = []
+    policy_changes_path = artifact_dir / "06b-runtime-policy-changes.json"
+    if policy_changes_path.is_file():
+        try:
+            loaded = read_json(policy_changes_path)
+        except (OSError, json.JSONDecodeError):
+            loaded = None
+        if isinstance(loaded, list):
+            runtime_policy_changes = [c for c in loaded if isinstance(c, dict)]
+
     asset_rows = read_csv(artifact_dir / "01-assets.csv")
     coverage_rows = read_csv(artifact_dir / "10-node-coverage.csv")
     coverage_counts = step10["coverage_counts"]
     package = {
         "generated_at": utc_now(),
+        "task_name": task_name,
+        "substitute_node_ids": substitute_ids,
+        "runtime_policy_changes": runtime_policy_changes,
         "workspace": str(workspace),
         "delivery_dir": str(delivery_dir),
         "source_workflow": str(source_copy),
@@ -162,12 +249,12 @@ def collect_package(workspace: Path) -> dict[str, Any]:
         "reduced_tier": reduced_tier,
         "vram_flags": vram_flags,
         "extra_model_paths": str(delivery_dir / "runtime" / "extra-model-paths.yaml"),
-        "comfy_root": step05["comfy_root"],
-        "comfy_commit": step05["repo"]["commit"],
-        "api_url": step05.get("api", {}).get("url", "http://127.0.0.1:8191"),
-        "python": step05["python_probe"]["executable"],
-        "xpu_device": step05["python_probe"]["torch_xpu_device_name"],
-        "torch_version": step05["python_probe"]["torch_version"],
+        "comfy_root": require_field(step05, ["comfy_root"], "Step 05 environment summary"),
+        "comfy_commit": require_field(step05, ["repo", "commit"], "Step 05 environment summary"),
+        "api_url": step05.get("api", {}).get("url", DEFAULT_API_URL),
+        "python": require_field(step05, ["python_probe", "executable"], "Step 05 environment summary"),
+        "xpu_device": require_field(step05, ["python_probe", "torch_xpu_device_name"], "Step 05 environment summary"),
+        "torch_version": require_field(step05, ["python_probe", "torch_version"], "Step 05 environment summary"),
         "asset_state": {
             "assets_total": step01["assets_total"],
             "assets_resolved_staged": step01["assets_resolved_staged"],
@@ -210,7 +297,7 @@ def collect_package(workspace: Path) -> dict[str, Any]:
             "extra_model_paths": str(delivery_dir / "runtime" / "extra-model-paths.yaml"),
             "validation_report": str(delivery_dir / "validation-report.md"),
             "manual_test_plan": str(delivery_dir / "customer-manual-test-plan.md"),
-            "api_url": step05.get("api", {}).get("url", "http://127.0.0.1:8191"),
+            "api_url": step05.get("api", {}).get("url", DEFAULT_API_URL),
             "claim_boundary": "Step 12 may validate GUI/manual acceptance only; it must not upgrade full-size or source-identical claims without new evidence.",
         },
         "copied_files": [rel(path, delivery_dir) for path in copied],
@@ -234,9 +321,10 @@ def render_readme(package: dict[str, Any]) -> str:
         if package.get("reduced_tier")
         else ""
     )
-    return f"""# Zimage v2 Intel XPU delivery package
+    task_name = package["task_name"]
+    return f"""# {task_name} Intel XPU delivery package
 
-This package contains the Step 11 engineering delivery artifacts for the Zimage v2 migration.
+This package contains the Step 11 engineering delivery artifacts for the {task_name} migration.
 
 ## Support statement
 
@@ -259,6 +347,8 @@ Customer GUI/manual acceptance remains Step 12 and is not claimed here. `workflo
 
 
 def render_deployment(package: dict[str, Any]) -> str:
+    flags = " ".join(package.get("vram_flags") or [])
+    flags_clause = f", and the validated launch flags `{flags}`" if flags else ""
     return f"""# Deployment guide
 
 ## Runtime baseline
@@ -277,7 +367,7 @@ def render_deployment(package: dict[str, Any]) -> str:
 1. Use the same ComfyUI checkout and XPU venv recorded above.
 2. Link or install the custom nodes listed in `ledgers/05-custom-node-links.csv`.
 3. Stage model assets as listed in `ledgers/01-assets.csv`.
-4. Start ComfyUI with the equivalent of `runtime/extra-model-paths.yaml`, `ONEAPI_DEVICE_SELECTOR=level_zero:0`, `PYTORCH_ENABLE_XPU_FALLBACK=1`, `--lowvram`, and `--reserve-vram 4`.
+4. Start ComfyUI with the equivalent of `runtime/extra-model-paths.yaml`, `ONEAPI_DEVICE_SELECTOR=level_zero:0`, and `PYTORCH_ENABLE_XPU_FALLBACK=1`{flags_clause}.
 5. Submit `workflows/runtime-policy-api-prompt.json` for API validation only.
 
 Do not use these steps to claim full-size/original-resolution capacity or source-identical asset fidelity.
@@ -358,8 +448,10 @@ Safe Step 12 claim wording must stay within: `{package["claim_boundary"]["suppor
 def render_migration_report(package: dict[str, Any]) -> str:
     validation = package["validation"]
     asset = package["asset_state"]
+    task_name = package["task_name"]
+    branch_total = validation["branch_total"]
     branch_rows = [["Branch / output node", "Validation level", "Result", "Evidence"], ["---", "---", "---", "---"]]
-    branch_rows.append(["12 output branches", "branch smoke", json.dumps(validation["branch_status_counts"], ensure_ascii=False), "`validation/07-branch-smoke-summary.json`"])
+    branch_rows.append([f"{branch_total} output branches", "branch smoke", json.dumps(validation["branch_status_counts"], ensure_ascii=False), "`validation/07-branch-smoke-summary.json`"])
     node_rows = [["Status", "Count", "Evidence"], ["---", "---", "---"]]
     for status, count in validation["coverage_counts"].items():
         node_rows.append([status, count, "`ledgers/10-node-coverage.csv`"])
@@ -368,7 +460,26 @@ def render_migration_report(package: dict[str, Any]) -> str:
         ["Resolved/staged", asset["assets_resolved_staged"], "`ledgers/01-assets.csv`"],
         ["Approved substitutes", asset["assets_approved_substitute_staged"], "`ledgers/01-assets.csv`"],
     ]
-    return f"""# Zimage v2 Intel XPU migration result
+    # Data-driven patch table: one row per recorded runtime-policy change.
+    policy_rows = [
+        ["Component", "Change type", "Required for", "Evidence"],
+        ["---", "---", "---", "---"],
+    ]
+    for change in package.get("runtime_policy_changes", []):
+        node_id = str(change.get("node_id", "")).strip()
+        class_type = str(change.get("class_type", "")).strip()
+        input_name = str(change.get("input_name", "")).strip()
+        parts = [p for p in (class_type, f"node {node_id}" if node_id else "", f"`{input_name}`" if input_name else "") if p]
+        component = " ".join(parts) if parts else "runtime-policy change"
+        required_for = str(change.get("reason") or "current runtime validation").strip()
+        policy_rows.append([component, "runtime policy", required_for, "`workflows/runtime-policy-changes.json`"])
+    # Always record the environment model-path wiring row.
+    policy_rows.append(["Model paths", "environment wiring", "staged assets", "`runtime/extra-model-paths.yaml`"])
+    # Node-provenance assumption row derived from approved substitutes (never literal IDs).
+    substitute_ids = package.get("substitute_node_ids") or []
+    substitute_label = ", ".join(substitute_ids) if substitute_ids else "the substitute-backed nodes"
+    retained_outputs = validation["step08_outputs"]
+    return f"""# {task_name} Intel XPU migration result
 
 ## Executive summary
 
@@ -401,11 +512,7 @@ def render_migration_report(package: dict[str, Any]) -> str:
 
 ## Patches and runtime policies
 
-| Component | Change type | Required for | Evidence |
-| --- | --- | --- | --- |
-| SeedVR2 device widgets | runtime policy | XPU validation | `workflows/runtime-policy-changes.json` |
-| SeedVR2 `cache_model` schema | runtime policy | current runtime validation | `workflows/runtime-policy-changes.json` |
-| Model paths | environment wiring | staged assets | `runtime/extra-model-paths.yaml` |
+{table(policy_rows)}
 
 ## Validation evidence
 
@@ -416,13 +523,13 @@ def render_migration_report(package: dict[str, Any]) -> str:
 | Full validation | `validation/08-full-validation-summary.json` | reduced full path | cache-assisted |
 | Tuning | `validation/09-tuning-analysis.json` | evidence normalization | no runtime change selected |
 | Coverage | `validation/10-coverage-summary.json` | node reconciliation | zero uncovered executable nodes |
-| Generated outputs | `outputs/` | reduced full path | 12 retained files |
+| Generated outputs | `outputs/` | reduced full path | {retained_outputs} retained files |
 
 ## Assumptions and boundary cases
 
 | Item | Assumption | Verified? | Evidence or required follow-up |
 | --- | --- | --- | --- |
-| Asset provenance | Nodes 63, 160, 14 use approved substitutes | Yes, bounded | `ledgers/01-assets.csv` |
+| Asset provenance | Nodes {substitute_label} use approved substitutes | Yes, bounded | `ledgers/01-assets.csv` |
 | Runtime path | API runtime-policy path only | Yes | `validation/08-full-validation-summary.json` |
 | Full-size capacity | Not claimed | No | requires human-approved Step 08 gate |
 | GUI/customer acceptance | Not claimed | No | Step 12 required |
@@ -486,7 +593,7 @@ def completion_decision(package: dict[str, Any]) -> dict[str, Any]:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--workspace", type=Path, default=WORKSPACE_DEFAULT)
+    parser.add_argument("--workspace", type=Path, required=True)
     args = parser.parse_args()
     workspace = args.workspace.resolve()
     artifact_dir = workspace / "artifacts"
@@ -518,6 +625,12 @@ def main() -> int:
         **package,
     }
     write_json(summary_path, summary)
+    substitute_ids = package.get("substitute_node_ids") or []
+    substitute_fidelity_clause = (
+        f"source-identical fidelity for nodes {', '.join(substitute_ids)}"
+        if substitute_ids
+        else "source-identical fidelity for substitute-backed assets"
+    )
     write_text(
         report_path,
         f"""# Step 11 Delivery Packaging
@@ -547,7 +660,7 @@ The main packaging risk is overclaiming delivery as customer-ready. The package 
 
 ## Human intervention standard
 
-Human approval is required before any delivery wording claims full-size/original-resolution capacity, source-identical fidelity for nodes 63/160/14, GUI/manual acceptance, or customer-ready quality.
+Human approval is required before any delivery wording claims full-size/original-resolution capacity, {substitute_fidelity_clause}, GUI/manual acceptance, or customer-ready quality.
 
 ## Toolization
 
