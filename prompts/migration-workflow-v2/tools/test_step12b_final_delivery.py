@@ -79,5 +79,28 @@ class FrontendOnlyExclusion(unittest.TestCase):
             self.assertIn(t, m.FRONTEND_ONLY_NODES)
 
 
+class DockerLaunchScript(unittest.TestCase):
+    def test_recorded_launch_command_is_source_of_truth(self):
+        cmd = "docker create --name comfyui-task-x --net=host --entrypoint /venv/py img /comfyui/main.py --port 8189"
+        script = m.render_docker_launch_script(_bundle(runtime="docker", launch_command=cmd))
+        self.assertIn(cmd, script)                      # recorded command replayed verbatim
+        self.assertIn("docker start", script)           # started if it was a `create`
+        self.assertNotIn("${VENV_PYTHON}", script)      # no dangling unassigned var
+        self.assertNotIn("--extra-model-paths-yaml", script)
+        self.assertNotIn("--port 8188", script)         # not the hardcoded fallback port
+
+    def test_fallback_template_assigns_venv_and_correct_flag(self):
+        # No launch_command recorded -> self-contained tar-copy fallback, but fixed:
+        # VENV_PYTHON assigned, correct port, correct --config flag.
+        script = m.render_docker_launch_script(
+            _bundle(runtime="docker", launch_command="", venv_python="/nfs_share/venv/bin/python3", comfyui_port="8190")
+        )
+        self.assertIn('VENV_PYTHON="/nfs_share/venv/bin/python3"', script)
+        self.assertIn("--port ${COMFYUI_PORT}", script)
+        self.assertIn('COMFYUI_PORT="8190"', script)
+        self.assertIn("--extra-model-paths-config", script)
+        self.assertNotIn("--extra-model-paths-yaml", script)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -13,7 +13,7 @@ CORRECTED diagnosis so a future pass doesn't repeat the original mistake.
 | Item | Original target | Disposition |
 | --- | --- | --- |
 | 13-001 | `step11_delivery_packaging.py` | Implemented (de-hardcode doc templates; the proposal's data-plumbing claims were false and dropped). |
-| 13-002 | `step12b_final_delivery.py` | Parts 2+3 implemented (`1d501f2`). Part 1 (launch script) → **deferred, below**. |
+| 13-002 | `step12b_final_delivery.py` | Parts 2+3 implemented (`1d501f2`); Part 1 (launch script) now implemented too — see "Resolved" below. |
 | 13-003 | `step09_performance_tuning.py` | Implemented in `step08` (correct owner); tri-state preserved, over-budget guard kept. |
 | 13-008 | `step06_prompt_validation.py` | Implemented as a preflight (not the proposed stdlib-only rewrite). |
 | 13-009 | `step08_full_validation.py` | Implemented (aggregate merge-forward; history-parsing part was a no-op and dropped). |
@@ -21,7 +21,22 @@ CORRECTED diagnosis so a future pass doesn't repeat the original mistake.
 
 ---
 
-## Deferred #1 — single source of truth for the delivery launch script (from 13-002 part 1)
+## RESOLVED — single source of truth for the delivery launch script (13-002 part 1)
+
+Implemented: `step12b_final_delivery.py::render_docker_launch_script()` now REPLAYS the
+recorded `05-environment-summary.json:launch_command` verbatim (teardown → recorded
+command → `docker start`) when present — that command is what the Step 05 agent actually
+ran, so it reproduces the exact container without re-deriving anything. The old
+hand-written docker template (dangling `${VENV_PYTHON}`, `--port 8188`,
+`--extra-model-paths-yaml`) is now only a FALLBACK for the rare case where no
+`launch_command` was recorded, and even that fallback now assigns `VENV_PYTHON`/port
+from Step 05 and uses `--extra-model-paths-config`. `12b-final-delivery-prompt.md` +
+skill updated to state the recorded command is the source of truth. This avoided the
+original proposal's dead end (it wanted fields step05's deterministic tool doesn't emit)
+by using the agent-recorded `launch_command` instead. The analysis below is retained for
+context.
+
+## (superseded analysis) single source of truth for the delivery launch script (from 13-002 part 1)
 
 **Corrected diagnosis.** `step12b_final_delivery.py::render_docker_launch_script()`
 hand-writes a docker launch template (hardcoded `--port 8188`, a dangling

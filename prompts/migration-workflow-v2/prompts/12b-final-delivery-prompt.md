@@ -16,7 +16,7 @@ Produce a self-contained, docker-based deployment guide that lets a human deploy
 
 ## Constraints
 
-1. Do not invent docker flags, ports, or paths. Read the actually-used launch command from `05-environment-summary.json`; if the node's `runtime` is `"docker"`, reuse the exact create/cp/start sequence documented in the Step 05 environment-deployment skill (container naming, GPU device flags, tar-based copy-in with excludes) rather than approximating it.
+1. Do not invent docker flags, ports, or paths. The **recorded `launch_command` in `05-environment-summary.json` is the source of truth** — `12-docker-launch.sh` replays it verbatim (teardown → recorded command → `docker start`), reproducing the exact deployment. Only when NO `launch_command` was recorded do you fall back to reconstructing the create/cp/start sequence documented in the Step 05 environment-deployment skill (container naming `comfyui-${TASK_ID}`, GPU device flags, tar-based copy-in) — never approximate ports/flags/entrypoint (the old hand-written template left `${VENV_PYTHON}` unassigned and used the wrong `--extra-model-paths-yaml` flag, so its container never started).
 2. The dry run must genuinely destroy and recreate the container (`docker rm -f "comfyui-${TASK_ID}"` first) — reusing Step 12's still-running instance does not prove the guide works from scratch.
 3. The migrated workflow file (`12-runtime-policy-gui-workflow.json`) must be copied into the guide's own bundle and referenced by a path inside it, not only by an absolute path into this task's private workspace.
 4. Do not claim the deployment guide is verified until the dry run's own HTTP checks (not your prose) confirm it.

@@ -92,6 +92,8 @@ def collect_final_delivery(workspace: Path) -> dict[str, Any]:
         "docker_image": docker_image,
         "api_url": api_url,
         "launch_command": launch_command,
+        "venv_python": step05.get("venv_python", ""),
+        "comfyui_port": str(step05.get("comfyui_port") or (api_url.rsplit(":", 1)[-1] if api_url.count(":") >= 2 else "8188")),
         "gui_workflow_path": str(gui_workflow_dst),
         "node_types": node_types,
         "asset_rows": asset_rows,
@@ -103,19 +105,52 @@ def collect_final_delivery(workspace: Path) -> dict[str, Any]:
 
 
 def render_docker_launch_script(bundle: dict[str, Any]) -> str:
+    launch_command = (bundle.get("launch_command") or "").strip()
+    task_id = bundle["task_id"]
+
+    # SINGLE SOURCE OF TRUTH: if Step 05 recorded the exact command that created the
+    # working container (05-environment-summary.json:launch_command), replay THAT —
+    # teardown -> recorded command -> start. This reproduces the real deployment
+    # verbatim and avoids drift from a hand-written template (the old docker template
+    # referenced an unassigned ${VENV_PYTHON}, a hardcoded :8188, and the wrong
+    # --extra-model-paths-yaml flag, so its container never started). `docker start`
+    # is a harmless no-op when the recorded command was `docker run -d`, and starts
+    # the container when it was `docker create`.
+    if launch_command:
+        return f"""#!/usr/bin/env bash
+set -euo pipefail
+
+# Reproduces the exact deployment recorded in 05-environment-summary.json. It requires
+# the same host prerequisites the recorded command references (the docker image and any
+# bind-mounted paths such as /nfs_share).
+docker rm -f "comfyui-{task_id}" 2>/dev/null || true
+
+{launch_command}
+
+docker start "comfyui-{task_id}" 2>/dev/null || true
+"""
+
     if bundle["runtime"] != "docker":
         return f"""#!/usr/bin/env bash
 set -euo pipefail
 
-# Bare-metal launch (recorded runtime: {bundle["runtime"]}).
-{bundle["launch_command"]}
+# Bare-metal launch — no launch_command was recorded in 05-environment-summary.json.
+# Provide the recorded runtime ({bundle["runtime"]}) launch here.
 """
+
+    # Fallback ONLY when no launch_command was recorded: a self-contained tar-copy
+    # snapshot. Sources VENV_PYTHON + port from Step 05 (the old template left
+    # ${{VENV_PYTHON}} unassigned) and uses the correct --extra-model-paths-config flag.
+    venv_python = bundle.get("venv_python") or "/nfs_share/venv-container-xpu/bin/python3"
+    port = bundle.get("comfyui_port") or "8188"
     return f"""#!/usr/bin/env bash
 set -euo pipefail
 
-TASK_ID="{bundle["task_id"]}"
+TASK_ID="{task_id}"
 DOCKER_IMAGE="{bundle["docker_image"]}"
 COMFYUI_ROOT="{bundle["comfy_root"]}"
+VENV_PYTHON="{venv_python}"
+COMFYUI_PORT="{port}"
 
 docker rm -f "comfyui-${{TASK_ID}}" 2>/dev/null || true
 
@@ -125,8 +160,8 @@ for gid in $RENDER_GIDS; do GROUP_ADD_FLAGS="${{GROUP_ADD_FLAGS}} --group-add ${
 
 docker create --name "comfyui-${{TASK_ID}}" --network host --device /dev/dri ${{GROUP_ADD_FLAGS}} \\
   --entrypoint "${{VENV_PYTHON}}" \\
-  "${{DOCKER_IMAGE}}" /comfyui/main.py --port 8188 --listen 127.0.0.1 \\
-    --extra-model-paths-yaml /comfyui/05-extra-model-paths.yaml \\
+  "${{DOCKER_IMAGE}}" /comfyui/main.py --port ${{COMFYUI_PORT}} --listen 127.0.0.1 \\
+    --extra-model-paths-config /comfyui/05-extra-model-paths.yaml \\
     --output-directory /comfyui/outputs
 
 STAGING=$(mktemp -d)

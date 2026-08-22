@@ -26,7 +26,7 @@ Use after Step 12 GUI/manual acceptance to produce the final, docker-based deplo
 
 ## Docker lifecycle reference
 
-Container create/cp/start/rm mechanics (naming convention, GPU device/group flags, tar-based copy-in with excludes, staging-directory workaround for `docker cp`'s no-create-destination limitation) are already fully documented in the Step 05 environment-deployment skill — reuse that exact sequence verbatim for the dry run and for the rendered `12-docker-launch.sh`. Do not re-derive or approximate these mechanics; deviating from the documented container name (`comfyui-${TASK_ID}`) breaks the orchestrator's own teardown tooling.
+The rendered `12-docker-launch.sh` and the dry run must reproduce the RECORDED deployment: when `05-environment-summary.json` carries a `launch_command` (the normal case), replay it verbatim (teardown → recorded command → `docker start`) — it is the single source of truth and always matches what actually ran. Only when no `launch_command` was recorded, fall back to the container create/cp/start/rm mechanics (naming convention, GPU device/group flags, tar-based copy-in with excludes, staging-directory workaround for `docker cp`'s no-create-destination limitation) documented in the Step 05 environment-deployment skill. Do not re-derive or approximate ports/flags/entrypoint; deviating from the documented container name (`comfyui-${TASK_ID}`) breaks the orchestrator's own teardown tooling.
 
 ## Common failure signatures
 
