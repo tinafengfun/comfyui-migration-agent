@@ -20,6 +20,7 @@ Use only after a baseline path works or a controlled failing path is defined.
 1. Freeze baseline and success criteria.
 2. Define one-variable or named-bundle candidates.
 3. Validate the harness before the expensive trials: queue submission, history capture, output discovery, telemetry parser, and cache detection must all produce usable evidence.
+   - **The `/prompt` API expects a FLAT `{node_id: {class_type, inputs}}` structure, not `{prompt: {...}}`.** If `reduced-runtime-policy-prompt.json` has a nested `prompt` wrapper, unwrap it before submission.
 4. Run repeatable trials with cold restarts or an explicit cache policy.
 5. Compare speed, memory, stability, output integrity, cached-node counts, and telemetry validity.
 6. Keep winner and rejected candidates with reasons.

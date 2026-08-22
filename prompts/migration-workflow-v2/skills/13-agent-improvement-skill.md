@@ -84,6 +84,10 @@ Leave `apply_status` at `patch_plan_only` for every item you want a human to con
 13-reflection.json
 ```
 
+## Phase 3 split-runner candidates
+
+Record candidate split-runners in `13-phase3-readiness.json` — portions of the monolithic run that could later become standalone tools or SDK runners. Recurring candidates seen so far: Step 06 prompt conversion as a standalone converter, Step 10 coverage reconciliation as a reusable tool, Step 12b final-delivery as a standalone docker-guide generator, and Steps 07-09 as a validation-runner cluster with a shared ComfyUI lifecycle.
+
 ## Reflection requirement
 
 `13-reflection.json` must include:

@@ -63,7 +63,7 @@ Use to create a reproducible Intel XPU ComfyUI baseline.
    "${VENV_PYTHON}" main.py \
      --port "${COMFYUI_PORT:-8188}" \
      --listen 127.0.0.1 \
-     --extra-model-paths-yaml "${WORKSPACE}/artifacts/05-extra-model-paths.yaml" \
+     --extra-model-paths-config "${WORKSPACE}/artifacts/05-extra-model-paths.yaml" \
      --output-directory "${WORKSPACE}/outputs" \
      <Intel XPU flags: --reserve-vram 1 (keep dynamic VRAM ENABLED — do NOT pass --disable-dynamic-vram — so the sequential fp8 offload/swap can free models between stages; do NOT pass --cpu-vae, VAE runs on XPU with auto-tiled fallback)>
    ```
@@ -83,7 +83,7 @@ Use to create a reproducible Intel XPU ComfyUI baseline.
          > /tmp/comfyui-${TASK_ID}.log 2>&1 &"
    ```
 
-   Then from the migration agent poll the **remote** API URL `${API_URL}/system_stats` until it responds (usually 10–60s). The local workspace path is not valid on the remote — skip `--extra-model-paths-yaml` and `--output-directory`. Outputs are fetched later via the `/view` and `/history` HTTP APIs from Steps 07/08.
+   Then from the migration agent poll the **remote** API URL `${API_URL}/system_stats` until it responds (usually 10–60s). The local workspace path is not valid on the remote — skip `--extra-model-paths-config` and `--output-directory`. Outputs are fetched later via the `/view` and `/history` HTTP APIs from Steps 07/08.
 
    Use `--listen 0.0.0.0` on the remote so the migration agent can reach it across the network. Do NOT use `--listen 127.0.0.1` for an ssh node — the agent's HTTP calls will time out.
 
@@ -120,7 +120,7 @@ Use to create a reproducible Intel XPU ComfyUI baseline.
      $(for m in "${MODEL_ROOTS[@]}"; do echo -n "-v ${m}:${m} "; done) \
      "${DOCKER_IMAGE}" /comfyui/main.py \
        --port "${COMFYUI_PORT:-8188}" --listen 127.0.0.1 \
-       --extra-model-paths-yaml /comfyui/05-extra-model-paths.yaml \
+       --extra-model-paths-config /comfyui/05-extra-model-paths.yaml \
        --output-directory /comfyui/outputs \
        <Intel XPU flags: --reserve-vram 1 ; keep dynamic VRAM enabled (no --disable-dynamic-vram) ; no --cpu-vae>
 
@@ -141,7 +141,7 @@ Use to create a reproducible Intel XPU ComfyUI baseline.
 
    **The exclude patterns must be anchored with `./` (top-level only).** An unanchored `--exclude=models` matches *any* directory named `models` anywhere in the tree — including the genuinely-needed source directory `comfy/ldm/models/` — and silently breaks the copy (confirmed live: this produced `ModuleNotFoundError: No module named 'comfy.ldm.models'`). `__pycache__` is the one exception left unanchored, since excluding it at every depth is actually intended.
 
-   (`--extra-model-paths-yaml`/`--output-directory` here are container-internal paths written into the copied tree, not the host workspace path — the host workspace isn't visible inside the container. `custom_nodes/` symlinks into the shared NFS tree resolve correctly inside the container because `model_roots` — which includes that same NFS mount — is bind-mounted at an identical path.)
+   (`--extra-model-paths-config`/`--output-directory` here are container-internal paths written into the copied tree, not the host workspace path — the host workspace isn't visible inside the container. `custom_nodes/` symlinks into the shared NFS tree resolve correctly inside the container because `model_roots` — which includes that same NFS mount — is bind-mounted at an identical path.)
 
    SSH (`kind=ssh`): wrap the same `docker create` / `docker cp` / `docker start` sequence over SSH, using the remote's `${REMOTE_COMFYUI_ROOT}` as the `docker cp` source and `--network host` so the existing remote `api_host:api_port` reachability assumption still holds. Use `--listen 0.0.0.0` inside the container command, same rationale as the bare-metal ssh flow above.
 
@@ -149,6 +149,7 @@ Use to create a reproducible Intel XPU ComfyUI baseline.
 
    ### Common notes (both kinds)
 
+   - ComfyUI 0.28 uses `--extra-model-paths-config`; older builds used `--extra-model-paths-yaml` — verify for your version.
    - `cd "${COMFYUI_ROOT}" &&` (local) or `cd '${REMOTE_COMFYUI_ROOT}' &&` (ssh) is load-bearing — without it, `from utils.install_util import ...` and other top-level imports can fail.
    - Record the exact launch command in `05-environment-summary.json` as `launch_command`, plus `api_url` (e.g. `http://172.16.114.200:8188`) and `node_kind` (`local` or `ssh`) so Steps 07/08 and the orchestrator's `killComfyUIForTask` know how to reach and tear down the server.
    - Subsequent steps (07, 08, 12) inherit this server; do not relaunch unless the process died.

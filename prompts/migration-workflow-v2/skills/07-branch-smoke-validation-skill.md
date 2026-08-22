@@ -28,6 +28,7 @@ Use after prompt validation and before full-size execution.
 8. Check boundary variants instead of assuming the "middle" case covers all cases.
 9. Verify output file paths exist and are non-empty.
 10. Record runtime, placement, dependency fixes, cache behavior, and gaps.
+    - **Wrapper generation must validate that the target node's input type matches the source node's output type.** If a node outputs metadata (`FLOAT`/`INT`, e.g. `VHS_VideoInfo`) but the wrapper expects `IMAGE`, skip the branch or use a type-appropriate wrapper.
 11. Preserve cold-start/cached-run differences. If `/free` or a server restart exposes OOM that did not appear in a cache-assisted run, keep both attempts and pass the boundary to Step 08/09.
 
 ## Reachability is checked automatically — never improvise a ComfyUI launch yourself

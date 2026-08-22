@@ -21,6 +21,7 @@ Use before any runtime result is interpreted.
 
 1. Convert graph to API prompt while preserving real inputs.
 2. Keep literal/widget-only nodes and package-specific controls.
+   - **`widgets_values` mapping is node-schema-specific — never assume a fixed positional layout.** For `BerniniConditioning` the positional list maps index `0=width`, `1=height`, `2=length`, `3=batch_size`, `4=ref_max_size`; mapping these to the wrong input names produces wrong video dimensions and failed smokes. Conversely, some nodes (e.g. `VHS_*`) serialize `widgets_values` as a DICT (`{"video": ..., "frame_load_cap": ...}`) rather than a positional list — the converter must detect a dict and map by key name, not by position.
 3. Sanitize rgthree Image Comparer nodes: detect Image Comparer by class name, clear `widgets_values` for disconnected inputs (image_a, image_b when no link exists). Set to `[None]` instead of leaving empty arrays.
 3. Normalize selector-backed names to basenames.
 4. Initialize custom nodes through the same startup path as ComfyUI when validating offline; route-dependent custom nodes may require `PromptServer.instance`.

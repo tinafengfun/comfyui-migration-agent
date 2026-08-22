@@ -53,6 +53,7 @@ The runtime docker node's custom-node checkout is the authoritative source for s
    - **workflow/runtime policy blocker**: source might support a safer mode, but the workflow widget chooses an unsafe CUDA-only device/backend
    - **feature-development gap**: source architecture needs new XPU support before native validation can proceed
 8. Emit an all-node source-audit table. Core and dependency-free nodes can be classified as no source change expected, but they must still appear.
+   - **Precheck must verify every node type in the source workflow appears in `03-node-inventory.csv`.** A node type not in the inventory is a gap to investigate before proceeding.
 9. Redact token-like values from workflow widget evidence before writing artifacts.
 10. Include a `completion_decision` block and Toolization block.
 11. **CUDA-ism scan (mandatory checklist item).** For every custom-node source root under audit, grep both the `__init__`/class-init code AND the runtime forward loop (the `forward()` method and any helper it calls during sampling) for the following CUDA-isms:

@@ -23,6 +23,7 @@ Use before publication or after any major validation pass.
 3. Extract executed nodes from full-run evidence.
 4. Extract executed nodes from smoke evidence.
 5. Normalize evidence shape before classification; history/summary artifacts may represent outputs as node-keyed maps or lists.
+   - **ComfyUI 0.28 `/history/{prompt_id}` returns `{prompt, outputs, status:{status_str, completed, messages:[...]}, meta}`.** `execution_cached` data lives in a message entry `["execution_cached", {"nodes":[...]}]`, NOT a top-level field — parse `status.messages` to find cached/executed nodes.
 6. Separate executed evidence, cached evidence, and output-only evidence.
 7. Exclude structural nodes from runtime-gap claims only after documenting why they are structural or disconnected.
 8. Classify every executable node.

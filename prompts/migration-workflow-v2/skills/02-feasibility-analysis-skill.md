@@ -119,6 +119,8 @@ custom_nodes_xpu_unknown:
 
 Prefer Step 01's current ledger over Step 00's preflight summary. A deterministic precheck that reads only Step 00 is not enough; Zimage showed that it can pause at the correct gate while dropping the actual Step 01 gap list from the report.
 
+Precheck must read `01-assets.csv` and `01-custom-nodes.md` directly, not only the `00-intake-preflight.md` markers. If Step 01 resolved an asset that Step 00 flagged missing, the gap is closed.
+
 ## Hidden runtime asset pre-stage contract
 
 Some custom nodes (e.g. IndexTTS2Run) load their model suite dynamically from their own Python code (hardcoded `os.path.join(model_dir, ...)` calls), not through a ComfyUI model-loader widget — Step 00/01's static workflow-JSON scan cannot see these. When you identify one of these AND get explicit human sign-off during interactive risk review to defer its acquisition (not "acquire it now yourself" — Step 02 must not provider-search/download/clone), write a sibling file `02-hidden-runtime-assets.json` next to `02-feasibility.md` so deterministic backend code can start downloading it in the background immediately, instead of leaving the entire multi-GB fetch to happen live inside Step 05's own session (this is exactly what made a real Step 05 run slow enough to risk a session timeout):
