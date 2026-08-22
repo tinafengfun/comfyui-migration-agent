@@ -164,6 +164,27 @@ describe("orchestrator.catalogValidateAndWriteBack — option B (branch harvest 
     expect(rec!.validation?.[0]).toMatchObject({ nodeType: "llama_cpp_model_loader", passed: true, taskId: task.id });
   });
 
+  it("SYNTHESIZES from the workflow GRAPH when object_info is absent (simpler pipelines)", async () => {
+    process.env.XPU_CATALOG_ENABLED = "1";
+    // No agent ledger AND no 05-object_info_workflow_nodes.json — only the graph + smoke.
+    const { orch, task } = await makeOrchestratorTask({ withLedger: false });
+    await fs.writeFile(
+      path.join(task.artifactPath, "06b-runtime-policy-prompt.json"),
+      JSON.stringify({ prompt: { "3": { class_type: "llama_cpp_model_loader", inputs: {} }, "16": { class_type: "SaveImage", inputs: { x: ["3", 0] } } } }),
+      "utf8"
+    );
+    await fs.writeFile(
+      path.join(task.artifactPath, "07-branch-smoke-summary.json"),
+      JSON.stringify({ branch_summaries: [{ branch: "node-16", status: "passed" }] }),
+      "utf8"
+    );
+    await callWriteBack(orch, task);
+    // Derived llama_cpp from the graph's class_type + registry (no object_info needed).
+    const rec = catalogStore.getByKey("lihaoyun6__comfyui-llama-cpp_vlm");
+    expect(rec, "llama_cpp synthesized from graph").toBeTruthy();
+    expect(rec!.tier).toBe("candidate");
+  });
+
   it("synthesis still honors the fresh-tested gate (unattributed + failed-branch nodes excluded)", async () => {
     process.env.XPU_CATALOG_ENABLED = "1";
     const { orch, task } = await makeOrchestratorTask({

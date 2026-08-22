@@ -70,7 +70,7 @@ import {
 } from "./xpuCatalogWriteBack";
 import type { NodeVerdict } from "./nodeValidationRunner";
 import { branchValidatedNodeTypes, mainSmokeValidatedNodeTypes, type PromptGraph } from "./catalogBranchHarvest";
-import { synthesizeLedgerNodes, parseWorkflowNodeTypes, type ProvenanceMap } from "./deployLedgerSynthesis";
+import { synthesizeLedgerNodes, parseWorkflowNodeTypes, type ProvenanceMap, type WorkflowNodeType } from "./deployLedgerSynthesis";
 import { catalogEnabled } from "./xpuCatalogClient";
 import {
   appendAnswerDefault,
@@ -3899,9 +3899,17 @@ export class MigrationOrchestrator {
     } catch {
       // fall through to the default artifact name
     }
-    const candidates = [variantPromptPath, path.join(task.artifactPath, "06b-runtime-policy-prompt.json")].filter(
-      (p): p is string => Boolean(p)
-    );
+    // Prefer the runtime-policy prompt; fall back to the source-preserving prompt and
+    // finally the actual smoke prompt. A simple/single-output workflow's pipeline emits
+    // 06-source-preserving-prompt.json + 07-main-smoke-prompt.json rather than the
+    // 06b-runtime-policy-prompt.json a full WAN2.2 run produces, so without these
+    // fallbacks the graph would be empty and the catalog harvest would find nothing.
+    const candidates = [
+      variantPromptPath,
+      path.join(task.artifactPath, "06b-runtime-policy-prompt.json"),
+      path.join(task.artifactPath, "06-source-preserving-prompt.json"),
+      path.join(task.artifactPath, "07-main-smoke-prompt.json")
+    ].filter((p): p is string => Boolean(p));
     for (const p of candidates) {
       try {
         const doc = JSON.parse(await fs.readFile(p, "utf8"));
@@ -3924,15 +3932,30 @@ export class MigrationOrchestrator {
   private async synthesizeDeployLedger(
     task: MigrationTask
   ): Promise<{ ledger: CatalogDeployLedger; unattributed: string[] } | undefined> {
-    let objectInfo: unknown;
+    let types: WorkflowNodeType[] | undefined;
     try {
-      objectInfo = JSON.parse(
+      const objectInfo = JSON.parse(
         await fs.readFile(path.join(task.artifactPath, "05-object_info_workflow_nodes.json"), "utf8")
       );
+      types = parseWorkflowNodeTypes(objectInfo);
     } catch {
-      return undefined;
+      // Simpler pipelines don't emit the aggregated object_info file; derive the
+      // workflow's class_types straight from the API graph instead — registry
+      // attribution (llama_cpp/VHS) matches on the class_type alone, so python_module
+      // isn't required for those. (Nodes needing git-provenance attribution still fall
+      // through to harvestContainerGitProvenance below.)
+      const graph = await this.loadPromptGraph(task);
+      const seen = new Set<string>();
+      types = [];
+      for (const node of Object.values(graph)) {
+        const ct = node?.class_type;
+        if (ct && !seen.has(ct)) {
+          seen.add(ct);
+          types.push({ nodeType: ct });
+        }
+      }
     }
-    const types = parseWorkflowNodeTypes(objectInfo);
+    if (!types.length) return undefined;
     const provenance = await this.harvestContainerGitProvenance(task).catch(() => ({}) as ProvenanceMap);
     const { nodes, unattributed } = synthesizeLedgerNodes(types, provenance);
     return { ledger: { nodes }, unattributed };
