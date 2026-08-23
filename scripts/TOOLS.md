@@ -132,3 +132,26 @@ omitted → runs locally. `--container` resolves the host PID via `docker inspec
 unresponsive, so the monitor never queries the server. `--vram-budget-mib` flags (does not
 act on) a VRAM breach. `--json` streams one NDJSON row per sample; default prints a table
 plus a `summary:` line counting samples with increasing CPU time.
+
+---
+
+## ensure-manager-offline.sh — stop ComfyUI-Manager blocking startup on proxy-only hosts
+
+```
+scripts/ensure-manager-offline.sh [comfyui-core-path]   # default /nfs_share/comfyui-core
+```
+
+Forces ComfyUI-Manager into `network_mode = offline` in a comfyui-core (both
+`user/__manager/config.ini` and `custom_nodes/comfyui-manager/config.ini`). Idempotent;
+uses sudo when the config is root-owned (`SUDO_PW` overrides the default). Run it when
+provisioning a fresh `/nfs_share/comfyui-core`, or any time a core reverts to
+`network_mode = public`.
+
+WHY: Manager defaults to `public` and makes synchronous CNR/version network calls on
+startup. On the Intel proxy-only network, a container launched WITHOUT proxy env has
+those calls hang on slow TCP retries, blocking ComfyUI's asyncio event loop — the server
+accepts connections but never responds. This wedged the Step-12b delivery dry-run (its
+generated launch script carried no proxy env). A migrated/delivered runtime never needs
+Manager's network, so offline is safe + deterministic. All containers inherit the core's
+config (bind-mount for the main container, tar-copy for the dry-run + delivered bundle),
+so setting it once on the core fixes every path.
