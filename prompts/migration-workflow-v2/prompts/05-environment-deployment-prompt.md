@@ -31,7 +31,7 @@ Prepare a reproducible fresh ComfyUI Intel XPU environment for migration validat
 8. Do not edit the canonical source workflow. Generated model-path config, symlink maps, launch logs, and runtime-policy variants must be separate artifacts with provenance.
 9. Distinguish backend nodes from frontend-only LiteGraph nodes. Backend nodes must be present in `/object_info`; frontend-only nodes may be source-verified from web extension registration evidence and must not be silently dropped.
 10. If Step 05 installs a dependency, record the exact package, reason, command/log, and whether it was a portable minimal install or a skipped CUDA-only dependency.
-11. Check the ComfyUI server log for Comfyroll CR XY registration errors (500 on /free endpoint). If Comfyroll nodes exist in the installation but the workflow does not use any, document the errors as a non-blocking cosmetic issue. Do not remove, patch, or bypass Comfyroll nodes.
+11. Treat known-noisy custom-node registration errors in the server log (e.g. Comfyroll CR XY's 500 on the `/free` endpoint) as non-blocking cosmetic issues when the workflow does not use those nodes: document them, and do not remove, patch, or bypass the offending nodes.
 
 ## Steps
 
@@ -47,7 +47,7 @@ Prepare a reproducible fresh ComfyUI Intel XPU environment for migration validat
 6. Apply required registration patches or workflow runtime policies, and record them as patches, not as runtime success.
 7. Launch with Intel-XPU-safe flags and capture startup logs.
 8. Verify node registration through a machine-readable source such as `/object_info`; do not rely only on "server started".
-9. For SeedVR2 nodes (e.g. `SeedVR2`, `SeedVR2Upscaler`), inspect their widget option lists in `/object_info`. Confirm that `attention_mode` includes `'xpu'` as a valid option, and `device` includes `'xpu:0'` as a valid option. Record the full set of available widget options in the environment report. If GPU options list CUDA-only values (`cuda`, `cuda:0`) but lack the corresponding XPU value, flag this as a known environment gap.
+9. For any registered node whose widgets expose a device or attention/backend selector (`SeedVR2` / `SeedVR2Upscaler` are one example), inspect its widget option lists in `/object_info`. Confirm an XPU value is present (e.g. a `device` selector includes `'xpu'`/`'xpu:0'`; an `attention_mode`/backend selector includes `'xpu'`). Record the available options in the environment report. If such a widget lists only CUDA values (`cuda`, `cuda:0`) and lacks the corresponding XPU value, flag it as a known environment gap.
 10. Source-verify frontend-only workflow nodes that are intentionally absent from `/object_info`.
 11. Record actual software and driver versions; use `unknown` rather than guessed versions when a value cannot be verified.
 12. End with a `completion_decision` block containing `status`, checked success criteria, evidence artifacts, unresolved gaps, any human-gate prompt, and `next_step_allowed`.
@@ -114,7 +114,7 @@ Create an environment report with:
 - model path config (including any discovered `extra_model_paths.yaml` on the target)
 - effective model directory layout (resolved paths per `extra_model_paths.yaml`)
 - startup/registration result
-- API evidence, such as `/system_stats` and `/object_info` excerpts or saved JSON, including SeedVR2 widget options (attention_mode, device) with XPU values validated
+- API evidence, such as `/system_stats` and `/object_info` excerpts or saved JSON, including — for any node exposing a device/attention-backend selector widget — its options with XPU values validated
 - node-registration table that marks backend registered, frontend-only source-verified, missing, or not checked
 - model wiring table for every staged Step 01 asset
 - local patches applied during environment setup
@@ -131,7 +131,7 @@ Also stop before prompt validation if:
 
 1. `torch.xpu.is_available()` is false on an XPU target
 2. ComfyUI starts on CPU or CUDA instead of the intended XPU device
-3. required backend target nodes are missing from `/object_info`, or SeedVR2 node widget options lack XPU-compatible values
+3. required backend target nodes are missing from `/object_info`, or a device/attention-backend selector widget on a required node lacks any XPU-compatible option value
 4. model paths are not visible from the active ComfyUI instance
 5. a registration patch is required but not recorded as a patch artifact
 6. a frontend-only source node cannot be verified from its web extension source

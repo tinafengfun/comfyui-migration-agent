@@ -28,7 +28,7 @@ Use this prompt when asking an implementation agent to run Step 7:
 - source workflow: <original_workflow.json>
 - validated API prompt: <06-or-06b-prompt.json>
 - branch map/topology: <03-workflow-topology.md 或 03-inventory.md>
-- ComfyUI endpoint: <http://127.0.0.1:8188>
+- ComfyUI endpoint: <api_url from Step 05 `05-environment-summary.json` — e.g. http://127.0.0.1:8188>
 - branch plan:
   1. <branch_slug>: target outputs <node_ids>, reduced settings <node.input=value>
   2. <branch_slug>: target outputs <node_ids>, reduced settings <node.input=value>
