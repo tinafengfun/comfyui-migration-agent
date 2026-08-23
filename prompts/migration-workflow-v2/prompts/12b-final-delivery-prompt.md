@@ -24,10 +24,10 @@ Produce a self-contained, docker-based deployment guide that lets a human deploy
 
 ## Steps
 
-1. Run `step12b_final_delivery.py --workspace <workspace>` (no `--dry-run-api-url` yet) to render `deployment-guide.md` and `12-docker-launch.sh` from the Step 00/01/05/11/12 artifacts.
+1. Run `python3 "$DRAFT_DOC_ROOT/migration-workflow-v2/tools/step12b_final_delivery.py" --workspace <workspace>` (no `--dry-run-api-url` yet) to render `deployment-guide.md` and `12-docker-launch.sh` from the Step 00/01/05/11/12 artifacts. (`DRAFT_DOC_ROOT` is exported in the environment; your cwd is the artifacts dir, so use this absolute path, not a bare filename.)
 2. Execute the generated `12-docker-launch.sh` verbatim via Bash — it starts with tearing down the existing container, then recreates and starts it fresh.
 3. Poll the relaunched service's `/system_stats` and `/object_info` until ready, then resubmit the already-accepted Step 08/12 prompt and poll `/history` for completion.
-4. Re-run `step12b_final_delivery.py --workspace <workspace> --dry-run-api-url <url>` — this performs its own HTTP checks and computes `completion_decision` from that evidence, not from your account of what happened.
+4. Re-run `python3 "$DRAFT_DOC_ROOT/migration-workflow-v2/tools/step12b_final_delivery.py" --workspace <workspace> --dry-run-api-url <url>` — this performs its own HTTP checks and computes `completion_decision` from that evidence, not from your account of what happened.
 5. If the dry run is clean, finalize `12b-final-delivery.md` and hand off. If not, treat it as a hard stop per below — do not paper over a failed dry run with prose claiming the guide is fine.
 
 ## Output
