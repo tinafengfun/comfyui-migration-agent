@@ -166,7 +166,7 @@ Use to create a reproducible Intel XPU ComfyUI baseline.
 Use the Step 05 collector when available. For `kind=ssh`, the `--api-url` must point at the remote node, and `--comfy-root` / `--venv` are local paths used only for evidence-reading (the tool does not SSH on its own — gather remote evidence via `ssh ... python3 -c "..."` or by reading `/system_stats` over HTTP):
 
 ```bash
-python3 ComfyUI/docs/draft/migration-workflow-v2/tools/step05_environment_readiness.py \
+python3 $DRAFT_DOC_ROOT/migration-workflow-v2/tools/step05_environment_readiness.py \
   --workspace <workspace> \
   --comfy-root <ComfyUI root> \
   --venv <ComfyUI root>/.venv-xpu \

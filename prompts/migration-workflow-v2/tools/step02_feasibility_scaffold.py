@@ -402,8 +402,8 @@ Full machine-readable table: `02-node-feasibility-accounting.csv`.
 - why_reusable: parses Step 00/01 artifacts, verifies coverage, generates feasibility report, summary JSON, all-node accounting, hardware probe, and manifest without touching runtime or workflow state.
 - safe_to_automate_now: yes
 - implementation_status: implemented
-- script_or_tool_path: `/home/intel/tianfeng/comfy/ComfyUI/docs/draft/migration-workflow-v2/tools/step02_feasibility_scaffold.py`
-- command_used: `python3 ComfyUI/docs/draft/migration-workflow-v2/tools/step02_feasibility_scaffold.py --workspace {summary["workspace"]} --probe-hardware`
+- script_or_tool_path: `$DRAFT_DOC_ROOT/migration-workflow-v2/tools/step02_feasibility_scaffold.py`
+- command_used: `python3 $DRAFT_DOC_ROOT/migration-workflow-v2/tools/step02_feasibility_scaffold.py --workspace {summary["workspace"]} --probe-hardware`
 - inputs: Step 00/01 artifacts and source workflow copy listed above.
 - outputs: `02-feasibility.md`, `02-feasibility-summary.json`, `02-node-feasibility-accounting.csv`, `02-hardware-probe.json`, `02-output-manifest.json`.
 - limitations: static capacity estimate only; no ComfyUI import, object_info, prompt conversion, runtime execution, source audit, or branch topology validation.

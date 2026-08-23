@@ -154,7 +154,7 @@ completion_decision:
 Recommended reusable scaffold:
 
 ```text
-python3 ComfyUI/docs/draft/migration-workflow-v2/tools/step04_source_audit_scaffold.py --workspace <workspace>
+python3 $DRAFT_DOC_ROOT/migration-workflow-v2/tools/step04_source_audit_scaffold.py --workspace <workspace>
 ```
 
 The scaffold is safe only for static Step 04 audit work. It may scan source roots, record line-level findings, join risks to Step 03 node criticality, redact widget evidence, and write Step 04 artifacts. It must not install dependencies, import ComfyUI, patch source, edit workflows, or claim runtime compatibility.

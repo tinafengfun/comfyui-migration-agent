@@ -421,8 +421,8 @@ Full machine-readable table: `03-node-inventory.csv`.
 - why_reusable: deterministically parses ComfyUI workflow graph links, maps output branches, inventories every node, refreshes dependency states from Step 01/02, and emits Step 04 context.
 - safe_to_automate_now: yes
 - implementation_status: implemented
-- script_or_tool_path: `/home/intel/tianfeng/comfy/ComfyUI/docs/draft/migration-workflow-v2/tools/step03_inventory_scaffold.py`
-- command_used: `python3 ComfyUI/docs/draft/migration-workflow-v2/tools/step03_inventory_scaffold.py --workspace {summary["workspace"]}`
+- script_or_tool_path: `$DRAFT_DOC_ROOT/migration-workflow-v2/tools/step03_inventory_scaffold.py`
+- command_used: `python3 $DRAFT_DOC_ROOT/migration-workflow-v2/tools/step03_inventory_scaffold.py --workspace {summary["workspace"]}`
 - inputs: source workflow copy, `00-node-scan.csv`, `01-node-dependency-scan.csv`, `02-feasibility-summary.json`.
 - outputs: `03-inventory.md`, `03-workflow-topology.md`, `03-node-inventory.csv`, `03-branch-map.csv`, `03-inventory-summary.json`, `03-output-manifest.json`.
 - limitations: structural inventory only; no ComfyUI import, object_info validation, source-code audit, prompt conversion, or runtime execution.

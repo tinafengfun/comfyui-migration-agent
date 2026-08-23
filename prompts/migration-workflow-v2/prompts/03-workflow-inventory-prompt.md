@@ -92,7 +92,7 @@ Stop if branch ownership, output nodes, or critical paths cannot be determined f
 Use or create a deterministic, read-only topology extractor when possible. The current reusable implementation is:
 
 ```text
-ComfyUI/docs/draft/migration-workflow-v2/tools/step03_inventory_scaffold.py
+$DRAFT_DOC_ROOT/migration-workflow-v2/tools/step03_inventory_scaffold.py
 ```
 
 The tool may parse the workflow graph, map output branches, refresh dependency state from prior artifacts, and write inventory/topology artifacts. It must not run ComfyUI, install packages, convert prompts, edit workflows, or decide runtime compatibility.

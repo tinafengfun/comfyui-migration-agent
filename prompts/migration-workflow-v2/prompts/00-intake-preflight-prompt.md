@@ -226,7 +226,7 @@ If source hints exist but are not verified, set `can_start_step01: yes`, `can_sk
 ## Example command prompt
 
 ```text
-根据 ComfyUI/docs/draft/migration-workflow-v2/prompts/00-intake-preflight-prompt.md，
+根据 $DRAFT_DOC_ROOT/migration-workflow-v2/prompts/00-intake-preflight-prompt.md，
 对 <workflow.json> 做 dependency-source preflight。
 模型源和 custom-node 源参考 <model_repo 或项目来源说明>。
 输出只写到 <artifact_folder>/00-intake-preflight.md。

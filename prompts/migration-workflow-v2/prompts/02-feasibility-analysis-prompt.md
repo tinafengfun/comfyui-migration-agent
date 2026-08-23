@@ -354,7 +354,7 @@ Stop and write `hard_stop` when:
 If the same parsing/reporting work is repeatable, Step 02 should use or create a read-only scaffold tool. The current reusable implementation is:
 
 ```text
-ComfyUI/docs/draft/migration-workflow-v2/tools/step02_feasibility_scaffold.py
+$DRAFT_DOC_ROOT/migration-workflow-v2/tools/step02_feasibility_scaffold.py
 ```
 
 The tool may read Step 00/01 artifacts, recount the source workflow, create all-node accounting, optionally probe hardware with read-only `xpu-smi`/`sycl-ls`, and write Step 02 artifacts. It must not provider-search, download, clone, install, call ComfyUI, convert prompts, or edit the workflow.

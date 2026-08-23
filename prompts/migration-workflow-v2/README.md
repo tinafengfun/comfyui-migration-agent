@@ -275,8 +275,8 @@ Before a migration result is considered reviewable, check these documentation ru
 Example Step 7 instruction:
 
 ```text
-根据 ComfyUI/docs/draft/migration-workflow-v2/prompts/07-branch-smoke-validation-prompt.md
-和 ComfyUI/docs/draft/migration-workflow-v2/skills/07-branch-smoke-validation-skill.md，
+根据 $DRAFT_DOC_ROOT/migration-workflow-v2/prompts/07-branch-smoke-validation-prompt.md
+和 $DRAFT_DOC_ROOT/migration-workflow-v2/skills/07-branch-smoke-validation-skill.md，
 使用 <workflow_slug>/06b-runtime-policy-prompt.json 作为 validated prompt，
 对以下分支执行 branch smoke：
 

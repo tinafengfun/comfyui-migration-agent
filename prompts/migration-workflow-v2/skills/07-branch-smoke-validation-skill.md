@@ -43,7 +43,7 @@ Use the Step 07 harness when available:
 
 ```bash
 <ComfyUI root>/.venv-xpu/bin/python \
-  ComfyUI/docs/draft/migration-workflow-v2/tools/step07_branch_smoke.py \
+  $DRAFT_DOC_ROOT/migration-workflow-v2/tools/step07_branch_smoke.py \
   --workspace <workspace> \
   --comfy-root <ComfyUI root> \
   --api-url http://127.0.0.1:<port> \

@@ -105,7 +105,7 @@ Allowed split artifact form for complex workflows:
 Recommended reusable scaffold:
 
 ```text
-python3 ComfyUI/docs/draft/migration-workflow-v2/tools/step03_inventory_scaffold.py --workspace <workspace>
+python3 $DRAFT_DOC_ROOT/migration-workflow-v2/tools/step03_inventory_scaffold.py --workspace <workspace>
 ```
 
 The scaffold is safe only for read-only Step 03 work. It may parse workflow links, map upstream output branches, inventory every node, refresh dependency state from Step 01/02 artifacts, and write Step 03 artifacts. It must not run ComfyUI, install packages, convert prompts, edit workflows, or make source-runtime compatibility claims.

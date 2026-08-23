@@ -358,8 +358,8 @@ Full all-node table: `04-node-source-audit.csv`. Long prompt strings are truncat
 - why_reusable: scans custom-node roots for device/provider/kernel/model-load patterns, joins findings to workflow node criticality and widget evidence, and emits Step 05 context.
 - safe_to_automate_now: yes
 - implementation_status: implemented
-- script_or_tool_path: `/home/intel/tianfeng/comfy/ComfyUI/docs/draft/migration-workflow-v2/tools/step04_source_audit_scaffold.py`
-- command_used: `python3 ComfyUI/docs/draft/migration-workflow-v2/tools/step04_source_audit_scaffold.py --workspace {summary["workspace"]}`
+- script_or_tool_path: `$DRAFT_DOC_ROOT/migration-workflow-v2/tools/step04_source_audit_scaffold.py`
+- command_used: `python3 $DRAFT_DOC_ROOT/migration-workflow-v2/tools/step04_source_audit_scaffold.py --workspace {summary["workspace"]}`
 - inputs: `03-node-inventory.csv`, `03-inventory-summary.json`, source workflow copy, custom-node source roots, Step 01 acquisition evidence.
 - outputs: `04-source-audit.md`, `04-source-audit-summary.json`, `04-source-findings.csv`, `04-node-source-audit.csv`, `04-source-package-scan.json`, `04-output-manifest.json`.
 - limitations: static source scan only; no imports, dependency installation, object_info, runtime validation, or source patches.

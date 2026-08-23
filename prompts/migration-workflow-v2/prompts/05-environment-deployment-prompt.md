@@ -92,7 +92,7 @@ your context as a "Matched catalog records (trusted XPU-support DB)" section. Pe
 When the repository contains `tools/step05_environment_readiness.py`, use it to prepare and collect the Step 05 evidence:
 
 ```bash
-python3 ComfyUI/docs/draft/migration-workflow-v2/tools/step05_environment_readiness.py \
+python3 $DRAFT_DOC_ROOT/migration-workflow-v2/tools/step05_environment_readiness.py \
   --workspace <workspace> \
   --comfy-root <ComfyUI root> \
   --venv <ComfyUI root>/.venv-xpu \

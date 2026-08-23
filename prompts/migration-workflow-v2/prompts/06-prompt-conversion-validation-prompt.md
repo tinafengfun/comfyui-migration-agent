@@ -57,7 +57,7 @@ When the repository contains `tools/step06_prompt_validation.py`, use it for con
 
 ```bash
 <ComfyUI root>/.venv-xpu/bin/python \
-  ComfyUI/docs/draft/migration-workflow-v2/tools/step06_prompt_validation.py \
+  $DRAFT_DOC_ROOT/migration-workflow-v2/tools/step06_prompt_validation.py \
   --workspace <workspace> \
   --comfy-root <ComfyUI root>
 ```

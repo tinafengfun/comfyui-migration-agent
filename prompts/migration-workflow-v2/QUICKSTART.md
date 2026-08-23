@@ -125,7 +125,7 @@ Tool rule: Step 00 can be automated with a read-only intake scanner, but it must
 Example instruction:
 
 ```text
-根据 ComfyUI/docs/draft/migration-workflow-v2/prompts/00-intake-preflight-prompt.md，
+根据 $DRAFT_DOC_ROOT/migration-workflow-v2/prompts/00-intake-preflight-prompt.md，
 对 <workflow.json> 做 dependency-source preflight。
 模型源和 custom-node 源参考 <model_repo 或项目来源说明>。
 输出只写到 <artifact_folder>/00-intake-preflight.md。
@@ -500,8 +500,8 @@ Write `07-{branch_slug}-smoke.md` for each important branch.
 Copy/paste prompt:
 
 ```text
-根据 ComfyUI/docs/draft/migration-workflow-v2/prompts/07-branch-smoke-validation-prompt.md
-和 ComfyUI/docs/draft/migration-workflow-v2/skills/07-branch-smoke-validation-skill.md，
+根据 $DRAFT_DOC_ROOT/migration-workflow-v2/prompts/07-branch-smoke-validation-prompt.md
+和 $DRAFT_DOC_ROOT/migration-workflow-v2/skills/07-branch-smoke-validation-skill.md，
 对 <workflow_slug> 执行 Step 7 branch smoke validation。
 
 输入：

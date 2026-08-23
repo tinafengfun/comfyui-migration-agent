@@ -333,7 +333,7 @@ Write the final report as `02-feasibility.md`.
 Recommended reusable scaffold:
 
 ```text
-python3 ComfyUI/docs/draft/migration-workflow-v2/tools/step02_feasibility_scaffold.py --workspace <workspace> --probe-hardware
+python3 $DRAFT_DOC_ROOT/migration-workflow-v2/tools/step02_feasibility_scaffold.py --workspace <workspace> --probe-hardware
 ```
 
 The scaffold is safe only for read-only Step 02 work. It may parse Step 00/01 artifacts, recount workflow nodes, generate all-node accounting, create a hardware probe artifact, and write report/manifest outputs. It must not provider-search, download, clone, install, call ComfyUI, convert prompts, or modify the source workflow.

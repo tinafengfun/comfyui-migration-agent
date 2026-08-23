@@ -110,7 +110,7 @@ If available, use a source scanner to collect candidate hits, but do not let sca
 Current reusable scanner:
 
 ```text
-ComfyUI/docs/draft/migration-workflow-v2/tools/step04_source_audit_scaffold.py
+$DRAFT_DOC_ROOT/migration-workflow-v2/tools/step04_source_audit_scaffold.py
 ```
 
 It may scan source roots, join findings to Step 03 criticality, extract redacted workflow widget evidence, and write Step 04 artifacts. It must not install packages, import ComfyUI, patch source, edit workflows, or validate runtime support.

@@ -17,8 +17,8 @@ If the run produces a real failure that is NOT capacity (e.g. a node import erro
 Use this prompt when asking an implementation agent to run Step 8:
 
 ```text
-根据 ComfyUI/docs/draft/migration-workflow-v2/prompts/08-full-validation-and-capacity-prompt.md
-和 ComfyUI/docs/draft/migration-workflow-v2/skills/08-full-validation-and-capacity-skill.md，
+根据 $DRAFT_DOC_ROOT/migration-workflow-v2/prompts/08-full-validation-and-capacity-prompt.md
+和 $DRAFT_DOC_ROOT/migration-workflow-v2/skills/08-full-validation-and-capacity-skill.md，
 对 <workflow_slug> 执行 Step 8 full validation and capacity classification。
 
 输入：

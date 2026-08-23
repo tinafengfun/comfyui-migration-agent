@@ -61,7 +61,7 @@ before the reduced tier pinned `--lowvram`):
 
 ```bash
 <ComfyUI root>/.venv-xpu/bin/python \
-  ComfyUI/docs/draft/migration-workflow-v2/tools/step09_performance_tuning.py \
+  $DRAFT_DOC_ROOT/migration-workflow-v2/tools/step09_performance_tuning.py \
   --workspace <workspace> \
   --comfy-root <ComfyUI root> \
   --api-url http://127.0.0.1:<port> \

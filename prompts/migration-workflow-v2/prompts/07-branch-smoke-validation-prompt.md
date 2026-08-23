@@ -20,8 +20,8 @@ Run the smallest faithful branch-level smoke tests before full workflow validati
 Use this prompt when asking an implementation agent to run Step 7:
 
 ```text
-根据 ComfyUI/docs/draft/migration-workflow-v2/prompts/07-branch-smoke-validation-prompt.md
-和 ComfyUI/docs/draft/migration-workflow-v2/skills/07-branch-smoke-validation-skill.md，
+根据 $DRAFT_DOC_ROOT/migration-workflow-v2/prompts/07-branch-smoke-validation-prompt.md
+和 $DRAFT_DOC_ROOT/migration-workflow-v2/skills/07-branch-smoke-validation-skill.md，
 对 <workflow_slug> 执行 Step 7 branch smoke validation。
 
 输入：
@@ -86,7 +86,7 @@ When available, use `tools/step07_branch_smoke.py` to submit Step 06 branch prom
 
 ```bash
 <ComfyUI root>/.venv-xpu/bin/python \
-  ComfyUI/docs/draft/migration-workflow-v2/tools/step07_branch_smoke.py \
+  $DRAFT_DOC_ROOT/migration-workflow-v2/tools/step07_branch_smoke.py \
   --workspace <workspace> \
   --comfy-root <ComfyUI root> \
   --api-url http://127.0.0.1:<port> \
