@@ -38,6 +38,13 @@ import { loadStepDefinitions } from "./workflowLoader";
 import { auditSkillRecipeLoading, auditActiveSkillIds } from "./skillLoadingAudit";
 
 const config = loadConfig();
+// Export the RESOLVED draft-doc root so per-step SDK sessions (whose bash tool
+// inherits this process's env) can reference step tools portably as
+// `$DRAFT_DOC_ROOT/migration-workflow-v2/tools/step*.py` regardless of host. Without
+// this, a host that relies on the computed default (never sets DRAFT_DOC_ROOT in its
+// env, e.g. the agent-demo box) would give the agent an EMPTY $DRAFT_DOC_ROOT, so the
+// tool path wouldn't resolve and the agent would reinvent the tool inline.
+process.env.DRAFT_DOC_ROOT = config.draftDocRoot;
 const store = new StateStore(config);
 await store.initialize();
 await ensureDir(config.workspaceRoot);
