@@ -45,15 +45,17 @@ trap 'rc=$?; if [ "$rc" -ne 0 ]; then echo ""; echo "###########################
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CMA_STAGING="$(cd "$SCRIPT_DIR/.." && pwd)"
 AGENT_DEMO="/home/intel/tianfeng/comfy/ComfyUI/agent-demo"
-# The step SKILLS/PROMPTS the agent runs hardcode tool paths under
-# ComfyUI/docs/draft/migration-workflow-v2/tools/ (the agent's original tree, still
-# referenced in 15 prompts). The SDK agent EXECUTES the tools from there (copying
-# them into per-task nfs_share workspaces), so a tool fix synced ONLY to agent-demo
-# never reaches a real run -- the agent keeps running the stale docs/draft copy
-# (real incident 2026-08-15: the Step-07 ref_max_size cap never applied, the smoke
-# ran full-size, OOM'd, and escalated to --novram). Mirror the migration-workflow-v2
-# tree here too. Override with DRAFT_DOCS_ROOT= to skip/redirect.
-DRAFT_DOCS_ROOT="${DRAFT_DOCS_ROOT:-/home/intel/tianfeng/comfy/ComfyUI/docs/draft}"
+# LEGACY (default OFF). Step prompts/skills USED to hardcode tool paths under
+# ComfyUI/docs/draft/migration-workflow-v2/tools/, so this deploy mirrored the tree
+# there (real incident 2026-08-15: a tool fix synced only to agent-demo never reached a
+# real run because the agent executed the stale docs/draft copy). As of the path fix
+# (commits 7b96c32/bccee3d) the prompts reference tools portably as
+# `$DRAFT_DOC_ROOT/migration-workflow-v2/tools/step*.py`, and the backend now exports the
+# RESOLVED `DRAFT_DOC_ROOT` (= the bundled prompts/ dir on this host, populated by the
+# main src/scripts/prompts/... copy above). So the docs/draft mirror is now redundant and
+# defaults OFF. Set DRAFT_DOCS_ROOT=<path> to re-enable it only if some out-of-band
+# consumer still reads docs/draft.
+DRAFT_DOCS_ROOT="${DRAFT_DOCS_ROOT:-}"
 API="http://127.0.0.1:3001"
 CONFIRMED=0
 # Ensure the docker-runtime ComfyUI image is loaded from the NFS store as part
@@ -169,9 +171,10 @@ for dir in src scripts prompts recipes schemas patches; do
   fi
 done
 
-# Mirror the migration-workflow-v2 tree (tools + prompts + skills) into the
-# docs/draft location the step prompts hardcode, so the agent EXECUTES the freshly
-# deployed tools -- not a stale copy. Without this, tool fixes silently never run.
+# LEGACY, OFF by default (see DRAFT_DOCS_ROOT above): only runs if DRAFT_DOCS_ROOT is
+# explicitly set. Prompts no longer hardcode docs/draft — they use
+# $DRAFT_DOC_ROOT/migration-workflow-v2/tools/, and the tools are already deployed to the
+# bundled prompts/ dir (= $DRAFT_DOC_ROOT) by the main copy above.
 if [ -n "$DRAFT_DOCS_ROOT" ] && [ -d "$CMA_STAGING/prompts/migration-workflow-v2" ]; then
   echo ""
   echo "==> Mirroring prompts/migration-workflow-v2/ -> $DRAFT_DOCS_ROOT/migration-workflow-v2/ (the tool path the agent runs)..."
