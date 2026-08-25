@@ -37,6 +37,7 @@ def main():
     ap.add_argument("--port", type=int, default=8199)
     ap.add_argument("--out", default="/tmp/catalog-import-harvest.json")
     ap.add_argument("--timeout", type=int, default=240)
+    ap.add_argument("--batch-size", type=int, default=25, help="nodes per container (0=all in one)")
     ap.add_argument("--keep", action="store_true", help="don't tear down the container")
     a = ap.parse_args()
 
@@ -49,87 +50,69 @@ def main():
     if not pkgs:
         print("no cloned bucket-A/B packages to harvest"); sys.exit(1)
 
-    # isolated harvest custom_nodes dir (symlinks to the batch nodes only)
-    hdir = f"{a.nfs_root}/catalog-import/harvest-custom-nodes"
-    shutil.rmtree(hdir, ignore_errors=True); os.makedirs(hdir)
     pkgs = sorted(set(pkgs))  # dedup: the sheet can list a package under >1 row
-    for p in pkgs:
-        src = f"{a.nfs_root}/custom_nodes/{p}"
-        dst = os.path.join(hdir, p)
-        if os.path.isdir(src) and not os.path.lexists(dst):
-            os.symlink(src, dst)
-
-    name = "catalog-harvest"
-    sh(["docker", "rm", "-f", name])
     gid_flags = []
     for g in render_gids():
         gid_flags += ["--group-add", g]
-    cmd = ["docker", "run", "-d", "--name", name, "--network", "host", "--device", "/dev/dri",
-           *gid_flags, "-e", "ZE_AFFINITY_MASK=0", "-e", "OMNI_FP8_KEEP_ON_MOVE=1",
-           "-e", "NO_PROXY", "-e", "no_proxy", "-e", "HTTP_PROXY", "-e", "HTTPS_PROXY",
-           "-e", "http_proxy", "-e", "https_proxy",
-           "-v", f"{a.nfs_root}:{a.nfs_root}",
-           "-v", f"{a.comfy_core}:/comfyui",
-           "-v", f"{hdir}:/comfyui/custom_nodes",
-           "--entrypoint", f"{a.nfs_root}/venv-container-xpu/bin/python3", a.image,
-           "/comfyui/main.py", "--port", str(a.port), "--listen", "127.0.0.1"]
-    print(f"launching harvest container with {len(pkgs)} packages on :{a.port} …")
-    r = sh(cmd)
-    if r.returncode != 0:
-        print("docker run failed:", r.stderr[:400]); sys.exit(1)
 
-    obj = None
-    deadline = time.time() + a.timeout
-    url = f"http://127.0.0.1:{a.port}/object_info"
-    while time.time() < deadline:
-        try:
-            obj = http_json(url, timeout=8)
-            if obj: break
-        except Exception:
-            pass
-        time.sleep(4)
-    logs = sh(["docker", "logs", "--tail", "400", name]).stdout + sh(["docker", "logs", "--tail", "400", name]).stderr
-    if not obj:
-        print("object_info never came up. Container log tail:")
-        print("\n".join(logs.splitlines()[-25:]))
-        if not a.keep: sh(["docker", "rm", "-f", name])
-        sys.exit(1)
-
-    # attribute class_types -> package via python_module = "custom_nodes.<dir>..."
-    reg = {p: set() for p in pkgs}
-    for ct, meta in obj.items():
-        pm = (meta or {}).get("python_module", "") if isinstance(meta, dict) else ""
-        m = re.match(r"custom_nodes\.([^.]+)", pm or "")
-        if m and m.group(1) in reg:
-            reg[m.group(1)].add(ct)
-
-    # import-failure signals from the log (ComfyUI prints "IMPORT FAILED" per package dir)
-    failed_log = set()
-    for line in logs.splitlines():
-        m = re.search(r"custom_nodes[/\\]([^/\\ ]+).*(fail|error|traceback)", line, re.I)
-        if m and m.group(1) in reg:
-            failed_log.add(m.group(1))
-
-    result = {}
-    for p in pkgs:
-        cts = sorted(reg[p])
-        result[p] = {
-            "class_types": cts,
-            "registered": len(cts) > 0,
-            "import_error_logged": p in failed_log,
-        }
-    json.dump(result, open(a.out, "w"), indent=2)
-
-    ok = [p for p in pkgs if result[p]["registered"]]
-    bad = [p for p in pkgs if not result[p]["registered"]]
-    print(f"\nHARVEST: {len(ok)}/{len(pkgs)} packages registered on XPU -> {a.out}")
-    for p in ok:
-        print(f"  OK   {p}: {len(result[p]['class_types'])} class_types")
-    for p in bad:
-        tag = " (import error in log)" if result[p]["import_error_logged"] else ""
-        print(f"  FAIL {p}: 0 class_types{tag}")
-    if not a.keep:
+    def harvest_batch(batch, port):
+        """Run one container over `batch` packages; return {pkg: {class_types, registered, timeout}}."""
+        hdir = f"{a.nfs_root}/catalog-import/harvest-custom-nodes"
+        shutil.rmtree(hdir, ignore_errors=True); os.makedirs(hdir)
+        for p in batch:
+            src = f"{a.nfs_root}/custom_nodes/{p}"
+            dst = os.path.join(hdir, p)
+            if os.path.isdir(src) and not os.path.lexists(dst):
+                os.symlink(src, dst)
+        name = "catalog-harvest"
         sh(["docker", "rm", "-f", name])
+        cmd = ["docker", "run", "-d", "--name", name, "--network", "host", "--device", "/dev/dri",
+               *gid_flags, "-e", "ZE_AFFINITY_MASK=0", "-e", "OMNI_FP8_KEEP_ON_MOVE=1",
+               "-e", "NO_PROXY", "-e", "no_proxy", "-e", "HTTP_PROXY", "-e", "HTTPS_PROXY",
+               "-e", "http_proxy", "-e", "https_proxy",
+               "-v", f"{a.nfs_root}:{a.nfs_root}", "-v", f"{a.comfy_core}:/comfyui",
+               "-v", f"{hdir}:/comfyui/custom_nodes",
+               "--entrypoint", f"{a.nfs_root}/venv-container-xpu/bin/python3", a.image,
+               "/comfyui/main.py", "--port", str(port), "--listen", "127.0.0.1"]
+        r = sh(cmd)
+        if r.returncode != 0:
+            print("  docker run failed:", r.stderr[:200])
+            return {p: {"class_types": [], "registered": False, "timeout": True} for p in batch}
+        obj, deadline, url = None, time.time() + a.timeout, f"http://127.0.0.1:{port}/object_info"
+        while time.time() < deadline:
+            try:
+                obj = http_json(url, timeout=8)
+                if obj: break
+            except Exception:
+                pass
+            time.sleep(4)
+        if not obj:
+            print("  batch object_info never came up (timeout) — nodes flagged not-registered")
+            if not a.keep: sh(["docker", "rm", "-f", name])
+            return {p: {"class_types": [], "registered": False, "timeout": True} for p in batch}
+        reg = {p: set() for p in batch}
+        for ct, meta in obj.items():
+            pm = (meta or {}).get("python_module", "") if isinstance(meta, dict) else ""
+            m = re.match(r"custom_nodes\.([^.]+)", pm or "")
+            if m and m.group(1) in reg:
+                reg[m.group(1)].add(ct)
+        if not a.keep: sh(["docker", "rm", "-f", name])
+        return {p: {"class_types": sorted(reg[p]), "registered": len(reg[p]) > 0, "timeout": False} for p in batch}
+
+    bs = a.batch_size if a.batch_size > 0 else len(pkgs)
+    batches = [pkgs[i:i + bs] for i in range(0, len(pkgs), bs)]
+    result = {}
+    for bi, batch in enumerate(batches):
+        print(f"[batch {bi+1}/{len(batches)}] {len(batch)} packages on :{a.port} …")
+        result.update(harvest_batch(batch, a.port))
+        json.dump(result, open(a.out, "w"), indent=2)  # checkpoint after each batch
+        ok = sum(1 for p in batch if result[p]["registered"])
+        print(f"  -> {ok}/{len(batch)} registered")
+
+    okp = [p for p in pkgs if result[p]["registered"]]
+    badp = [p for p in pkgs if not result[p]["registered"]]
+    print(f"\nHARVEST: {len(okp)}/{len(pkgs)} packages registered on XPU -> {a.out}")
+    print(f"  failed ({len(badp)}): {', '.join(badp)}")
 
 if __name__ == "__main__":
     main()
