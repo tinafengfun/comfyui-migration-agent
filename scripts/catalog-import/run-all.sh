@@ -17,7 +17,8 @@ bash "$HERE/clone-nodes.sh" "$W/nodes.json" --out "$W/clone-state.json"
 echo "== 2/ install deps + cuda->xpu patch =="
 bash "$HERE/install-deps.sh" "$W/nodes.json" --patch-out-dir "$W/patches"
 echo "== 3/ /object_info XPU registration harvest =="
-python3 "$HERE/harvest-objectinfo.py" "$W/nodes.json" --clone-state "$W/clone-state.json" --out "$W/harvest.json"
+HTIMEOUT=300; [ "$MODE" = "--all" ] && HTIMEOUT=600   # ~125 nodes take longer to import
+python3 "$HERE/harvest-objectinfo.py" "$W/nodes.json" --clone-state "$W/clone-state.json" --out "$W/harvest.json" --timeout "$HTIMEOUT"
 echo "== 5/ build records -> catalog (candidate->trusted) + knownCustomNodes entries =="
 npx tsx "$HERE/build-records.mts" --nodes "$W/nodes.json" --clone "$W/clone-state.json" \
   --harvest "$W/harvest.json" --patches-dir "$W/patches" --known-out "$W/known-entries.ts"

@@ -8,14 +8,17 @@
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 NODES_JSON="${1:?usage: install-deps.sh <nodes.json> [--nfs-root DIR] [--patch-out-dir DIR]}"
-NFS_ROOT="/nfs_share"; PATCH_DIR="/tmp/catalog-import-patches"
+NFS_ROOT="/nfs_share"; PATCH_DIR="/tmp/catalog-import-patches"; WITH_PIP=0
 shift || true
 while [ $# -gt 0 ]; do case "$1" in
   --nfs-root) NFS_ROOT="$2"; shift 2;;
   --patch-out-dir) PATCH_DIR="$2"; shift 2;;
+  --with-pip) WITH_PIP=1; shift;;   # OFF by default — bulk-installing 125 nodes'
+  --only) ONLY="$2"; shift 2;;      # deps into the ONE shared venv risks conflicts.
   *) echo "unknown arg: $1" >&2; exit 2;;
 esac; done
 mkdir -p "$PATCH_DIR"
+: "${ONLY:=}"
 
 VENV="$NFS_ROOT/venv-container-xpu/bin/python3"
 LOCK="$NFS_ROOT/bin/with-shared-venv-lock.sh"
@@ -30,14 +33,15 @@ for r in json.load(open(sys.argv[1])):
 PY
   dir="$NFS_ROOT/custom_nodes/$pkg"
   [ -d "$dir" ] || { echo "  MISS $pkg (not cloned)"; continue; }
+  [ -n "$ONLY" ] && [ "$ONLY" != "$pkg" ] && continue   # --only <pkg>: targeted deps for one straggler
 
-  # 1) cuda->xpu patch for needs_patch nodes
+  # 1) cuda->xpu patch for needs_patch nodes (always — patch is runtime, not registration)
   if [ "$needs_patch" = "1" ]; then
     python3 "$HERE/cuda-to-xpu-patch.py" "$dir" --diff-out "$PATCH_DIR/$pkg.cuda-to-xpu.diff" 2>&1 | sed "s/^/  [$pkg] /"
   fi
 
-  # 2) requirements (bucket A only; bucket B deps handled in the SYCL image build)
-  if [ "$bucket" = "A" ] && [ -f "$dir/requirements.txt" ]; then
+  # 2) requirements — OFF unless --with-pip (protects the shared venv from 125-node conflicts)
+  if [ "$WITH_PIP" = "1" ] && [ "$bucket" = "A" ] && [ -f "$dir/requirements.txt" ]; then
     req="$dir/requirements.txt"
     # strip CUDA-only lines into a filtered req
     filt="$(mktemp)"

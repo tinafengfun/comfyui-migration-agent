@@ -81,6 +81,7 @@ def main():
     ap.add_argument("xlsx", nargs="?", default=DEFAULT_XLSX)
     ap.add_argument("-o", "--out", default="/tmp/catalog-import-nodes.json")
     ap.add_argument("--pilot", action="store_true", help="emit only a small mixed pilot subset")
+    ap.add_argument("--all", action="store_true", help="emit the full list (default; accepted for symmetry)")
     args = ap.parse_args()
 
     import openpyxl

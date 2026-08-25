@@ -52,10 +52,12 @@ def main():
     # isolated harvest custom_nodes dir (symlinks to the batch nodes only)
     hdir = f"{a.nfs_root}/catalog-import/harvest-custom-nodes"
     shutil.rmtree(hdir, ignore_errors=True); os.makedirs(hdir)
+    pkgs = sorted(set(pkgs))  # dedup: the sheet can list a package under >1 row
     for p in pkgs:
         src = f"{a.nfs_root}/custom_nodes/{p}"
-        if os.path.isdir(src):
-            os.symlink(src, os.path.join(hdir, p))
+        dst = os.path.join(hdir, p)
+        if os.path.isdir(src) and not os.path.lexists(dst):
+            os.symlink(src, dst)
 
     name = "catalog-harvest"
     sh(["docker", "rm", "-f", name])
