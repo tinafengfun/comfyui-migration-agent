@@ -71,9 +71,21 @@ async function main() {
     const h = harvest[pkg] ?? { class_types: [], registered: false };
     const cl = clone[pkg] ?? {};
     const registered = row.bucket !== "C" && !!h.registered;
-    const prefixes = toPrefixes(h.class_types ?? []);
+    const realPrefixes = toPrefixes(h.class_types ?? []);
+    // The schema requires >=1 nodeTypePrefix, but a node that didn't register on XPU
+    // has no discovered class_types. Record it anyway (as candidate/unsupported, for
+    // future-migration reference) under a sentinel prefix that can NEVER be a prefix
+    // of a real workflow class_type — so resolveByNodeType stays correct while the
+    // record remains queryable by repo and carries the failure reason.
+    const prefixes = realPrefixes.length ? realPrefixes : [`__unregistered:${pkg}`];
     const patchDiff = path.join(patchesDir, `${pkg}.cuda-to-xpu.diff`);
     const hasPatch = row.needs_patch && fs.existsSync(patchDiff);
+    // reason recorded on non-registering nodes (in addition to the sheet notes)
+    const failReason = row.bucket === "C"
+      ? "marked unsupported in custom_node_list (full-CUDA / 暂不移植)"
+      : (h.timeout
+        ? "did not register on XPU in batch harvest (container object_info timeout) — needs live re-validation"
+        : "did not register on XPU in batch harvest (heavy compiled extension or missing pip deps; bulk pip gated off) — needs live validation");
 
     const rec: XpuNodeRecord = {
       schemaVersion: XPU_NODE_SCHEMA_VERSION,
@@ -88,7 +100,7 @@ async function main() {
       ...(hasPatch ? { patchClass: "functional_runtime_support" as const,
         patches: [{ file: `catalog-import/patches/${pkg}.cuda-to-xpu.diff`, patchClass: "functional_runtime_support" as const }] } : {}),
       ...(row.bucket === "B" ? { syclWheel: { required: true } } : {}),
-      ...(row.notes ? { knownIssues: [row.notes] } : {}),
+      ...((() => { const ki = [...(row.notes ? [row.notes] : []), ...(registered ? [] : [failReason])]; return ki.length ? { knownIssues: ki } : {}; })()),
       tier: "candidate",
       version: 1,
       originTaskId: "catalog-import-xlsx",
