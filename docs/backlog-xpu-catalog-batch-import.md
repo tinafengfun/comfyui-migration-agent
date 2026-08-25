@@ -29,11 +29,14 @@ SYCL wheel + `intel/llm-scaler-omni:0.1.0-b7-sycl` image on NFS. What remains be
 
 ## B. Decisions to make
 
-4. **Turn on `XPU_CATALOG_ENABLED` in production?** Currently unset in the running env →
-   the 104 trusted catalog records do NOT drive auto-clone / recipe injection; only the 96
-   `knownCustomNodes.ts` entries take effect (those are unconditional). Now that the DB holds
-   137 evidence-backed records, decide whether to flip this dark flag on. This is the lever
-   that determines whether the catalog half of this work actually lands.
+4. **`XPU_CATALOG_ENABLED` — DONE on the dev/agent host (124.12), 2026-08-25.** Correction to
+   the earlier "currently unset": that reading was from an interactive shell, not the agent
+   process. The deployed backend (`ComfyUI/agent-demo`) already runs with the flag =1, durably
+   sourced from `/home/intel/tianfeng/comfy/env` (loaded by `restart.sh` on every start), and
+   it is EFFECTIVE — the real `xpuCatalogClient.resolveNodeType` path returns trusted records
+   via the :3100 server (KJNodes/rgthree/joy_caption), while sentinel-guarded unsupported nodes
+   (Load3D→3D-Pack) correctly return no hit. Also documented the flag in `env.example` so new
+   hosts inherit the pattern. REMAINING: enabling + reachability on OTHER nodes → see item 6.
 
 5. **How/whether to use the SYCL image at runtime.** `b7-sycl` image + wheel exist, but the
    shared venv's CPU llama-cpp shadows the image's SYCL build. To run llama on XPU: point a
