@@ -26,8 +26,17 @@ non-hermetic tests.
       marked Pass. Also fixed the default-gpu-node bug (`default_node → local-xpu`; the old
       `remote-124-12` pointed at a minimal `/home/intel/ComfyUI` lacking KJNodes/models). NOTE:
       the agent expects GUI-format workflows (nodes[]+properties.cnr_id+links), not API/prompt JSON.
-- [ ] **P3 — dep-recover the pure-Python unsupported subset**  ← NEXT
-- [ ] **P4 — re-clone the 2 nodes that 403'd**
+- [x] **P3 — dep-recover the pure-Python unsupported subset** (2026-08-26): installed deps
+      IN-CONTAINER (see tooling finding) and re-harvested → **4/8 recovered to trusted**
+      (Crystools, Image-Saver, Inspire-Pack, MieNodes; catalog trusted 104→108, knownCustomNodes
+      96→100). The other 4 (AutomaticCFG, Dev-Utils, TeaCache, FizzNodes) still fail WITH deps
+      present → non-dep issues (import/code), left candidate/unsupported. `wanBlockswap` excluded
+      (no requirements → different failure). **Tooling finding:** `install-deps.sh` ran pip on the
+      HOST where torch looks unsatisfied (venv is --system-site-packages, torch lives in the omni
+      container), so an unpinned `torch`/transitive-torch req pulled the CUDA torch stack and nearly
+      shadowed XPU torch — install torch-dependent nodes INSIDE the container. Hardened install-deps
+      SKIP_RE + doc (commit 25d3bf9).
+- [ ] **P4 — re-clone the 2 nodes that 403'd**  ← NEXT
 - [ ] **P5 — decisions: SYCL-image runtime use; multi-node reachability**
 - [ ] (separate workstream) B-backlog: Option-B per-node validation redesign, threshold
       calibration, ssh-node support — see `backlog-xpu-catalog-step-integration.md`
