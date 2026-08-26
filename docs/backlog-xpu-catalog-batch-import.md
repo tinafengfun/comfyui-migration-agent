@@ -4,51 +4,78 @@ Batch-import of the `custom_node_list` (129 nodes) from `comfyui_migration_tasks
 is **DONE 2026-08-25** (commits 745ada6→8b957f2; pipeline in `scripts/catalog-import/`;
 results + gotchas in memory `catalog_batch_import.md`): catalog 15→137 records
 (104 trusted / 33 documented-unsupported), 96 `knownCustomNodes.ts` entries, reusable
-SYCL wheel + `intel/llm-scaler-omni:0.1.0-b7-sycl` image on NFS. What remains below.
+SYCL wheel + `intel/llm-scaler-omni:0.1.0-b7-sycl` image on NFS.
 
-## A. Action items
+**Landed since (2026-08-26):** `XPU_CATALOG_ENABLED` verified on/durable/effective on 124.12
+and the 96 `knownCustomNodes` entries **deployed live** to `ComfyUI/agent-demo` (commit
+521f8a8). The deploy surfaced + fixed a real bug (see P1 below) and two pre-existing
+non-hermetic tests.
 
-1. **End-to-end real migration proof (highest priority).** Everything is validated only
-   at the `/object_info` registration layer — no imported node has been run through a full
-   migration to confirm `resolveNodeType → auto-clone → recipe injection` actually fires
-   and produces output. Run 1–2 real workflows using imported nodes (e.g. a KJNodes +
-   rgthree graph) through the Step pipeline. Overlaps with `backlog-xpu-catalog-step-integration.md`
-   "Remaining #2 (Playwright @migration live run)".
+## Execution plan (ordered — work one at a time)
 
-2. **Re-clone the 2 nodes that 403'd.** `comfyui-reactor-node` and `ComfyUI_CatVTON_Wrapper`
-   failed `git clone` (GitHub rate-limit) → their records are unsupported with no `nfsPath`.
-   Retry clone via `proxy.ims.intel.com:911` then re-run harvest+build-records, OR confirm
-   they're not wanted and leave documented.
+- [x] **P0 — enable catalog flag + deploy knownCustomNodes** (done 2026-08-26; see items 4 & Landed above)
+- [ ] **P1 — tighten prefix matching (over-match guard)**  ← NEXT
+- [ ] **P2 — end-to-end migration proof** on the live agent
+- [ ] **P3 — dep-recover the pure-Python unsupported subset**
+- [ ] **P4 — re-clone the 2 nodes that 403'd**
+- [ ] **P5 — decisions: SYCL-image runtime use; multi-node reachability**
+- [ ] (separate workstream) B-backlog: Option-B per-node validation redesign, threshold
+      calibration, ssh-node support — see `backlog-xpu-catalog-step-integration.md`
+- [ ] (separate workstream) C-backlog: wire `ensure-manager-offline.sh` into deploy;
+      dry-run proxy passthrough — see `backlog-manager-offline-dryrun.md`
 
-3. **Dep-recover the pure-Python subset of the 33 unsupported.** Crystools, Inspire-Pack,
-   FizzNodes, Image-Saver, TeaCache, AutomaticCFG, Dev-Utils, wanBlockswap, MieNodes likely
-   only failed because bulk pip was gated off (to protect the shared venv). Run
-   `install-deps.sh --with-pip --only <pkg>` per node → re-harvest → many should flip to
-   trusted. (Heavy/compiled ones — 3D-Pack, IndexTTS, segment-anything-2, LivePortraitKJ,
-   PuLID_Flux — are a separate, larger porting effort, not this item.)
+---
 
-## B. Decisions to make
+### P1 — tighten prefix matching (over-match guard)  ← NEXT
+Surfaced by the deploy: `knownCustomNodeForType` mis-attributed `SeedVR2LoadDiTModel` to
+was-node-suite because WAS registers a bare one-word class_type `Seed`, and a naive
+first-match/`startsWith` let `Seed` win. Fixed with longest-prefix-wins (commit 9975b25),
+which disambiguates **between known packages**. RESIDUAL RISK: a bare short prefix (WAS
+`Seed`, `Image Save`, KJNodes exact names, …) can still wrongly claim an **unknown** node
+type (one NOT in the catalog) that merely starts with that word — longest-match can't help
+when only one package matches. With 96 packages / thousands of prefixes now loaded this is a
+real latent correctness risk (wrong "source known" verdict + wrong auto-clone repo).
+Plan: (a) audit the 96 entries for over-broad bare prefixes (no delimiter, short, generic);
+(b) tighten matching to a word/delimiter boundary (match `prefix` only when the next char is
+end-of-string or a separator like `_`/space/`:`) — or require exact match for bare-word
+prefixes — so `Seed` no longer prefixes `SeedVR2…`; (c) add regression tests; (d) verify the
+catalog's `resolveByNodeType` (LIKE `prefix%`) has the same guard or is acceptably bounded.
 
-4. **`XPU_CATALOG_ENABLED` — DONE on the dev/agent host (124.12), 2026-08-25.** Correction to
-   the earlier "currently unset": that reading was from an interactive shell, not the agent
-   process. The deployed backend (`ComfyUI/agent-demo`) already runs with the flag =1, durably
-   sourced from `/home/intel/tianfeng/comfy/env` (loaded by `restart.sh` on every start), and
-   it is EFFECTIVE — the real `xpuCatalogClient.resolveNodeType` path returns trusted records
-   via the :3100 server (KJNodes/rgthree/joy_caption), while sentinel-guarded unsupported nodes
-   (Load3D→3D-Pack) correctly return no hit. Also documented the flag in `env.example` so new
-   hosts inherit the pattern. REMAINING: enabling + reachability on OTHER nodes → see item 6.
+### P2 — end-to-end migration proof
+Everything is validated only at the `/object_info` registration layer — no imported node has
+been run through a full migration to confirm `resolveNodeType → auto-clone → recipe injection`
+fires and produces output. The catalog path is now LIVE on the agent, so run 1–2 real
+workflows using imported nodes (e.g. a KJNodes + rgthree graph) through the Step pipeline.
+Doubles as `backlog-xpu-catalog-step-integration.md` "Remaining #2 (Playwright @migration)".
 
-5. **How/whether to use the SYCL image at runtime.** `b7-sycl` image + wheel exist, but the
-   shared venv's CPU llama-cpp shadows the image's SYCL build. To run llama on XPU: point a
-   gpu-node's `gpu-nodes.json docker_image` at the `-sycl` tag AND swap the shared-venv
-   llama-cpp for the SYCL wheel. Default keeps CPU llama-cpp (XPU VRAM reserved for diffusion,
-   see memory `llama_cpp_vlm_node`). Left as an explicit opt-in per plan.
+### P3 — dep-recover the pure-Python subset of the 33 unsupported
+Crystools, Inspire-Pack, FizzNodes, Image-Saver, TeaCache, AutomaticCFG, Dev-Utils,
+wanBlockswap, MieNodes likely failed only because bulk pip was gated off (to protect the
+shared venv). Run `install-deps.sh --with-pip --only <pkg>` per node → re-harvest → many
+should flip to trusted. (Heavy/compiled ones — 3D-Pack, IndexTTS, segment-anything-2,
+LivePortraitKJ, PuLID_Flux — are a separate, larger porting effort, not this item.)
 
-6. **Multi-machine reachability.** `knownCustomNodes.ts` ships with the agent to all nodes.
-   The catalog-server is single-point on 124.12:3100 — other GPU nodes (e.g. 120.111) need
-   `XPU_CATALOG_SERVER_URL` pointed at it and network reachability to consume the 104 trusted
-   records. Confirm each node's config + reachability.
+### P4 — re-clone the 2 nodes that 403'd
+`comfyui-reactor-node` and `ComfyUI_CatVTON_Wrapper` failed `git clone` (GitHub rate-limit) →
+their records are unsupported with no `nfsPath`. Retry clone via `proxy.ims.intel.com:911`
+then re-run harvest+build-records, OR confirm they're not wanted and leave documented.
+
+### P5 — decisions
+- **SYCL image runtime use.** `b7-sycl` image + wheel exist, but the shared venv's CPU
+  llama-cpp shadows the image's SYCL build. To run llama on XPU: point a gpu-node's
+  `gpu-nodes.json docker_image` at the `-sycl` tag AND swap the shared-venv llama-cpp for the
+  SYCL wheel. Default keeps CPU llama-cpp (XPU VRAM reserved for diffusion, see memory
+  `llama_cpp_vlm_node`). Explicit opt-in.
+- **Multi-machine reachability.** `knownCustomNodes.ts` ships with the agent to all nodes; the
+  catalog-server is single-point on 124.12:3100 — other GPU nodes (e.g. 120.111) need
+  `XPU_CATALOG_SERVER_URL` pointed at it + network reachability to consume the trusted records.
+
+## Reference (done)
+4. **`XPU_CATALOG_ENABLED` — DONE on 124.12 (2026-08-26).** Deployed backend runs the flag =1,
+   durably sourced from `/home/intel/tianfeng/comfy/env` (loaded by `restart.sh`), verified
+   effective via the real `resolveNodeType` path; documented in `env.example`. Other-node
+   enablement tracked under P5.
 
 ## Context
 Memory: `catalog_batch_import.md`, `xpu_support_catalog.md`, `llama_cpp_vlm_node.md`.
-Related backlog: `backlog-xpu-catalog-step-integration.md` (P4 step-wiring, separate workstream).
+Related: `backlog-xpu-catalog-step-integration.md` (P4 step-wiring), `backlog-manager-offline-dryrun.md`.
