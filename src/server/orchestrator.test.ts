@@ -603,7 +603,9 @@ describe("migration orchestrator", () => {
     expect(updated?.steps.find((step) => step.id === "00")?.status).toBe("completed");
     const artifact = await fs.readFile(path.join(task.artifactPath, "00-intake-preflight.md"), "utf8");
     expect(artifact).toContain("custom_nodes/rgthree-comfy");
-  }, 30000);
+    // Runs a full Step 00 intake (real filesystem scan + preflight) that legitimately
+    // takes ~29-31s; 30s left it flaky right on the boundary under suite/deploy load.
+  }, 60000);
 
   it("runs Step 01 asset resolution and pauses on source-identical gaps", async () => {
     const root = path.join(process.cwd(), ".demo-state", "tests", `orchestrator-step01-assets-${Date.now()}`);

@@ -24,6 +24,12 @@ describe("sub job manager", () => {
   });
 
   it("lists provider, custom-node, and download sub-jobs from an acquisition artifact", async () => {
+    // This case asserts the download-DISABLED behavior (missing.canStart === false),
+    // so it must force download off rather than inherit the ambient env — the real
+    // agent env (and the deploy that sources it) sets ASSET_ACQUISITION_ENABLE_DOWNLOAD=1,
+    // which would otherwise flip canStart to true. afterEach restores the originals.
+    delete process.env.ASSET_ACQUISITION_ENABLE_DOWNLOAD;
+    delete process.env.MIGRATION_AGENT_DOWNLOAD_PROFILE;
     const root = path.join(process.cwd(), ".demo-state", "tests", `subjobs-${Date.now()}`);
     const artifactPath = path.join(root, "artifacts");
     await ensureDir(artifactPath);
