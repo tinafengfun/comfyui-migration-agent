@@ -36,8 +36,12 @@ non-hermetic tests.
       container), so an unpinned `torch`/transitive-torch req pulled the CUDA torch stack and nearly
       shadowed XPU torch — install torch-dependent nodes INSIDE the container. Hardened install-deps
       SKIP_RE + doc (commit 25d3bf9).
-- [ ] **P4 — re-clone the 2 nodes that 403'd**  ← NEXT
-- [ ] **P5 — decisions: SYCL-image runtime use; multi-node reachability**
+- [x] **P4 — re-clone the 2 nodes that 403'd** (2026-08-26): both repos are genuinely gone, not a
+      transient rate-limit. `comfyui-reactor-node` (Gourieff) still 403 via proxy — unmaintained,
+      migrated to `ComfyUI-ReActor` (XPU-supported; candidate to add later). `ComfyUI_CatVTON_Wrapper`
+      catalog URL (AkshayLaghate) is 404/removed (a different chflame163 fork exists but isn't this
+      record's repo). Documented both with knownIssues in the catalog; left candidate/unsupported.
+- [ ] **P5 — decisions: SYCL-image runtime use; multi-node reachability**  ← NEXT (discussion)
 - [ ] (separate workstream) B-backlog: Option-B per-node validation redesign, threshold
       calibration, ssh-node support — see `backlog-xpu-catalog-step-integration.md`
 - [ ] (separate workstream) C-backlog: wire `ensure-manager-offline.sh` into deploy;
