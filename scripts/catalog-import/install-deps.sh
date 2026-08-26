@@ -23,7 +23,15 @@ mkdir -p "$PATCH_DIR"
 VENV="$NFS_ROOT/venv-container-xpu/bin/python3"
 LOCK="$NFS_ROOT/bin/with-shared-venv-lock.sh"
 # CUDA-only packages a source audit says to skip on XPU (per Step 05 skill).
-SKIP_RE='bitsandbytes|flash-attn|flash_attn|sageattention|onnxruntime-gpu|nvidia-|cupy-cuda|triton|xformers'
+# torch/torchvision/torchaudio/torchsde are ALSO skipped: the shared venv is
+# --system-site-packages and inherits torch (2.x+xpu) from the omni CONTAINER's
+# system packages — but on the HOST (where this script's pip runs) torch looks
+# UNSATISFIED, so an unpinned `torch` requirement makes pip pull the CUDA torch
+# stack (nvidia-cublas/triton, hundreds of MB) into the venv and SHADOW the XPU
+# torch. Skipping the direct lines helps, but transitive torch (e.g. diffusers ->
+# torch) is NOT caught here. CORRECT approach for torch-dependent nodes: install
+# INSIDE the omni container (torch already satisfied there), not on the host.
+SKIP_RE='bitsandbytes|flash-attn|flash_attn|sageattention|onnxruntime-gpu|nvidia-|cupy-cuda|triton|xformers|^torch($|[=<>! ])|^torchvision|^torchaudio|^torchsde'
 
 python3 - "$NODES_JSON" <<'PY' | while IFS=$'\t' read -r pkg bucket needs_patch; do
 import json,sys
