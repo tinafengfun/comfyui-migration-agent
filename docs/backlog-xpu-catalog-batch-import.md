@@ -14,8 +14,10 @@ non-hermetic tests.
 ## Execution plan (ordered — work one at a time)
 
 - [x] **P0 — enable catalog flag + deploy knownCustomNodes** (done 2026-08-26; see items 4 & Landed above)
-- [ ] **P1 — tighten prefix matching (over-match guard)**  ← NEXT
-- [ ] **P2 — end-to-end migration proof** on the live agent
+- [x] **P1 — tighten prefix matching (over-match guard)** (done 2026-08-26, commit 5977877;
+      exact-match bare class_types + `_`-family startsWith; eliminated 100 cross-package
+      collisions; catalog-server restarted + agent redeployed on the fix)
+- [ ] **P2 — end-to-end migration proof** on the live agent  ← NEXT
 - [ ] **P3 — dep-recover the pure-Python unsupported subset**
 - [ ] **P4 — re-clone the 2 nodes that 403'd**
 - [ ] **P5 — decisions: SYCL-image runtime use; multi-node reachability**
