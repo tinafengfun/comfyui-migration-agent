@@ -17,7 +17,12 @@ non-hermetic tests.
 - [x] **P1 — tighten prefix matching (over-match guard)** (done 2026-08-26, commit 5977877;
       exact-match bare class_types + `_`-family startsWith; eliminated 100 cross-package
       collisions; catalog-server restarted + agent redeployed on the fix)
-- [ ] **P2 — end-to-end migration proof** on the live agent  ← NEXT
+- [~] **P2 — end-to-end migration proof** on the live agent — catalog chain PROVEN on hardware
+      (2026-08-26, task 303ec304): Step 00 detected `ImageResizeKJv2`; Step 01 resolved it to
+      `kijai/ComfyUI-KJNodes` via the feature (repo URL NOT in the source workflow) + symlinked;
+      Steps 02-05 completed; **Step 05 deployed it to the XPU container and confirmed
+      `object_info/ImageResizeKJv2` REGISTERED=True on XPU**. Pixel render (Steps 06→07) continuing.
+      Also fixed the default-gpu-node bug (see below). Full render capture is the only remainder.
 - [ ] **P3 — dep-recover the pure-Python unsupported subset**
 - [ ] **P4 — re-clone the 2 nodes that 403'd**
 - [ ] **P5 — decisions: SYCL-image runtime use; multi-node reachability**
