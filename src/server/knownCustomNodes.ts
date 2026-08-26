@@ -579,21 +579,31 @@ export const KNOWN_CUSTOM_NODES: KnownCustomNode[] = [
   },
 ];
 
-/** Case-sensitive prefix test against a node's class_type. */
-function typeMatchesPrefixes(nodeType: string, prefixes: string[]): boolean {
-  return prefixes.some((prefix) => nodeType.startsWith(prefix));
+/**
+ * Case-sensitive match of one registered prefix against a node's class_type.
+ *
+ * FAMILY vs EXACT: a prefix ending in `_` is a family namespace (e.g. `VHS_`,
+ * `llama_cpp_`, `Seed_`) and matches by `startsWith`, so it also covers unseen
+ * sibling nodes. Every other prefix is a COMPLETE class_type and must match
+ * EXACTLY. This is what stops a big package's bare one-word class_type (e.g.
+ * was-node-suite's `Seed`, `Color`, `Blend`) from prefixing an unrelated node
+ * like `SeedVR2LoadDiTModel` / `ColorMatch` and handing back the wrong clone repo
+ * (an audit found 100 such cross-package collisions in the imported set). A
+ * camelCase/digit boundary is deliberately NOT treated as a separator — `Seed`→
+ * `SeedVR2` is exactly such a boundary — so only a trailing `_` opts into prefix
+ * matching, matching how the catalog importer emits `family_` prefixes.
+ */
+function prefixMatchesType(nodeType: string, prefix: string): boolean {
+  return prefix.endsWith("_") ? nodeType.startsWith(prefix) : nodeType === prefix;
 }
 
 /**
- * Return the known package that provides `nodeType` (by class_type prefix), or
- * undefined. Used to mark a node "source known" and to supply the clone repo.
+ * Return the known package that provides `nodeType`, or undefined. Used to mark a
+ * node "source known" and to supply the clone repo.
  *
- * LONGEST-PREFIX WINS (mirrors the catalog's resolveByNodeType): a package whose
- * matching prefix is more specific beats a package whose prefix is a shorter,
- * incidental match. Necessary since large packages (e.g. was-node-suite) register
- * bare one-word class_types like `Seed`, which as a naive first-match prefix would
- * wrongly claim another package's `SeedVR2LoadDiTModel` — and hand back the wrong
- * clone repo. Ties (equal prefix length) resolve to the earlier array entry.
+ * LONGEST-PREFIX WINS: among all packages with a matching prefix (see
+ * prefixMatchesType), the most specific match takes it; ties resolve to the
+ * earlier array entry. Mirrors the catalog's resolveByNodeType.
  */
 export function knownCustomNodeForType(nodeType: string): KnownCustomNode | undefined {
   if (!nodeType) return undefined;
@@ -601,7 +611,7 @@ export function knownCustomNodeForType(nodeType: string): KnownCustomNode | unde
   let bestLen = -1;
   for (const node of KNOWN_CUSTOM_NODES) {
     for (const prefix of node.nodeTypePrefixes) {
-      if (nodeType.startsWith(prefix) && prefix.length > bestLen) {
+      if (prefixMatchesType(nodeType, prefix) && prefix.length > bestLen) {
         bestLen = prefix.length;
         best = node;
       }

@@ -205,9 +205,17 @@ export class CatalogStore {
   }
 
   /**
-   * Resolve the best record for a workflow node's class_type: any prefix that is a
-   * prefix of `nodeType`. Ties broken by tier (trusted > candidate > unsupported),
-   * then by longest (most specific) matching prefix.
+   * Resolve the best record for a workflow node's class_type. A prefix ending in `_`
+   * is a family namespace (matches by startsWith, covering unseen siblings); every
+   * other prefix is a COMPLETE class_type and must match EXACTLY. This stops a big
+   * package's bare class_type (e.g. was-node-suite `Seed`) from claiming an unrelated
+   * `SeedVR2LoadDiTModel` (100 such cross-package collisions were found in the imported
+   * set). Ties broken by tier (trusted > candidate > unsupported), then longest prefix.
+   *
+   * The SQL `LIKE p.prefix || '%'` is only a coarse prefilter — and is deliberately
+   * re-checked in JS, because SQL LIKE treats `_`/`%` inside a stored prefix as
+   * wildcards (so `llama_cpp_` would loosely match `llamaXcppY`). `matchesPrefix` below
+   * is the authoritative, literal test.
    */
   resolveByNodeType(nodeType: string): ResolveResult | undefined {
     if (!nodeType) return undefined;
@@ -218,11 +226,14 @@ export class CatalogStore {
          WHERE ? LIKE p.prefix || '%'`
       )
       .all(nodeType) as Array<{ nodeKey: string; prefix: string; tier: CatalogTier; json: string }>;
-    if (rows.length === 0) return undefined;
-    rows.sort(
+    const matches = (prefix: string) =>
+      prefix.endsWith("_") ? nodeType.startsWith(prefix) : nodeType === prefix;
+    const hits = rows.filter((r) => matches(r.prefix));
+    if (hits.length === 0) return undefined;
+    hits.sort(
       (a, b) => TIER_RANK[b.tier] - TIER_RANK[a.tier] || b.prefix.length - a.prefix.length
     );
-    return { record: JSON.parse(rows[0].json) as XpuNodeRecord, matchedPrefix: rows[0].prefix };
+    return { record: JSON.parse(hits[0].json) as XpuNodeRecord, matchedPrefix: hits[0].prefix };
   }
 
   list(filter: { tier?: CatalogTier; xpuSupport?: string; nodeType?: string } = {}): XpuNodeRecord[] {

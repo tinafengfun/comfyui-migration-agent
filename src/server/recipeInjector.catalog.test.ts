@@ -21,7 +21,10 @@ function trustedRecord(): XpuNodeRecord {
     nodeKey: "acme__foo",
     packageName: "Foo",
     repository: "https://github.com/acme/Foo",
-    nodeTypePrefixes: ["Foo"],
+    // Exact class_type: bare prefixes now match exactly; only `_`-terminated
+    // prefixes are startsWith families (see store.resolveByNodeType). The workflow
+    // node below is "FooNode", so the record must advertise that exact type.
+    nodeTypePrefixes: ["FooNode"],
     execution: "xpu",
     xpuSupport: "patched",
     patchClass: "functional_runtime_support",

@@ -33,14 +33,18 @@ describe("knownCustomNodes registry", () => {
     expect(knownCustomNodeForType("")).toBeUndefined();
   });
 
-  it("prefers the longest (most-specific) matching prefix across packages", () => {
+  it("treats bare class_types as exact and only `_`-terminated prefixes as families", () => {
     // was-node-suite registers a bare `Seed` class_type; ComfyUI-SeedVR2_VideoUpscaler
-    // registers `SeedVR2LoadDiTModel`. A naive first-match/startsWith would let `Seed`
-    // wrongly claim the SeedVR2 node (and hand back the wrong clone repo). Longest
-    // prefix must win.
+    // registers `SeedVR2LoadDiTModel`. A naive startsWith would let `Seed` claim the
+    // SeedVR2 node (and hand back the wrong clone repo). Bare prefixes must match EXACTLY.
     expect(knownCustomNodeForType("SeedVR2LoadDiTModel")?.packageName).toBe("ComfyUI-SeedVR2_VideoUpscaler");
-    // ...while the exact `Seed` node still resolves to was-node-suite.
     expect(knownCustomNodeForType("Seed")?.packageName).toBe("was-node-suite-comfyui");
+    // A bare class_type must NOT prefix-claim an unrelated (even unknown) node type.
+    expect(knownCustomNodeForType("SeedlingWhateverLoader")).toBeUndefined();
+    expect(knownCustomNodeForType("ColorMattress3000")).toBeUndefined();
+    // `_`-terminated families still cover unseen siblings by prefix.
+    expect(knownCustomNodeForType("VHS_SomeBrandNewNode")?.packageName).toBe("ComfyUI-VideoHelperSuite");
+    expect(knownCustomNodeForType("llama_cpp_future_node")?.packageName).toBe("ComfyUI-llama-cpp_vlm");
   });
 
   it("resolves by asset evidence (loader class in wrapper_source_evidence), case-insensitively", () => {
