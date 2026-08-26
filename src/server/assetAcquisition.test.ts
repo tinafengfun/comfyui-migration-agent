@@ -112,7 +112,13 @@ describe("asset acquisition job", () => {
       [
         "| Node type | Source package or repo | Installed/source evidence | State | Human action |",
         "| --- | --- | --- | --- | --- |",
-        "| SeedVR2LoadDiTModel | seedvr2_videoupscaler | package hint from workflow only | source known | none |",
+        // A deliberately-unknown custom node (NOT in knownCustomNodes and not on
+        // disk) so the "unresolved custom node -> provider search -> 1 candidate"
+        // path is exercised. Do not use a real package name here: once it lands in
+        // the catalog/knownCustomNodes it becomes source-known (0 search candidates,
+        // as the sibling rgthree test asserts) — which is exactly what broke when
+        // the xlsx batch-import added SeedVR2 and friends.
+        "| ZZTestUnknownDiTLoader | zz_test_unknown_pkg | package hint from workflow only | source known | none |",
         ""
       ].join("\n"),
       "utf8"

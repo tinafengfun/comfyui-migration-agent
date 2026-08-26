@@ -33,6 +33,16 @@ describe("knownCustomNodes registry", () => {
     expect(knownCustomNodeForType("")).toBeUndefined();
   });
 
+  it("prefers the longest (most-specific) matching prefix across packages", () => {
+    // was-node-suite registers a bare `Seed` class_type; ComfyUI-SeedVR2_VideoUpscaler
+    // registers `SeedVR2LoadDiTModel`. A naive first-match/startsWith would let `Seed`
+    // wrongly claim the SeedVR2 node (and hand back the wrong clone repo). Longest
+    // prefix must win.
+    expect(knownCustomNodeForType("SeedVR2LoadDiTModel")?.packageName).toBe("ComfyUI-SeedVR2_VideoUpscaler");
+    // ...while the exact `Seed` node still resolves to was-node-suite.
+    expect(knownCustomNodeForType("Seed")?.packageName).toBe("was-node-suite-comfyui");
+  });
+
   it("resolves by asset evidence (loader class in wrapper_source_evidence), case-insensitively", () => {
     expect(knownCustomNodeForEvidence("1:llama_cpp_model_loader")?.modelSubdir).toBe("LLM");
     expect(knownCustomNodeForEvidence("LLAMA_CPP_MODEL_LOADER")?.packageName).toBe("ComfyUI-llama-cpp_vlm");

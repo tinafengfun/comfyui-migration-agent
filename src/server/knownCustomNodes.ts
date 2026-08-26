@@ -587,10 +587,27 @@ function typeMatchesPrefixes(nodeType: string, prefixes: string[]): boolean {
 /**
  * Return the known package that provides `nodeType` (by class_type prefix), or
  * undefined. Used to mark a node "source known" and to supply the clone repo.
+ *
+ * LONGEST-PREFIX WINS (mirrors the catalog's resolveByNodeType): a package whose
+ * matching prefix is more specific beats a package whose prefix is a shorter,
+ * incidental match. Necessary since large packages (e.g. was-node-suite) register
+ * bare one-word class_types like `Seed`, which as a naive first-match prefix would
+ * wrongly claim another package's `SeedVR2LoadDiTModel` — and hand back the wrong
+ * clone repo. Ties (equal prefix length) resolve to the earlier array entry.
  */
 export function knownCustomNodeForType(nodeType: string): KnownCustomNode | undefined {
   if (!nodeType) return undefined;
-  return KNOWN_CUSTOM_NODES.find((node) => typeMatchesPrefixes(nodeType, node.nodeTypePrefixes));
+  let best: KnownCustomNode | undefined;
+  let bestLen = -1;
+  for (const node of KNOWN_CUSTOM_NODES) {
+    for (const prefix of node.nodeTypePrefixes) {
+      if (nodeType.startsWith(prefix) && prefix.length > bestLen) {
+        bestLen = prefix.length;
+        best = node;
+      }
+    }
+  }
+  return best;
 }
 
 /**
