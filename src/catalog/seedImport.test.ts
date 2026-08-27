@@ -27,9 +27,11 @@ describe("xpu-catalog seed import", () => {
     // ...and the local /nfs_share path is stored.
     expect(rec.nfsPath).toBe("/nfs_share/custom_nodes/ComfyUI-llama-cpp_vlm");
     expect(rec.onNfsShare).toBe(true);
-    // llama.cpp VLM runs on CPU, and it carries the CPU pip backend from knownCustomNodes.
+    // The SYCL wheel is now wired in (pip.backend "xpu" from knownCustomNodes), but the node
+    // still defaults to CPU execution (from the recipe) — it offloads to XPU only when a
+    // workflow sets n_gpu_layers>0. See knownCustomNodes note + memory llama_cpp_vlm_node.
     expect(rec.execution).toBe("cpu");
-    expect(rec.pip?.backend).toBe("cpu");
+    expect(rec.pip?.backend).toBe("xpu");
     expect(rec.nodeTypePrefixes).toContain("llama_cpp_");
     expect(rec.tier).toBe("trusted");
   });
