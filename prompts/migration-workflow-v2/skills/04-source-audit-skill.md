@@ -125,9 +125,36 @@ Never collapse these into one status:
 | Workflow/runtime policy blocker | Source may have a safe path, but the workflow widget or launch policy selects an unsafe CUDA-only path. | "blocked until policy/workflow decision" |
 | Feature-development gap | Source lacks an XPU-capable architecture or depends on unsupported kernels. | "requires source work before native XPU validation" |
 
+## Migration capability matrix (route + actor)
+
+Map every audited finding to exactly one `migration_route` — the shared triage vocabulary used
+identically here, in Step 02 `hard_stop` reasoning, and in the catalog `migrationRoute` field.
+The route names WHO acts and WHICH existing capability applies. `auto_*` = the agent may attempt it
+autonomously (bounded + objective-gated, see Step 05 § bounded autonomous repair); `human_*` /
+`unsupported_*` / `not_applicable` = no autonomous attempts (escalate / stop).
+
+| Finding (CUDA-ism class × claim boundary) | `migration_route` | Actor | Capability that applies |
+| --- | --- | --- | --- |
+| Missing pure-python pip deps only (registers once installed) | `auto_deps` | agent | in-container install via `with-shared-venv-lock.sh` (ComfyUI auto-installs at import) |
+| Device strings only — `.to("cuda")`/`torch.device("cuda")`/`.cuda()`/`torch.cuda.*` (class a import-crash or class c device-mismatch, NO compiled kernel) | `auto_device_redirect` | agent | `cuda-to-xpu-patch.py`, `patch_class: functional_runtime_support` |
+| FP8 / quantized weights needing dequant / keep-on-move | `auto_fp8` | agent | fp8 keep-on-move patch + `CLIPLoader-qwen-fp8` ladder + `OMNI_FP8_KEEP_ON_MOVE` (Step 02 gate) |
+| Attention op missing on XPU (flash/sage), class b silent-disable of an attention path | `auto_attention_fallback` | agent | `xpu-attention-fallback` skill (CPU/openvino) |
+| Enum widget value from a missing package | `auto_enum` | agent | `install-enum-package.mts` |
+| Import/code bug, or feature-development gap (no XPU-capable path) | `human_source_work` | human | — |
+| Dep/version conflict vs the pinned image (e.g. `transformers==5.0`) | `human_env_conflict` | human | — |
+| Source repo dead/moved/unresolved | `human_source_unknown` | human | — |
+| Compiled CUDA kernel / native CUDA extension, no XPU path | `unsupported_cuda_kernel` | none | Step 02 `hard_stop` |
+| Use built-in / unmaintained (translations, Manager) | `not_applicable` | none | — |
+
+Emit `migration_route` on every node in the output table, and mirror the per-node routes into a
+machine-readable `04-triage.json` (`{ "nodes": [ { "node_family", "migration_route", "actor",
+"tool", "critical_path", "reason" } ] }`) alongside the human `04-source-audit.md`. `migration_route`
+IS the formalized `recommended_route` — do not invent a second vocabulary.
+
 ## Hard stops
 
-Stop normal migration if the critical path requires unsupported CUDA-only architecture.
+Stop normal migration if the critical path requires unsupported CUDA-only architecture
+(`migration_route: unsupported_cuda_kernel` → Step 02 `hard_stop`).
 
 Stop native-XPU claims if the workflow hard-codes CUDA device widgets on critical nodes, if the only verified route is CPU fallback, or if the source has no XPU-capable path and no framework abstraction that can cover placement.
 
@@ -149,7 +176,7 @@ completion_decision:
 
 ## Output schema
 
-`node_family`, `source_path`, `workflow_node_ids`, `widget_evidence`, `risk`, `xpu_specific_risk`, `critical_path`, `patch_class`, `recommended_route`, `evidence`, `validation_needed`.
+`node_family`, `source_path`, `workflow_node_ids`, `widget_evidence`, `risk`, `xpu_specific_risk`, `critical_path`, `patch_class`, `migration_route` (the formalized `recommended_route` — one of the capability-matrix enum values), `evidence`, `validation_needed`. Also emit the machine mirror `04-triage.json` (see the capability matrix).
 
 Recommended reusable scaffold:
 

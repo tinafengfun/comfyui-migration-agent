@@ -303,8 +303,10 @@ completion_decision:
 - non-ComfyUI target that cannot be safely reframed as workflow migration
 - strict source-identical delivery with unavailable or inaccessible critical assets
 - strict full-fidelity target that exceeds measured hardware while all fallback/reduction/escalation options are rejected
-- critical CUDA-only runtime with no fallback, patch, or feature-development path
+- critical CUDA-only runtime with no fallback, patch, or feature-development path — i.e. Step 04 assigned it `migration_route: unsupported_cuda_kernel` (or the catalog already carries that route for the node). Step 00 may have hard-stopped it early from the catalog; if it reaches here, it is still a hard stop.
 - continuation would require bypassing, deleting, replacing, or semantically changing nodes without approval
+
+Conversely, do NOT gate a node whose Step-04 `migration_route` is `auto_*` (auto_deps / auto_device_redirect / auto_fp8 / auto_attention_fallback / auto_enum): those are the agent's own bounded, objective-gated repairs (see Step 05 § bounded autonomous repair) and proceed without an `ask_user` gate — same anti-over-escalation rule as the known-auto-resolved packages above. Reserve `ask_user` / `hard_stop` for `human_*` and `unsupported_*` routes.
 
 ## Output schema
 

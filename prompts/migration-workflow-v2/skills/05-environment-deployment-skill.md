@@ -282,18 +282,36 @@ per-node state machine — the backend owns validation + the catalog write; you 
    --holder "${TASK_ID}"`. exit 3 (held by another agent) → **wait + reuse** their result; do not clone in
    parallel (would corrupt the shared git tree). `--action heartbeat --lease-id <id>` during a long clone;
    `--action release --lease-id <id>` immediately after. Keep this short — the lease covers only the clone.
-3. **Bounded exploration (≤ 3 rounds → human gate).** Before each exploration attempt:
-   `npx tsx scripts/catalog-explore.mts --workspace <artifacts> --node-key <k> --action record`. exit 4 =
-   EXHAUSTED → open an `ask_user` gate with your 3 attempts + evidence + a concrete suggested fix and
-   co-decide with the human (apply their fix and re-validate, or mark `unsupported` + gap and CONTINUE the
-   other nodes — never wedge the pipeline). Use the injected catalog patterns / recipes / known issues +
-   the meta-patterns (`cuda→xpu`, fp8 keep-on-move, cpu-offload) as your migration playbook.
-4. **Emit the deploy ledger.** Write `<artifacts>/05-catalog-deploy-ledger.json` =
+3. **Bounded autonomous repair (≤ 3 rounds → human gate), route-scoped and objective-gated.**
+   The `migration_route` from Step 04 (and the catalog `migrationRoute`) is your AUTONOMY BUDGET allocator:
+   - **Spend attempts only on `auto_*` routes** (`auto_deps`, `auto_device_redirect`, `auto_fp8`,
+     `auto_attention_fallback`, `auto_enum`) — apply the matching meta-pattern (`cuda→xpu` via the
+     device-redirect patch, fp8 keep-on-move, cpu/openvino attention fallback, enum install, in-container
+     dep install) as your playbook. Only ISOLATED + REVERSIBLE actions: patch the node's own cloned source,
+     install deps in the container, set `device=cpu`. NEVER autonomously touch shared/irreversible state
+     (a shared-venv install that could pull the CUDA torch stack, core `comfy/ops.py`, `docker commit`) —
+     those follow the deterministic recipe or a human gate.
+   - **Spend ZERO attempts on `human_*` / `unsupported_*` routes** — do not try to XPU-migrate a compiled
+     CUDA kernel or resolve a version conflict; fail fast and open the gate with the reason (wasting a GPU
+     run here helps nobody).
+   - **The arbiter of each attempt is the OBJECTIVE check, never your own opinion:** the node must appear
+     in `/object_info` (registered on XPU) and, once Step 07 runs, execute FRESH on a SUCCESSFUL smoke
+     branch. "I think it's fixed" is not a pass.
+   Before each attempt: `npx tsx scripts/catalog-explore.mts --workspace <artifacts> --node-key <k>
+   --action record`. exit 4 = EXHAUSTED → open an `ask_user` gate with your ≤3 attempts + evidence + a
+   concrete suggested fix and co-decide with the human (apply their fix and re-validate, or mark
+   `unsupported` + gap and CONTINUE the other nodes — never wedge the pipeline). Use the injected catalog
+   candidate/boundary HINTS (Phase-1 injection: candidate = verify-first, unsupported = boundary/do-not-apply)
+   as prior evidence — re-verify against the current source before relying on them.
+4. **Emit the deploy ledger (capture-on-success flywheel).** Write `<artifacts>/05-catalog-deploy-ledger.json` =
    `{ "nodes": [ { "nodeType", "nodeKey", "repository", "commit", "dtype", "xpuSupport", "execution",
-   "patches": [{file,target}], "pip": {backend} }, … ] }` for every custom node you deployed. After Step 07
-   the backend confirms each node via the branch-smoke results — a node is written to the catalog ONLY if
-   it executed FRESH on a SUCCESSFUL XPU output branch (cached/skipped/failed → not recorded) — and folds
-   the result in (candidate → trusted after repeat validation). So: make sure the custom nodes are actually
+   "migrationRoute", "patches": [{file,target}], "pip": {backend} }, … ] }` for every custom node you
+   deployed — INCLUDE the `migrationRoute` you used (the auto_* route that worked) so a successful autonomous
+   fix is captured back into the catalog as reusable determinism. After Step 07 the backend confirms each
+   node via the branch-smoke results — a node is written to the catalog ONLY if it executed FRESH on a
+   SUCCESSFUL XPU output branch (cached/skipped/failed → not recorded) — and folds the result in
+   (candidate → trusted after repeat validation). This is how autonomy manufactures new determinism: the
+   `auto_*` long tail shrinks into trusted recipes over time. So: make sure the custom nodes are actually
    exercised by the output branches Step 07 runs. **You never open the catalog SQLite or commit its git —
    you POST via the lease/explore CLIs and emit the ledger; the single catalog-server owns every write.**
 

@@ -1,0 +1,44 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://comfyui-migration-agent/schemas/triage.schema.json",
+  "title": "Step-04 node migration triage",
+  "description": "Machine-readable mirror of the Step-04 source-audit route decisions (04-triage.json). One entry per custom-node family in the workflow. `migration_route` is the shared vocabulary used by Step 02 hard_stop and the catalog `migrationRoute` field.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["nodes"],
+  "properties": {
+    "step": { "type": "string" },
+    "nodes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["node_family", "migration_route", "actor"],
+        "properties": {
+          "node_family": { "type": "string", "description": "Package / node-family identifier (e.g. class_type prefix or packageName)." },
+          "workflow_node_ids": { "type": "array", "items": { "type": ["string", "integer"] } },
+          "migration_route": {
+            "type": "string",
+            "enum": [
+              "auto_deps",
+              "auto_device_redirect",
+              "auto_fp8",
+              "auto_attention_fallback",
+              "auto_enum",
+              "human_source_work",
+              "human_env_conflict",
+              "human_source_unknown",
+              "unsupported_cuda_kernel",
+              "not_applicable"
+            ]
+          },
+          "actor": { "type": "string", "enum": ["agent", "human", "none"], "description": "Derivable from the route prefix; recorded for convenience." },
+          "tool": { "type": "string", "description": "The capability/tool that applies (e.g. cuda-to-xpu-patch.py)." },
+          "critical_path": { "type": "boolean" },
+          "reason": { "type": "string" },
+          "evidence_ref": { "type": "string", "description": "Pointer into 04-source-audit.md." }
+        }
+      }
+    }
+  }
+}
