@@ -23,8 +23,9 @@
  */
 
 export interface KnownCustomNodePip {
-  /** Which llama.cpp / native backend the installed binary must be built for. */
-  backend: "cpu";
+  /** Which llama.cpp / native backend the installed binary must be built for.
+   *  `xpu` = a SYCL-built wheel offloading to Intel XPU (see ComfyUI-llama-cpp_vlm). */
+  backend: "cpu" | "xpu";
   /**
    * When true, the node's own requirements.txt must NOT be `pip install -r`'d
    * (e.g. it pins CUDA/Metal wheels wrong for this XPU/CPU box); install the
@@ -78,13 +79,17 @@ export const KNOWN_CUSTOM_NODES: KnownCustomNode[] = [
     nodeTypePrefixes: ["llama_cpp_"],
     modelSubdir: "LLM",
     pip: {
-      backend: "cpu",
+      backend: "xpu",
       skipRequirementsTxt: true,
       note:
-        "requirements.txt pins CUDA (+cu128) / Metal llama-cpp-python wheels that are wrong " +
-        "for this Intel XPU/CPU box. Install the CPU-built llama-cpp-python wheel instead " +
-        "(the VLM runs on CPU via llama.cpp -- n_gpu_layers is a no-op without a SYCL build -- " +
-        "which uses host RAM, not XPU VRAM, leaving the XPU free for fp8 diffusion).",
+        "requirements.txt pins CUDA (+cu128) / Metal llama-cpp-python wheels that are wrong for " +
+        "this Intel box. As of 2026-08-27 the shared venv (/nfs_share/venv-container-xpu) has the " +
+        "SYCL-built llama-cpp-python 0.3.35 installed (llama_supports_gpu_offload()==True), and the " +
+        "local-xpu gpu-node runs the intel/llm-scaler-omni:0.1.0-b7-sycl image — so n_gpu_layers " +
+        "offloads to XPU. Wheel: /nfs_share/wheels/llama-cpp-python--sycl/*.whl; rebuild via " +
+        "scripts/catalog-import/build-sycl-image.sh. TRADEOFF: XPU llama now uses XPU VRAM, so a " +
+        "workflow mixing llama-cpp with heavy fp8 diffusion must budget for both (set n_gpu_layers " +
+        "lower or keep llama on CPU per-workflow if it OOMs). See memory llama_cpp_vlm_node.",
     },
   },
   // ── Batch-imported from custom_node_list (XPU-validated via /object_info) ──

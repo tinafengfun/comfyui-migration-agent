@@ -54,9 +54,9 @@ describe("knownCustomNodes registry", () => {
     expect(knownCustomNodeForEvidence("")).toBeUndefined();
   });
 
-  it("marks the CUDA requirements.txt as skip and the backend as cpu", () => {
+  it("marks the CUDA requirements.txt as skip and the backend as xpu (SYCL wheel wired in)", () => {
     const llama = KNOWN_CUSTOM_NODES.find((n) => n.packageName === "ComfyUI-llama-cpp_vlm");
-    expect(llama?.pip?.backend).toBe("cpu");
+    expect(llama?.pip?.backend).toBe("xpu");
     expect(llama?.pip?.skipRequirementsTxt).toBe(true);
   });
 });
