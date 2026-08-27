@@ -41,7 +41,14 @@ non-hermetic tests.
       migrated to `ComfyUI-ReActor` (XPU-supported; candidate to add later). `ComfyUI_CatVTON_Wrapper`
       catalog URL (AkshayLaghate) is 404/removed (a different chflame163 fork exists but isn't this
       record's repo). Documented both with knownIssues in the catalog; left candidate/unsupported.
-- [ ] **P5 — decisions: SYCL-image runtime use; multi-node reachability**  ← NEXT (discussion)
+- [x] **P5a — SYCL image wired in** (2026-08-27): installed SYCL llama-cpp-python 0.3.35 into the
+      shared venv (gpu_offload=True, replacing the shadowing CPU 0.3.40) + pointed local-xpu at
+      intel/llm-scaler-omni:0.1.0-b7-sycl. knownCustomNodes/catalog updated (backend cpu→xpu, note
+      + VRAM tradeoff). n_gpu_layers now offloads to XPU.
+- [ ] **P5b — multi-node reachability: DEFERRED** — 124.12 is the only active node for now. When
+      120.111 (or others) come online: set `XPU_CATALOG_SERVER_URL=http://172.16.124.12:3100` there
+      + confirm network reachability so they consume the trusted records (knownCustomNodes ships with
+      the agent regardless).
 - [ ] (separate workstream) B-backlog: Option-B per-node validation redesign, threshold
       calibration, ssh-node support — see `backlog-xpu-catalog-step-integration.md`
 - [ ] (separate workstream) C-backlog: wire `ensure-manager-offline.sh` into deploy;
