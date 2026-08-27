@@ -26,6 +26,27 @@ export type PatchClass =
 export type CatalogTier = "candidate" | "trusted" | "unsupported";
 export type PipBackend = "xpu" | "cpu";
 
+/**
+ * How this node is migrated to XPU, and WHO acts. The shared triage vocabulary
+ * used identically by Step 04 (route output), Step 02 (hard_stop reasoning), and
+ * this catalog record. Actor is derivable from the prefix: `auto_*` = the agent may
+ * attempt it autonomously (bounded, objective-gated); `human_*` / `unsupported_*` /
+ * `not_applicable` = no autonomous attempts (fail fast / escalate). Orthogonal to
+ * `xpuSupport` (which is the END STATE): e.g. both auto_device_redirect and auto_fp8
+ * end at xpuSupport "patched".
+ */
+export type MigrationRoute =
+  | "auto_deps"
+  | "auto_device_redirect"
+  | "auto_fp8"
+  | "auto_attention_fallback"
+  | "auto_enum"
+  | "human_source_work"
+  | "human_env_conflict"
+  | "human_source_unknown"
+  | "unsupported_cuda_kernel"
+  | "not_applicable";
+
 export interface CatalogPatch {
   file: string;
   target?: string;
@@ -118,6 +139,8 @@ export interface XpuNodeRecord {
   validation?: CatalogValidationEvidence[];
 
   tier: CatalogTier;
+  /** Triage class: how this node migrates to XPU + who acts. See MigrationRoute. */
+  migrationRoute?: MigrationRoute;
   efficacy?: CatalogEfficacy;
   promotedBy?: string;
   promotedAt?: string;

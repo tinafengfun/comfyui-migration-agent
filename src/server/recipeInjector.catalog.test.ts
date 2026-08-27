@@ -66,27 +66,59 @@ afterEach(async () => {
 });
 
 describe("recipeInjector catalog bridge", () => {
-  it("injects a TRUSTED catalog record as a recipe section when enabled", async () => {
+  it("injects a TRUSTED catalog record as apply-as-is + routes its patch into the Step-05 apply table", async () => {
     process.env.XPU_CATALOG_ENABLED = "1";
     const out = await injectRecipesForWorkflow({ workflowPath, stepId: "05", recipesRoot });
     expect(out).toContain("Matched catalog records");
+    expect(out).toContain("apply as-is");
     expect(out).toContain("catalog-acme__foo");
     expect(out).toContain("FooNode");
     expect(out).toContain("patches/foo-xpu.patch");
+    // trusted → recipe-shaped, keyed by an apply `patchFile:` line
+    expect(out).toContain("- patchFile: `patches/foo-xpu.patch`");
   });
 
   it("injects nothing catalog-related when the flag is off", async () => {
     delete process.env.XPU_CATALOG_ENABLED;
     const out = await injectRecipesForWorkflow({ workflowPath, stepId: "05", recipesRoot });
     expect(out).not.toContain("Matched catalog records");
+    expect(out).not.toContain("catalog-acme__foo");
   });
 
-  it("does not inject a CANDIDATE record (trusted-only bridge)", async () => {
+  it("injects a CANDIDATE record as a verify-first HINT (not apply-keyed, not in the apply table)", async () => {
     process.env.XPU_CATALOG_ENABLED = "1";
     const rec = { ...trustedRecord(), tier: "candidate" as const };
     fs.writeFileSync(path.join(root, "nodes", "acme__foo.json"), JSON.stringify(rec), "utf8");
     store.rebuildFromJson();
     const out = await injectRecipesForWorkflow({ workflowPath, stepId: "05", recipesRoot });
-    expect(out).not.toContain("catalog-acme__foo");
+    // the accumulated knowledge IS now injected...
+    expect(out).toContain("catalog-acme__foo");
+    expect(out).toContain("VERIFY BEFORE APPLYING");
+    expect(out).toContain("Foo OOMs on XPU without the keep-on-move patch");
+    // ...but its patch is a REFERENCE, never an apply-keyed patchFile line...
+    expect(out).toContain("reference patch");
+    expect(out).not.toContain("- patchFile: `patches/foo-xpu.patch`");
+    // ...and it never enters the Step-05 auto-apply table.
+    expect(out).not.toContain("## Recipes requiring patch adaptation");
+  });
+
+  it("injects an UNSUPPORTED record as a boundary HINT (do-not-auto-apply)", async () => {
+    process.env.XPU_CATALOG_ENABLED = "1";
+    const rec = {
+      ...trustedRecord(),
+      tier: "unsupported" as const,
+      xpuSupport: "unsupported" as const,
+      knownIssues: ["compiled CUDA kernel, no XPU path"],
+      retireCondition: "re-evaluate if upstream ships a SYCL build"
+    };
+    fs.writeFileSync(path.join(root, "nodes", "acme__foo.json"), JSON.stringify(rec), "utf8");
+    store.rebuildFromJson();
+    const out = await injectRecipesForWorkflow({ workflowPath, stepId: "05", recipesRoot });
+    expect(out).toContain("catalog-acme__foo");
+    expect(out).toContain("Known migration boundaries");
+    expect(out).toContain("DO NOT AUTO-APPLY");
+    expect(out).toContain("compiled CUDA kernel, no XPU path");
+    expect(out).toContain("re-evaluate if upstream ships a SYCL build");
+    expect(out).not.toContain("## Recipes requiring patch adaptation");
   });
 });

@@ -215,6 +215,22 @@
       "enum": ["candidate", "trusted", "unsupported"],
       "description": "candidate=auto-written, usable but re-validated; trusted=proven, drives deterministic no-re-audit deploy; unsupported=no XPU path."
     },
+    "migrationRoute": {
+      "type": "string",
+      "enum": [
+        "auto_deps",
+        "auto_device_redirect",
+        "auto_fp8",
+        "auto_attention_fallback",
+        "auto_enum",
+        "human_source_work",
+        "human_env_conflict",
+        "human_source_unknown",
+        "unsupported_cuda_kernel",
+        "not_applicable"
+      ],
+      "description": "Triage class: how this node migrates to XPU + who acts. auto_* = agent may attempt autonomously (bounded, objective-gated); human_*/unsupported_*/not_applicable = no autonomous attempts. Orthogonal to xpuSupport (the end state). Shared vocabulary across Step 04 route, Step 02 hard_stop, and this record."
+    },
     "efficacy": {
       "type": "object",
       "additionalProperties": false,

@@ -200,28 +200,86 @@ function catalogRecordToRecipe(rec: XpuNodeRecord, nodeType: string): Recipe {
   } as Recipe;
 }
 
+interface CatalogHit {
+  record: XpuNodeRecord;
+  nodeType: string;
+}
+
 /**
- * Bridge: pull TRUSTED catalog records for the workflow's nodeTypes (that the
- * recipe library didn't already match) so the DB's proven XPU knowledge drives
- * the same steps. Best-effort + trusted-only; empty unless XPU_CATALOG_ENABLED.
+ * Bridge: pull catalog records for the workflow's nodeTypes (that the recipe
+ * library didn't already match) so the DB's accumulated XPU knowledge drives the
+ * same steps. Best-effort; empty unless XPU_CATALOG_ENABLED.
+ *
+ * Returns hits of ALL tiers — the caller renders trusted records as "apply as-is"
+ * and candidate/unsupported records as verify-first / boundary HINTS. Non-trusted
+ * knowledge (the accumulated knownIssues/workarounds for nodes migrated by hand) is
+ * pure loss if dropped; injecting it as prose is safe because the deterministic
+ * auto-apply patch table (`formatPatchProtocol`) only ever runs on recipe-library
+ * `matches`, never on these catalog hits — so a hint can never become an auto-apply.
  */
-async function catalogRecipesForPairs(pairs: NodeModelPair[], existing: Recipe[]): Promise<Recipe[]> {
+async function catalogHitsForPairs(pairs: NodeModelPair[], existing: Recipe[]): Promise<CatalogHit[]> {
   if (!catalogEnabled()) return [];
   const existingTypes = new Set(existing.map((r) => r.nodeType));
   const seenKeys = new Set<string>();
-  const out: Recipe[] = [];
+  const out: CatalogHit[] = [];
   for (const nodeType of [...new Set(pairs.map((p) => p.nodeType))]) {
     if (existingTypes.has(nodeType)) continue;
     try {
       const hit = await resolveNodeType(nodeType);
-      if (!hit || hit.record.tier !== "trusted" || seenKeys.has(hit.record.nodeKey)) continue;
+      if (!hit || seenKeys.has(hit.record.nodeKey)) continue;
       seenKeys.add(hit.record.nodeKey);
-      out.push(catalogRecordToRecipe(hit.record, nodeType));
+      out.push({ record: hit.record, nodeType });
     } catch {
       /* best-effort — catalog is advisory here */
     }
   }
-  return out.sort((a, b) => a.recipeId.localeCompare(b.recipeId));
+  return out.sort((a, b) => a.record.nodeKey.localeCompare(b.record.nodeKey));
+}
+
+/**
+ * Format candidate/unsupported catalog records as PROSE HINTS for the agent.
+ * Deliberately NOT via `catalogRecordToRecipe`: that emits a bare `patchFile:` that
+ * reads like "apply me". Here patches are rendered as "reference — re-audit before
+ * applying, NOT pre-approved", so non-trusted patch knowledge never looks auto-applyable.
+ */
+function formatCatalogHints(hits: CatalogHit[], tier: "candidate" | "unsupported"): string {
+  if (hits.length === 0) return "";
+  const title =
+    tier === "candidate"
+      ? "## Candidate catalog records — PRIOR EVIDENCE, VERIFY BEFORE APPLYING"
+      : "## Known migration boundaries (from catalog) — LIKELY HUMAN / DO NOT AUTO-APPLY";
+  const preamble =
+    tier === "candidate"
+      ? "Not trusted. Treat as hints from prior hand-migrations: re-verify against the current node source and confirm via /object_info registration + a Step-07 smoke pass on XPU before relying on them."
+      : "Known NOT to migrate cleanly. Spend NO autonomous attempts here — route per the capability matrix (human / unsupported). `retireCondition` says when to re-evaluate.";
+  const blocks = hits.map(({ record: r, nodeType }) => {
+    const lines: string[] = [
+      `### catalog-${r.nodeKey.replace(/[^A-Za-z0-9_-]/g, "-")}`,
+      `- nodeType: \`${nodeType}\``,
+      `- xpuSupport: \`${r.xpuSupport}\``,
+      `- tier: \`${r.tier}\``
+    ];
+    if (r.migrationRoute) lines.push(`- migrationRoute: \`${r.migrationRoute}\``);
+    if (r.repository) lines.push(`- repository: \`${r.repository}\``);
+    if (r.knownIssues && r.knownIssues.length > 0) {
+      lines.push(`- knownIssues:`);
+      for (const k of r.knownIssues) lines.push(`  - ${k}`);
+    }
+    if (r.workarounds && r.workarounds.length > 0) {
+      lines.push(`- workarounds (in priority order):`);
+      r.workarounds.forEach((w, i) => {
+        lines.push(`  ${i + 1}. ${w.action}`);
+        if (w.tradeoff) lines.push(`     - tradeoff: ${w.tradeoff}`);
+      });
+    }
+    if (r.patches && r.patches.length > 0) {
+      lines.push(`- reference patch(es) (re-audit against current source before applying — NOT pre-approved):`);
+      for (const p of r.patches) lines.push(`  - ${p.file}${p.target ? ` (target: ${p.target})` : ""}`);
+    }
+    if (r.retireCondition) lines.push(`- retireCondition: ${r.retireCondition}`);
+    return lines.join("\n");
+  });
+  return [title, preamble, ...blocks].join("\n\n");
 }
 
 /**
@@ -249,13 +307,29 @@ export async function injectRecipesForWorkflow(input: {
     const matches = findMatchingRecipes(pairs, input.recipesRoot);
     let result = formatRecipesForPrompt(matches);
 
-    // Bridge: append TRUSTED catalog records (that the recipe library didn't
-    // already cover) as an additional section. Off unless XPU_CATALOG_ENABLED.
-    const catalogRecipes = await catalogRecipesForPairs(pairs, matches);
-    if (catalogRecipes.length > 0) {
-      const section = formatRecipesForPrompt(catalogRecipes, "## Matched catalog records (trusted XPU-support DB)");
+    // Bridge: append catalog records (that the recipe library didn't already cover)
+    // as additional sections, partitioned by tier. Off unless XPU_CATALOG_ENABLED.
+    //   trusted     → "apply as-is" (recipe-shaped, may carry patchFile)
+    //   candidate   → verify-first HINTS (patches shown as reference only)
+    //   unsupported → boundary HINTS (do not auto-apply)
+    // Only trusted records become recipe-shaped; candidate/unsupported are prose hints,
+    // so they can never enter the Step-05 auto-apply table (keyed on `matches` below).
+    const catalogHits = await catalogHitsForPairs(pairs, matches);
+    const trustedHits = catalogHits.filter((h) => h.record.tier === "trusted");
+    if (trustedHits.length > 0) {
+      const trustedRecipes = trustedHits
+        .map((h) => catalogRecordToRecipe(h.record, h.nodeType))
+        .sort((a, b) => a.recipeId.localeCompare(b.recipeId));
+      const section = formatRecipesForPrompt(
+        trustedRecipes,
+        "## Matched catalog records (trusted XPU-support DB) — apply as-is"
+      );
       result = result ? `${result}\n\n${section}` : section;
     }
+    const candSection = formatCatalogHints(catalogHits.filter((h) => h.record.tier === "candidate"), "candidate");
+    if (candSection) result = result ? `${result}\n\n${candSection}` : candSection;
+    const unsupSection = formatCatalogHints(catalogHits.filter((h) => h.record.tier === "unsupported"), "unsupported");
+    if (unsupSection) result = result ? `${result}\n\n${unsupSection}` : unsupSection;
 
     // Append patch adaptation protocol when patch-carrying recipes match at step 05.
     // Steps 02/04 still see patchFile in the recipe data block; they don't need
