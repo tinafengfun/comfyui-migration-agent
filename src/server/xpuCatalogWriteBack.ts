@@ -21,6 +21,7 @@ import {
   packageNameFromRepo,
   type CatalogValidationEvidence,
   type ExecutionTarget,
+  type MigrationRoute,
   type XpuNodeRecord,
   type XpuSupport
 } from "../catalog/schema";
@@ -44,6 +45,7 @@ export interface CatalogWriteBackEntry {
   providesEnumValues?: string[];
   usableConfigs?: XpuNodeRecord["usableConfigs"];
   supportedDtypes?: string[];
+  migrationRoute?: MigrationRoute;
   evidence: CatalogValidationEvidence;
 }
 
@@ -92,6 +94,7 @@ function buildNewRecord(entry: CatalogWriteBackEntry, nodeKey: string, nowIso: s
     ...(entry.providesEnumValues ? { providesEnumValues: entry.providesEnumValues } : {}),
     ...(entry.usableConfigs ? { usableConfigs: entry.usableConfigs } : {}),
     ...(entry.supportedDtypes?.length ? { supportedDtypes: entry.supportedDtypes } : {}),
+    ...(entry.migrationRoute ? { migrationRoute: entry.migrationRoute } : {}),
     tier: "candidate",
     version: 1,
     originTaskId: taskId,
@@ -185,6 +188,7 @@ export interface CatalogDeployLedgerNode {
   dtype?: string;
   execution?: ExecutionTarget;
   xpuSupport?: XpuSupport;
+  migrationRoute?: MigrationRoute;
   patches?: XpuNodeRecord["patches"];
   pip?: XpuNodeRecord["pip"];
 }
@@ -216,6 +220,7 @@ export function composeEntriesFromLedger(
       commit: led.commit,
       execution: led.execution,
       xpuSupport: led.xpuSupport,
+      migrationRoute: led.migrationRoute,
       patches: led.patches,
       pip: led.pip,
       supportedDtypes: led.dtype ? [led.dtype] : undefined,

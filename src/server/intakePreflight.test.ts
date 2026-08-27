@@ -205,3 +205,86 @@ describe("intake preflight custom-node detection", () => {
     expect(row?.humanAction).toBe("none");
   });
 });
+
+describe("intake preflight catalog boundary pre-triage", () => {
+  // A critical custom node linked into the graph (criticalPath === "yes").
+  function cudaKernelNode(): unknown {
+    return {
+      id: 7,
+      type: "CudaKernelNode",
+      properties: {},
+      inputs: [{ link: 1 }],
+      outputs: [{ links: [2] }],
+      widgets_values: []
+    };
+  }
+
+  async function writeCatalogRecord(dataDir: string, rec: Record<string, unknown>): Promise<void> {
+    await ensureDir(path.join(dataDir, "nodes"));
+    await fs.writeFile(path.join(dataDir, "nodes", `${rec.nodeKey}.json`), JSON.stringify(rec), "utf8");
+  }
+
+  function boundaryRecord(tier: "trusted" | "unsupported" | "candidate"): Record<string, unknown> {
+    return {
+      schemaVersion: 1,
+      nodeKey: "acme__cudakernel",
+      packageName: "CudaKernel",
+      repository: "https://github.com/acme/CudaKernel",
+      nodeTypePrefixes: ["CudaKernelNode"],
+      execution: "cpu",
+      xpuSupport: "unsupported",
+      migrationRoute: "unsupported_cuda_kernel",
+      knownIssues: ["compiled CUDA kernel, no XPU path"],
+      retireCondition: "re-evaluate if upstream ships a SYCL build",
+      tier,
+      version: 1,
+      createdAt: "2026-08-27T00:00:00Z",
+      updatedAt: "2026-08-27T00:00:00Z"
+    };
+  }
+
+  async function runWithCatalog(tier: "trusted" | "unsupported" | "candidate") {
+    resetBuiltinNodeCache();
+    const root = path.join(process.cwd(), ".demo-state", "tests", `intake-boundary-${tier}-${Date.now()}`);
+    const artifactPath = path.join(root, "artifacts");
+    const comfyuiRoot = path.join(root, "ComfyUI");
+    const dataDir = path.join(root, "catalog");
+    await ensureDir(artifactPath);
+    await writeComfyuiFixture(comfyuiRoot);
+    await writeCatalogRecord(dataDir, boundaryRecord(tier));
+    const workflowPath = path.join(root, "workflow.json");
+    await fs.writeFile(workflowPath, JSON.stringify({ nodes: [cudaKernelNode()], links: [] }), "utf8");
+    const task: MigrationTask = {
+      id: `task-intake-boundary-${tier}`,
+      name: "Intake boundary",
+      status: "pending",
+      workflowPath,
+      workspacePath: root,
+      artifactPath,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      steps: [{ id: "00", status: "pending" }]
+    };
+    // Catalog enabled, but point the server at a dead port so resolve uses the
+    // offline JSON fallback against our fixture dataDir (hermetic).
+    process.env.XPU_CATALOG_ENABLED = "1";
+    process.env.XPU_CATALOG_DATA_DIR = dataDir;
+    process.env.XPU_CATALOG_SERVER_URL = "http://127.0.0.1:59997";
+    try {
+      return await ensureIntakePreflight({ task, modelRoots: [path.join(root, "models")], comfyuiRoot });
+    } finally {
+      for (const k of ["XPU_CATALOG_ENABLED", "XPU_CATALOG_DATA_DIR", "XPU_CATALOG_SERVER_URL"]) delete process.env[k];
+    }
+  }
+
+  it("hard-stops early on a critical node the catalog knows is an unsupported_cuda_kernel (proven tier)", async () => {
+    const result = await runWithCatalog("unsupported");
+    expect(result.canContinueToFeasibility).toBe("no");
+    expect(result.hardStops.some((s) => s.includes("Known XPU boundary") && s.includes("CudaKernelNode"))).toBe(true);
+  });
+
+  it("does NOT hard-stop on a candidate-tier boundary (a guess, left for Step 02)", async () => {
+    const result = await runWithCatalog("candidate");
+    expect(result.hardStops.some((s) => s.includes("Known XPU boundary"))).toBe(false);
+  });
+});

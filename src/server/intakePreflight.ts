@@ -9,6 +9,7 @@ import {
 } from "./enumDependencies";
 import { loadBuiltinNodeTypes } from "./builtinNodes";
 import { knownCustomNodeForType } from "./knownCustomNodes";
+import { catalogEnabled, resolveNodeType, resolveRepo } from "./xpuCatalogClient";
 
 export interface IntakePreflightResult {
   artifactPath: string;
@@ -57,6 +58,46 @@ interface WorkflowGraph {
 const modelFilePattern = /\.(safetensors|ckpt|pt|pth|onnx|gguf|bin)$/i;
 const mediaFilePattern = /\.(png|jpe?g|webp|gif|mp4|mov|webm|avi|mkv|wav|mp3|flac)$/i;
 
+/**
+ * Early pre-triage: for each CRITICAL-PATH custom node, ask the catalog whether it
+ * is a KNOWN XPU boundary (`migrationRoute: unsupported_cuda_kernel`). If so, hard-stop
+ * now with the reason — turning a wasted full migration run into an immediate, reasoned
+ * stop. Best-effort + catalog-gated; never throws.
+ *
+ * Guardrails (mirror the existing "critical + source unknown" hard-stop):
+ *  - only CRITICAL-PATH nodes,
+ *  - only a PROVEN boundary (`tier ∈ {trusted, unsupported}`) — a `candidate` guess is
+ *    left for Step 02 to weigh, not a hard stop,
+ *  - EXEMPT nodes provided by `knownCustomNodes` (deterministically provisioned, never gate).
+ *
+ * Resolution is by class_type first, then by the node's package repo hint (a node that
+ * can't even import has no discovered class_types — a sentinel-prefixed record — so it is
+ * only reachable by repo; nodes with neither are simply not pre-triaged and fail later at
+ * Step 05 registration).
+ */
+async function detectCatalogBoundaries(rows: CustomNodeRow[]): Promise<string[]> {
+  if (!catalogEnabled()) return [];
+  const stops: string[] = [];
+  for (const row of rows) {
+    if (row.criticalPath !== "yes") continue;
+    if (knownCustomNodeForType(row.nodeType)) continue; // known-good, never gate
+    try {
+      let hit = await resolveNodeType(row.nodeType);
+      if (!hit && /github\.com/i.test(row.sourcePackage)) hit = await resolveRepo(row.sourcePackage);
+      const rec = hit?.record;
+      if (!rec) continue;
+      if (rec.migrationRoute === "unsupported_cuda_kernel" && (rec.tier === "trusted" || rec.tier === "unsupported")) {
+        const why = rec.knownIssues?.[0] ?? "native CUDA kernel with no XPU path";
+        const retire = rec.retireCondition ? ` (re-evaluate: ${rec.retireCondition})` : "";
+        stops.push(`Known XPU boundary: ${row.nodeType} is unsupported_cuda_kernel — ${why}${retire}`);
+      }
+    } catch {
+      /* best-effort — catalog is advisory here */
+    }
+  }
+  return stops;
+}
+
 export async function ensureIntakePreflight(input: {
   task: MigrationTask;
   modelRoots: string[];
@@ -77,6 +118,8 @@ export async function ensureIntakePreflight(input: {
   const modelIndex = await indexExactFilenames(modelRoots, modelRequests.map((request) => request.name));
   const aliasIndex = await indexPossibleAliases(modelRoots, modelRequests.map((request) => request.name));
   const customNodeRows = await buildCustomNodeRows(nodes, customNodeRoot, input.comfyuiRoot);
+  // Early pre-triage against the catalog: hard-stop known XPU boundaries before a full run.
+  const catalogBoundaryStops = await detectCatalogBoundaries(customNodeRows);
   // Implicit package dependencies: enum widget values (sampler_name, scheduler, …)
   // injected by a source-side custom package but absent from target core. These are
   // invisible to node-type scanning (the host node is often comfy-core).
@@ -103,6 +146,9 @@ export async function ensureIntakePreflight(input: {
     ...customNodeRows
       .filter((row) => row.criticalPath === "yes" && row.state === "source unknown")
       .map((row) => `Critical custom-node source is not proven: ${row.nodeType}`),
+    // Catalog pre-triage: a critical node the catalog already knows is a hard XPU
+    // boundary (compiled CUDA kernel, no path) → stop now, don't waste a full run.
+    ...catalogBoundaryStops,
     // Enum-value dependency whose providing package we cannot identify → hard stop
     // (a human must identify the source package). Ones with a known package are
     // NOT a hard stop — they're resolvable by install at Step 01/05.
