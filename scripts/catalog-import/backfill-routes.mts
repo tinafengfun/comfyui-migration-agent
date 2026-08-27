@@ -68,9 +68,13 @@ async function main() {
   for (const [pkg, route] of Object.entries(ROUTE_BY_PACKAGE)) {
     const rec = byPkg.get(pkg);
     if (!rec) { missing.push(pkg); continue; }
-    if (rec.migrationRoute === route) { unchanged++; continue; }
-    if (DRY) { console.log(`DRY  ${pkg}: ${rec.migrationRoute ?? "(none)"} -> ${route}`); applied++; continue; }
-    const next = { ...rec, migrationRoute: route };
+    // A pure-CUDA node with no XPU path is genuinely tier "unsupported", not the
+    // default "candidate" — set both so the Step-00 boundary pre-triage (tier-gated)
+    // fires on it. Other routes leave tier untouched (human_* stay candidate).
+    const nextTier = route === "unsupported_cuda_kernel" ? "unsupported" : rec.tier;
+    if (rec.migrationRoute === route && rec.tier === nextTier) { unchanged++; continue; }
+    if (DRY) { console.log(`DRY  ${pkg}: route ${rec.migrationRoute ?? "(none)"} -> ${route}${nextTier !== rec.tier ? `, tier ${rec.tier} -> ${nextTier}` : ""}`); applied++; continue; }
+    const next = { ...rec, migrationRoute: route, tier: nextTier };
     const r = await fetch(`${U}/nodes`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(next) });
     if (r.ok) { console.log(`  ${pkg}: ${rec.migrationRoute ?? "(none)"} -> ${route}`); applied++; }
     else { console.log(`  ${pkg}: upsert FAILED ${r.status}`); }
