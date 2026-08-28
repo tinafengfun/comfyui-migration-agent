@@ -81,6 +81,24 @@ describe("buildDockerStartScript", () => {
     expect(VRAM_ESCALATION_LADDER).toHaveLength(3);
   });
 
+  it("extractVramFlagTail keeps ONLY vram-policy flags (no false drift from incidental launch flags)", async () => {
+    const { extractVramFlagTail } = await import("./comfyuiLifecycle");
+    // An SDK Step-05 launch carries --extra-model-paths-config + --output-directory that the
+    // deterministic launcher omits — these must NOT count as VRAM drift (real incident:
+    // WAN2.2 on remote-124-12 tore down a healthy ComfyUI before Step 07).
+    const sdkArgs = [
+      "/comfyui/main.py", "--port", "8188", "--listen", "0.0.0.0",
+      "--extra-model-paths-config", "/comfyui/05-extra-model-paths.yaml",
+      "--output-directory", "/comfyui/outputs", "--reserve-vram", "1"
+    ];
+    expect(extractVramFlagTail(sdkArgs)).toEqual(["--reserve-vram", "1"]);
+    // matches the default policy → no drift
+    expect(extractVramFlagTail(sdkArgs).join(" ")).toBe("--reserve-vram 1");
+    // genuine escalation flags ARE captured
+    expect(extractVramFlagTail(["/comfyui/main.py", "--port", "8188", "--listen", "0.0.0.0", "--reserve-vram", "1", "--novram"]))
+      .toEqual(["--reserve-vram", "1", "--novram"]);
+  });
+
   it("omits the nfs_share bind mount when the node has no shared NFS tree", async () => {
     const { buildDockerStartScript } = await import("./comfyuiLifecycle");
     const script = buildDockerStartScript(

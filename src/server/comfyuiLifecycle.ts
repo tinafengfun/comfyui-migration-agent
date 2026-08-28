@@ -183,19 +183,45 @@ function resolveVramFlags(node: GpuNode, vramFlags?: readonly string[]): string[
   return [...flags];
 }
 
+/** VRAM-policy flags that take a value (flag + next arg). */
+const VRAM_VALUE_FLAGS = new Set(["--reserve-vram"]);
+/** Boolean VRAM/placement-policy flags (no value). */
+const VRAM_BOOL_FLAGS = new Set([
+  "--lowvram",
+  "--novram",
+  "--highvram",
+  "--normalvram",
+  "--cpu",
+  "--gpu-only",
+  "--disable-smart-memory"
+]);
+
 /**
  * From a container's raw entrypoint args (docker inspect `.Args`, e.g.
- * `["/comfyui/main.py","--port","8188","--listen","0.0.0.0","--reserve-vram","1","--lowvram"]`),
- * extract just the VRAM flag tail (everything except the main.py path and the
- * `--port`/`--listen` pair) so it can be compared against `resolveVramFlags`.
+ * `["/comfyui/main.py","--port","8188","--listen","0.0.0.0","--extra-model-paths-config",
+ *   "/comfyui/05-extra-model-paths.yaml","--output-directory","/comfyui/outputs","--reserve-vram","1"]`),
+ * extract ONLY the VRAM-policy flags so the live container can be compared against
+ * `resolveVramFlags` for drift.
+ *
+ * Whitelist, not blacklist: a launch may legitimately carry incidental flags the
+ * deterministic launcher doesn't (an SDK Step-05 launch adds `--extra-model-paths-config`
+ * and `--output-directory`). The OLD "everything except main.py/--port/--listen" logic
+ * counted those as VRAM drift → it tore down a perfectly healthy ComfyUI before Step 07
+ * and the relaunch failed (real incident: WAN2.2 on remote-124-12, 2026-08-28). Only
+ * genuine VRAM-placement flags constitute drift.
  */
-function extractVramFlagTail(args: string[]): string[] {
+export function extractVramFlagTail(args: string[]): string[] {
   const out: string[] = [];
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
-    if (a.endsWith("main.py")) continue;
-    if (a === "--port" || a === "--listen") { i++; continue; } // skip flag + its value
-    out.push(a);
+    if (VRAM_VALUE_FLAGS.has(a)) {
+      out.push(a);
+      if (i + 1 < args.length) out.push(args[++i]);
+    } else if (VRAM_BOOL_FLAGS.has(a)) {
+      out.push(a);
+    }
+    // everything else (main.py, --port/--listen, --extra-model-paths-config,
+    // --output-directory, and any other incidental launch flag) is NOT VRAM policy → ignore
   }
   return out;
 }
