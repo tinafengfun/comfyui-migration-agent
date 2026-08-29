@@ -45,6 +45,9 @@ import {
 const DEPTH = (process.env.MIGRATION_DEPTH ?? "full") as "full" | "capacity";
 const GPU_NODE = process.env.PW_GPU_NODE ?? "remote-124-12";
 const FIXTURE_NAME = "video-edit-wan22.json";
+// Optional: point the run at an external workflow file (absolute path) instead of
+// the bundled fixture — e.g. PW_WORKFLOW_FILE=/home/intel/.../Dasiwa-图生视频流.json
+const WORKFLOW_FILE = process.env.PW_WORKFLOW_FILE ?? "";
 const TASK_ITEM_TEXT = "video-edit-wan22"; // .task-item name substring
 
 const POLL_MS = 15_000;
@@ -187,7 +190,12 @@ test.describe("WAN2.2 video-edit migration @migration @wan22", () => {
     const budget = DEPTH === "full" ? FULL_BUDGET_MS : CAPACITY_BUDGET_MS;
     test.setTimeout(budget);
 
-    const task = await createTask(request, { workflowFileName: FIXTURE_NAME, gpuNode: GPU_NODE });
+    const task = await createTask(
+      request,
+      WORKFLOW_FILE
+        ? { workflowFileName: WORKFLOW_FILE.split("/").pop()!, fixturePath: WORKFLOW_FILE, gpuNode: GPU_NODE }
+        : { workflowFileName: FIXTURE_NAME, gpuNode: GPU_NODE }
+    );
     const taskId = task.id;
     console.log(`\n=== WAN2.2 migration task ${taskId} (depth=${DEPTH}, gpuNode=${GPU_NODE}) ===`);
     const seenCompleted = new Set<string>();
