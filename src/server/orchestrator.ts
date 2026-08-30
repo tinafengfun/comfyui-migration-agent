@@ -128,6 +128,7 @@ import {
 } from "./gpuNodes";
 import { ensureComfyUiUp, VRAM_ESCALATION_LADDER } from "./comfyuiLifecycle";
 import { resolveProfilePackages, buildProfileDir } from "./profileLaunch";
+import { missingClassAWheels, classAHardStopMessage } from "./wheelhouse";
 import { extractNodeModelPairs, findMatchingRecipes } from "./recipeInjector";
 import { archiveAcceptedWorkflowIfNeeded, archiveTaskSnapshot } from "./workflowArchive";
 import { syncGuiWorkflowToComfyUIServer } from "./guiWorkflowSync";
@@ -1145,6 +1146,28 @@ export class MigrationOrchestrator {
                 type: "progress",
                 message: `Profile-scoped custom_nodes for Step ${stepId} (${profile.origin}, ${profile.packages.length} packages): ${profile.packages.join(", ")}`
               });
+              // Builder/Worker enforcement (Phase 2): on the offline worker-local
+              // venv, a Class-A dependency (flash-attn/xformers/…) with no prebuilt
+              // wheel cannot be compiled on the worker — route it to the Builder
+              // instead of failing opaquely at container start. Only enforced when
+              // worker_local_venv is on (the offline path); a best-effort early
+              // signal (the offline pip failure would also catch it, more loudly).
+              if (node.worker_local_venv && customNodesDir) {
+                const missingWheels = await missingClassAWheels({
+                  packages: profile.packages,
+                  customNodesRoot: customNodesDir
+                }).catch(() => [] as string[]);
+                if (missingWheels.length) {
+                  await this.terminateWithHardStop({
+                    taskId,
+                    stepId,
+                    reason: classAHardStopMessage(missingWheels),
+                    improvementStrategy:
+                      "Build the missing Class-A wheels with scripts/build-wheel.mts (in the base image, --sycl if needed) so they land in /nfs_share/wheelhouse; then resume. Workers never compile Class-A."
+                  });
+                  return;
+                }
+              }
             } else {
               await this.emit({
                 taskId,

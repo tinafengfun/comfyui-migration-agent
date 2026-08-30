@@ -21,6 +21,7 @@ import { execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
 import fs from "node:fs";
 import { resolveNfsShareRoot, runShellOnNode, type GpuNode } from "./gpuNodes";
+import { WHEELHOUSE_DIR } from "./wheelhouse";
 
 const execFile = promisify(execFileCb);
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -318,9 +319,6 @@ export function buildDockerStartScript(
     `nohup docker logs -f '${containerName}' > /tmp/comfyui-${port}.log 2>&1 < /dev/null &\n`
   );
 }
-
-/** Shared wheelhouse the worker-local venv installs from (offline). Populated by the Builder (Phase 2). */
-export const WHEELHOUSE_DIR = "/nfs_share/wheelhouse";
 
 /**
  * The `bash -c` body for a worker-local-venv launch. Single-line, uses only
