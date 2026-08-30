@@ -48,6 +48,21 @@ describe("buildDockerStartScript", () => {
     expect(script).not.toContain("/workspace/comfyui");
   });
 
+  it("overlays a profile-scoped custom_nodes dir ONLY when customNodesDir is set (bug-B fix)", async () => {
+    const { buildDockerStartScript } = await import("./comfyuiLifecycle");
+    const profileDir = "/nfs_share/profiles/task-1/custom_nodes";
+    const scoped = buildDockerStartScript(dockerNode(), 8188, "127.0.0.1", "comfyui-task-1", undefined, profileDir);
+    // both mounts present, and the overlay comes AFTER the comfyui_root mount
+    expect(scoped).toContain("-v '/nfs_share/comfyui-core:/comfyui'");
+    expect(scoped).toContain(`-v '${profileDir}:/comfyui/custom_nodes'`);
+    expect(scoped.indexOf("/comfyui'")).toBeLessThan(scoped.indexOf(`${profileDir}:/comfyui/custom_nodes`));
+
+    // legacy: no overlay when unset (backward-compat)
+    const legacy = buildDockerStartScript(dockerNode(), 8188, "127.0.0.1", "comfyui-task-1");
+    expect(legacy).toContain("-v '/nfs_share/comfyui-core:/comfyui'");
+    expect(legacy).not.toContain(":/comfyui/custom_nodes'");
+  });
+
   it("enables the native-fp8 XPU recipe: OMNI_FP8_KEEP_ON_MOVE=1 env, dynamic VRAM on, no --cpu-vae", async () => {
     const { buildDockerStartScript } = await import("./comfyuiLifecycle");
     const script = buildDockerStartScript(dockerNode(), 8188, "127.0.0.1", "comfyui-task-1");

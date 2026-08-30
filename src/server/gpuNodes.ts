@@ -37,9 +37,11 @@ export type ModelShare = "nfs_same_path" | "none";
  * "docker": Step 05 launches ComfyUI inside a container derived from
  * `docker_image` (e.g. Intel's `intel/llm-scaler-vllm:1.4`, used only for its
  * oneAPI/PyTorch-XPU stack — never that image's own ComfyUI/vLLM components).
- * The task's comfyui_root is `docker cp`'d into the container per-run (not
- * bind-mounted), so concurrent tasks don't share a mutable mount; model_roots
- * are bind-mounted since they're large/shared and read-mostly.
+ * The task's comfyui_root is bind-mounted at /comfyui, but the custom_nodes are
+ * PROFILE-SCOPED per task: a per-task dir holding only the workflow's node set
+ * is overlaid at /comfyui/custom_nodes (see profileLaunch.ts /
+ * buildDockerStartScript), so a task never loads the node's whole accumulated
+ * tree. model_roots/NFS are bind-mounted since they're large/shared/read-mostly.
  */
 export type GpuNodeRuntime = "bare" | "docker";
 
