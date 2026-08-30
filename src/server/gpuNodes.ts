@@ -84,6 +84,20 @@ export interface GpuNode {
    * passwordless sudo on the node and is run while the container is torn down.
    */
   xpu_device?: number | string;
+  /**
+   * When true (docker only), the container runs ComfyUI in a per-task EPHEMERAL
+   * venv created inside the image (`python -m venv --system-site-packages
+   * /tmp/venv-<container>`), not the single shared NFS venv. This contains
+   * ComfyUI's import-time auto-`pip install` (which bypasses the shared-venv
+   * lock and corrupted the one shared site-packages — the torch-pull incident):
+   * installs land in the throwaway venv, never the shared tree. --system-site-
+   * packages inherits the image's compiled torch-xpu / oneAPI / omni_xpu_kernel
+   * stack; a launch-time `assert torch.xpu.is_available()` gate fails loudly if
+   * that inheritance is ever lost (rather than silently running CPU torch).
+   * Combined with PIP_NO_INDEX + a wheelhouse find-links, auto-pip resolves
+   * offline. Unset/false → the legacy shared-venv launch (backward-compat).
+   */
+  worker_local_venv?: boolean;
 }
 
 export interface GpuNodeRegistry {
@@ -1075,6 +1089,7 @@ function normalizeNode(raw: unknown, index: number, sourcePath: string): GpuNode
   }
   const nfs_share_root = typeof o.nfs_share_root === "string" ? o.nfs_share_root : undefined;
   const attn_backend = typeof o.attn_backend === "string" ? o.attn_backend : undefined;
+  const worker_local_venv = o.worker_local_venv === true ? true : undefined;
 
   let ssh: GpuNodeSsh | undefined;
   if (kind === "ssh") {
@@ -1111,6 +1126,7 @@ function normalizeNode(raw: unknown, index: number, sourcePath: string): GpuNode
     docker_image,
     nfs_share_root,
     attn_backend,
+    worker_local_venv,
     ssh
   };
 }

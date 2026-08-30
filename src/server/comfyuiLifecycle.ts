@@ -239,7 +239,12 @@ async function runningContainerVramFlags(node: GpuNode, container: string): Prom
   try {
     const args = JSON.parse(r.stdout.trim());
     if (!Array.isArray(args)) return undefined;
-    return extractVramFlagTail(args.map((x: unknown) => String(x)));
+    // Flatten: the worker-local-venv launch wraps the command as
+    // `bash -c "…main.py … --reserve-vram 1"`, so .Args is ["-c", "<one big
+    // string>"] rather than individual tokens. Splitting on whitespace recovers
+    // the flag tokens for both launch shapes (a no-op for the plain-python path).
+    const tokens = args.flatMap((x: unknown) => String(x).split(/\s+/)).filter(Boolean);
+    return extractVramFlagTail(tokens);
   } catch {
     return undefined;
   }
@@ -265,6 +270,7 @@ export function buildDockerStartScript(
   if (!node.venv_python) throw new Error(`runtime=docker but node ${node.name} has no venv_python configured`);
   const nfsRoot = resolveNfsShareRoot(node);
   const flags = resolveVramFlags(node, vramFlags).join(" ");
+  const useLocalVenv = node.worker_local_venv === true;
   return (
     `#!/usr/bin/env bash\n` +
     `set -e\n` +
@@ -283,6 +289,10 @@ export function buildDockerStartScript(
     // node whose ESIMD attention kernel device-losts at full-size attention.
     (node.attn_backend ? `  -e OMNI_ATTN_BACKEND=${node.attn_backend} \\\n` : ``) +
     `  -e ZE_AFFINITY_MASK=0 -e OMNI_FP8_KEEP_ON_MOVE=1 -e NO_PROXY -e no_proxy -e HTTP_PROXY -e HTTPS_PROXY -e http_proxy -e https_proxy \\\n` +
+    // Worker-local venv (P1): keep ComfyUI's import-time auto-`pip install` OFFLINE
+    // and pointed at the shared wheelhouse — it can't reach the network to pull a
+    // CUDA torch, and it can only write into the ephemeral /tmp venv anyway.
+    (useLocalVenv ? `  -e PIP_NO_INDEX=1 -e PIP_FIND_LINKS=${WHEELHOUSE_DIR} \\\n` : ``) +
     (nfsRoot ? `  -v '${nfsRoot}:${nfsRoot}' \\\n` : ``) +
     `  -v '${node.comfyui_root}:/comfyui' \\\n` +
     // Profile-scoped overlay: mount ONLY the workflow's custom_nodes over the
@@ -290,15 +300,43 @@ export function buildDockerStartScript(
     // harvest-objectinfo.py). This is the bug-B fix — the container no longer
     // loads the node's whole accumulated custom_nodes tree.
     (customNodesDir ? `  -v '${customNodesDir}:/comfyui/custom_nodes' \\\n` : ``) +
-    `  --entrypoint '${node.venv_python}' \\\n` +
-    `  '${node.docker_image}' \\\n` +
     // Dynamic VRAM must stay ENABLED (do not pass --disable-dynamic-vram): the
     // sequential fp8 offload recipe relies on ComfyUI offloading a model to make
     // room for the next stage. --cpu-vae is intentionally NOT passed -- the VAE runs
     // on XPU and ComfyUI auto-falls-back to tiled decode if a full decode would OOM.
-    `  /comfyui/main.py --port ${port} --listen ${listen} ${flags}\n` +
+    (useLocalVenv
+      ? // Worker-local venv (P1): create a per-container ephemeral venv INSIDE the
+        // image (so it inherits the image's compiled torch-xpu/oneAPI/omni_xpu_kernel
+        // via --system-site-packages), assert the XPU stack is really present (fail
+        // LOUDLY rather than silently run CPU torch), then exec ComfyUI from it.
+        `  --entrypoint bash \\\n` +
+        `  '${node.docker_image}' \\\n` +
+        `  -c '${buildLocalVenvBootstrap(containerName, port, listen, flags)}'\n`
+      : `  --entrypoint '${node.venv_python}' \\\n` +
+        `  '${node.docker_image}' \\\n` +
+        `  /comfyui/main.py --port ${port} --listen ${listen} ${flags}\n`) +
     `nohup docker logs -f '${containerName}' > /tmp/comfyui-${port}.log 2>&1 < /dev/null &\n`
   );
+}
+
+/** Shared wheelhouse the worker-local venv installs from (offline). Populated by the Builder (Phase 2). */
+export const WHEELHOUSE_DIR = "/nfs_share/wheelhouse";
+
+/**
+ * The `bash -c` body for a worker-local-venv launch. Single-line, uses only
+ * double quotes internally (it is embedded in an outer single-quoted -c arg).
+ * `set -e` aborts the container loudly if venv creation or the XPU-stack
+ * assertion fails, which surfaces as the orchestrator's infrastructure
+ * hard-stop instead of a silent CPU-torch run.
+ */
+export function buildLocalVenvBootstrap(containerName: string, port: number, listen: string, flags: string): string {
+  const venv = `/tmp/venv-${containerName}`;
+  return [
+    `set -e`,
+    `python3 -m venv --system-site-packages "${venv}"`,
+    `"${venv}"/bin/python -c "import torch, omni_xpu_kernel; assert torch.xpu.is_available()"`,
+    `exec "${venv}"/bin/python /comfyui/main.py --port ${port} --listen ${listen} ${flags}`.trimEnd()
+  ].join("; ");
 }
 
 export function defaultContainerName(node: GpuNode): string {

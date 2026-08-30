@@ -63,6 +63,40 @@ describe("buildDockerStartScript", () => {
     expect(legacy).not.toContain(":/comfyui/custom_nodes'");
   });
 
+  it("worker_local_venv: boots an ephemeral --system-site-packages venv with an XPU-stack assert + offline pip, not the shared venv", async () => {
+    const { buildDockerStartScript, buildLocalVenvBootstrap } = await import("./comfyuiLifecycle");
+    const script = buildDockerStartScript(
+      dockerNode({ worker_local_venv: true }),
+      8188,
+      "127.0.0.1",
+      "comfyui-task-9",
+      undefined,
+      undefined
+    );
+    // NOT the shared-venv entrypoint
+    expect(script).not.toContain("--entrypoint '/nfs_share/venv-container-xpu/bin/python3'");
+    expect(script).toContain("--entrypoint bash");
+    // offline pip containment
+    expect(script).toContain("-e PIP_NO_INDEX=1");
+    expect(script).toContain("-e PIP_FIND_LINKS=/nfs_share/wheelhouse");
+    // the bootstrap: ephemeral venv + system-site-packages + hard XPU gate + exec main.py
+    const boot = buildLocalVenvBootstrap("comfyui-task-9", 8188, "127.0.0.1", "--reserve-vram 1");
+    expect(boot).toContain("python3 -m venv --system-site-packages \"/tmp/venv-comfyui-task-9\"");
+    expect(boot).toContain("import torch, omni_xpu_kernel; assert torch.xpu.is_available()");
+    expect(boot).toContain("exec \"/tmp/venv-comfyui-task-9\"/bin/python /comfyui/main.py --port 8188 --listen 127.0.0.1 --reserve-vram 1");
+    expect(boot.startsWith("set -e")).toBe(true);
+    // no single quotes (it is embedded in an outer single-quoted -c arg)
+    expect(boot).not.toContain("'");
+  });
+
+  it("default (no worker_local_venv): keeps the shared-venv entrypoint and no offline pip env", async () => {
+    const { buildDockerStartScript } = await import("./comfyuiLifecycle");
+    const script = buildDockerStartScript(dockerNode(), 8188, "127.0.0.1", "comfyui-task-1");
+    expect(script).toContain("--entrypoint '/nfs_share/venv-container-xpu/bin/python3'");
+    expect(script).not.toContain("--entrypoint bash");
+    expect(script).not.toContain("PIP_NO_INDEX");
+  });
+
   it("enables the native-fp8 XPU recipe: OMNI_FP8_KEEP_ON_MOVE=1 env, dynamic VRAM on, no --cpu-vae", async () => {
     const { buildDockerStartScript } = await import("./comfyuiLifecycle");
     const script = buildDockerStartScript(dockerNode(), 8188, "127.0.0.1", "comfyui-task-1");
