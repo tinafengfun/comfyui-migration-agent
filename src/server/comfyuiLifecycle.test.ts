@@ -79,9 +79,12 @@ describe("buildDockerStartScript", () => {
     // offline pip containment
     expect(script).toContain("-e PIP_NO_INDEX=1");
     expect(script).toContain("-e PIP_FIND_LINKS=/nfs_share/wheelhouse");
-    // the bootstrap: ephemeral venv + system-site-packages + hard XPU gate + exec main.py
-    const boot = buildLocalVenvBootstrap("comfyui-task-9", 8188, "127.0.0.1", "--reserve-vram 1");
-    expect(boot).toContain("python3 -m venv --system-site-packages \"/tmp/venv-comfyui-task-9\"");
+    // the bootstrap: ephemeral venv + system-site-packages + shared read-only base + hard XPU gate + exec main.py
+    const boot = buildLocalVenvBootstrap("comfyui-task-9", 8188, "127.0.0.1", "--reserve-vram 1", "/nfs_share/venv-container-xpu/bin/python3");
+    expect(boot).toContain("python3 -m venv --system-site-packages --without-pip \"/tmp/venv-comfyui-task-9\"");
+    // shared venv site layered as a read-only base via a .pth (derived from the shared venv python)
+    expect(boot).toContain("/nfs_share/venv-container-xpu\"/lib/python*/site-packages");
+    expect(boot).toContain("zzz-shared-base.pth");
     expect(boot).toContain("import torch, omni_xpu_kernel; assert torch.xpu.is_available()");
     expect(boot).toContain("exec \"/tmp/venv-comfyui-task-9\"/bin/python /comfyui/main.py --port 8188 --listen 127.0.0.1 --reserve-vram 1");
     expect(boot.startsWith("set -e")).toBe(true);

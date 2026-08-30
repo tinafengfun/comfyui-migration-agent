@@ -89,14 +89,25 @@ export function parseEvidenceDirs(evidence: string | undefined): string[] {
   return out;
 }
 
-/** Package dir-names implied by a deploy ledger (packageName + basename(nfsPath)). Pure. */
+/**
+ * Package dir-names implied by a deploy ledger. Pure. Derives the custom_nodes
+ * directory name from whichever field is present: packageName, basename(nfsPath),
+ * or basename(repository) — real ledgers often carry only `repository`
+ * ("kijai/ComfyUI-KJNodes" → "ComfyUI-KJNodes"). comfy-core rows (repository
+ * "comfyui-core", nodeKey "core") are skipped — they are not custom-node dirs.
+ */
 export function parseLedgerPackages(ledger: CatalogDeployLedger | undefined): string[] {
   const set = new Set<string>();
   for (const node of ledger?.nodes ?? []) {
+    if (node.nodeKey === "core") continue;
     if (node.packageName) set.add(node.packageName);
     if (node.nfsPath) {
       const base = path.basename(node.nfsPath.replace(/\/+$/, ""));
       if (base) set.add(base);
+    }
+    if (node.repository && node.repository !== "comfyui-core") {
+      const base = path.basename(node.repository.replace(/\/+$/, ""));
+      if (base && base !== "comfyui-core") set.add(base);
     }
   }
   return [...set];

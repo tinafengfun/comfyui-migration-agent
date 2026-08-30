@@ -26,15 +26,18 @@ describe("profileLaunch pure parsers", () => {
     expect(parseEvidenceDirs(undefined)).toEqual([]);
   });
 
-  it("parseLedgerPackages unions packageName + basename(nfsPath)", () => {
+  it("parseLedgerPackages unions packageName + basename(nfsPath) + basename(repository), skips core", () => {
     const pkgs = parseLedgerPackages({
       nodes: [
         { nodeType: "A", packageName: "ComfyUI-KJNodes", nfsPath: "/nfs_share/custom_nodes/ComfyUI-KJNodes/" },
         { nodeType: "B", nfsPath: "/nfs_share/custom_nodes/rgthree-comfy" },
+        // real ledgers often carry only `repository` (owner/name):
+        { nodeType: "D", repository: "city96/ComfyUI-GGUF" },
+        { nodeType: "CLIPLoader", nodeKey: "core", repository: "comfyui-core" },
         { nodeType: "C" }
       ]
     });
-    expect(pkgs.sort()).toEqual(["ComfyUI-KJNodes", "rgthree-comfy"]);
+    expect(pkgs.sort()).toEqual(["ComfyUI-GGUF", "ComfyUI-KJNodes", "rgthree-comfy"]);
   });
 
   it("parseEnumPackages reads resolving_package, skips header + unknowns", () => {

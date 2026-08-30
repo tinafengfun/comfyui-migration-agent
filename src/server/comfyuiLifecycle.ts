@@ -20,6 +20,7 @@
 import { execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
 import fs from "node:fs";
+import path from "node:path";
 import { resolveNfsShareRoot, runShellOnNode, type GpuNode } from "./gpuNodes";
 import { WHEELHOUSE_DIR } from "./wheelhouse";
 
@@ -308,11 +309,13 @@ export function buildDockerStartScript(
     (useLocalVenv
       ? // Worker-local venv (P1): create a per-container ephemeral venv INSIDE the
         // image (so it inherits the image's compiled torch-xpu/oneAPI/omni_xpu_kernel
-        // via --system-site-packages), assert the XPU stack is really present (fail
-        // LOUDLY rather than silently run CPU torch), then exec ComfyUI from it.
+        // via --system-site-packages), layer the shared venv's site-packages as a
+        // read-only base (it holds the real ComfyUI runtime deps — comfy_aimdo etc.
+        // — that the image alone lacks), assert the XPU stack is present (fail LOUDLY
+        // rather than silently run CPU torch), then exec ComfyUI from it.
         `  --entrypoint bash \\\n` +
         `  '${node.docker_image}' \\\n` +
-        `  -c '${buildLocalVenvBootstrap(containerName, port, listen, flags)}'\n`
+        `  -c '${buildLocalVenvBootstrap(containerName, port, listen, flags, node.venv_python)}'\n`
       : `  --entrypoint '${node.venv_python}' \\\n` +
         `  '${node.docker_image}' \\\n` +
         `  /comfyui/main.py --port ${port} --listen ${listen} ${flags}\n`) +
@@ -327,11 +330,31 @@ export function buildDockerStartScript(
  * assertion fails, which surfaces as the orchestrator's infrastructure
  * hard-stop instead of a silent CPU-torch run.
  */
-export function buildLocalVenvBootstrap(containerName: string, port: number, listen: string, flags: string): string {
+export function buildLocalVenvBootstrap(
+  containerName: string,
+  port: number,
+  listen: string,
+  flags: string,
+  sharedVenvPython: string
+): string {
   const venv = `/tmp/venv-${containerName}`;
+  // Shared venv root (…/venv-container-xpu) from its python (…/bin/python3). Its
+  // site-packages is layered in as a read-only base via a .pth file so the local
+  // venv sees the real ComfyUI runtime deps (comfy_aimdo, patched comfy_kitchen,
+  // node deps) that the image's system site-packages lacks — precedence is
+  // local venv site → shared base → image system, so a local install still wins.
+  const sharedVenvRoot = path.posix.dirname(path.posix.dirname(sharedVenvPython));
+  // --without-pip: the base image's python has no ensurepip, so `venv` can't
+  // bootstrap its own pip. With --system-site-packages the venv python still SEES
+  // the image's system pip, and because pip keys install location off the
+  // interpreter's sys.prefix (= the venv), `python -m pip install` still lands in
+  // the ephemeral venv — so import-time auto-pip can never mutate the shared venv.
   return [
     `set -e`,
-    `python3 -m venv --system-site-packages "${venv}"`,
+    `python3 -m venv --system-site-packages --without-pip "${venv}"`,
+    `SHARED_SITE=$(ls -d "${sharedVenvRoot}"/lib/python*/site-packages 2>/dev/null | head -1)`,
+    `LOCAL_SITE=$(ls -d "${venv}"/lib/python*/site-packages 2>/dev/null | head -1)`,
+    `[ -n "$SHARED_SITE" ] && echo "$SHARED_SITE" > "$LOCAL_SITE/zzz-shared-base.pth"`,
     `"${venv}"/bin/python -c "import torch, omni_xpu_kernel; assert torch.xpu.is_available()"`,
     `exec "${venv}"/bin/python /comfyui/main.py --port ${port} --listen ${listen} ${flags}`.trimEnd()
   ].join("; ");
