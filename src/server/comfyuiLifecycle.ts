@@ -272,7 +272,19 @@ export function buildDockerStartScript(
   if (!node.venv_python) throw new Error(`runtime=docker but node ${node.name} has no venv_python configured`);
   const nfsRoot = resolveNfsShareRoot(node);
   const flags = resolveVramFlags(node, vramFlags).join(" ");
+  // worker_local_venv marks a node whose venv_python is a NODE-LOCAL venv (set up
+  // at deploy — see deploy-remote-node.sh --setup-local-venv), not the shared NFS
+  // venv. It only turns on OFFLINE pip containment here; the venv itself is a plain
+  // venv_python that BOTH launch paths (this and the SDK Step-05 skill) use, so no
+  // launch ever writes to the shared venv. That resolves the distributed conflict
+  // at its source (shared venv_python), not per-launch.
   const useLocalVenv = node.worker_local_venv === true;
+  // A node-local venv lives outside the already-mounted nfsRoot/comfyui_root, so it
+  // must be bind-mounted at its identical path for venv_python to resolve in-container.
+  const venvRoot = path.posix.dirname(path.posix.dirname(node.venv_python));
+  const venvUnderNfs = !!nfsRoot && (venvRoot === nfsRoot || venvRoot.startsWith(nfsRoot + "/"));
+  const venvUnderCore = venvRoot === node.comfyui_root || venvRoot.startsWith(node.comfyui_root + "/");
+  const needVenvMount = !venvUnderNfs && !venvUnderCore;
   return (
     `#!/usr/bin/env bash\n` +
     `set -e\n` +
@@ -291,12 +303,16 @@ export function buildDockerStartScript(
     // node whose ESIMD attention kernel device-losts at full-size attention.
     (node.attn_backend ? `  -e OMNI_ATTN_BACKEND=${node.attn_backend} \\\n` : ``) +
     `  -e ZE_AFFINITY_MASK=0 -e OMNI_FP8_KEEP_ON_MOVE=1 -e NO_PROXY -e no_proxy -e HTTP_PROXY -e HTTPS_PROXY -e http_proxy -e https_proxy \\\n` +
-    // Worker-local venv (P1): keep ComfyUI's import-time auto-`pip install` OFFLINE
-    // and pointed at the shared wheelhouse — it can't reach the network to pull a
-    // CUDA torch, and it can only write into the ephemeral /tmp venv anyway.
+    // Node-local venv: keep ComfyUI's import-time auto-`pip install` OFFLINE and
+    // pointed at the shared wheelhouse — it can't reach the network to pull a CUDA
+    // torch, and any install lands only in this node's local venv, never the shared one.
     (useLocalVenv ? `  -e PIP_NO_INDEX=1 -e PIP_FIND_LINKS=${WHEELHOUSE_DIR} \\\n` : ``) +
     (nfsRoot ? `  -v '${nfsRoot}:${nfsRoot}' \\\n` : ``) +
     `  -v '${node.comfyui_root}:/comfyui' \\\n` +
+    // Bind-mount the node-local venv dir at its identical path so venv_python
+    // resolves inside the container (a shared-NFS venv is already covered by the
+    // nfsRoot mount, so this only fires for a genuinely node-local venv).
+    (needVenvMount ? `  -v '${venvRoot}:${venvRoot}' \\\n` : ``) +
     // Profile-scoped overlay: mount ONLY the workflow's custom_nodes over the
     // core's (nested after the comfyui_root mount, exactly like
     // harvest-objectinfo.py). This is the bug-B fix — the container no longer
@@ -306,58 +322,13 @@ export function buildDockerStartScript(
     // sequential fp8 offload recipe relies on ComfyUI offloading a model to make
     // room for the next stage. --cpu-vae is intentionally NOT passed -- the VAE runs
     // on XPU and ComfyUI auto-falls-back to tiled decode if a full decode would OOM.
-    (useLocalVenv
-      ? // Worker-local venv (P1): create a per-container ephemeral venv INSIDE the
-        // image (so it inherits the image's compiled torch-xpu/oneAPI/omni_xpu_kernel
-        // via --system-site-packages), layer the shared venv's site-packages as a
-        // read-only base (it holds the real ComfyUI runtime deps — comfy_aimdo etc.
-        // — that the image alone lacks), assert the XPU stack is present (fail LOUDLY
-        // rather than silently run CPU torch), then exec ComfyUI from it.
-        `  --entrypoint bash \\\n` +
-        `  '${node.docker_image}' \\\n` +
-        `  -c '${buildLocalVenvBootstrap(containerName, port, listen, flags, node.venv_python)}'\n`
-      : `  --entrypoint '${node.venv_python}' \\\n` +
-        `  '${node.docker_image}' \\\n` +
-        `  /comfyui/main.py --port ${port} --listen ${listen} ${flags}\n`) +
+    // venv_python is the single runtime-venv source of truth (shared or node-local),
+    // used identically here and by the SDK Step-05 launch.
+    `  --entrypoint '${node.venv_python}' \\\n` +
+    `  '${node.docker_image}' \\\n` +
+    `  /comfyui/main.py --port ${port} --listen ${listen} ${flags}\n` +
     `nohup docker logs -f '${containerName}' > /tmp/comfyui-${port}.log 2>&1 < /dev/null &\n`
   );
-}
-
-/**
- * The `bash -c` body for a worker-local-venv launch. Single-line, uses only
- * double quotes internally (it is embedded in an outer single-quoted -c arg).
- * `set -e` aborts the container loudly if venv creation or the XPU-stack
- * assertion fails, which surfaces as the orchestrator's infrastructure
- * hard-stop instead of a silent CPU-torch run.
- */
-export function buildLocalVenvBootstrap(
-  containerName: string,
-  port: number,
-  listen: string,
-  flags: string,
-  sharedVenvPython: string
-): string {
-  const venv = `/tmp/venv-${containerName}`;
-  // Shared venv root (…/venv-container-xpu) from its python (…/bin/python3). Its
-  // site-packages is layered in as a read-only base via a .pth file so the local
-  // venv sees the real ComfyUI runtime deps (comfy_aimdo, patched comfy_kitchen,
-  // node deps) that the image's system site-packages lacks — precedence is
-  // local venv site → shared base → image system, so a local install still wins.
-  const sharedVenvRoot = path.posix.dirname(path.posix.dirname(sharedVenvPython));
-  // --without-pip: the base image's python has no ensurepip, so `venv` can't
-  // bootstrap its own pip. With --system-site-packages the venv python still SEES
-  // the image's system pip, and because pip keys install location off the
-  // interpreter's sys.prefix (= the venv), `python -m pip install` still lands in
-  // the ephemeral venv — so import-time auto-pip can never mutate the shared venv.
-  return [
-    `set -e`,
-    `python3 -m venv --system-site-packages --without-pip "${venv}"`,
-    `SHARED_SITE=$(ls -d "${sharedVenvRoot}"/lib/python*/site-packages 2>/dev/null | head -1)`,
-    `LOCAL_SITE=$(ls -d "${venv}"/lib/python*/site-packages 2>/dev/null | head -1)`,
-    `[ -n "$SHARED_SITE" ] && echo "$SHARED_SITE" > "$LOCAL_SITE/zzz-shared-base.pth"`,
-    `"${venv}"/bin/python -c "import torch, omni_xpu_kernel; assert torch.xpu.is_available()"`,
-    `exec "${venv}"/bin/python /comfyui/main.py --port ${port} --listen ${listen} ${flags}`.trimEnd()
-  ].join("; ");
 }
 
 export function defaultContainerName(node: GpuNode): string {

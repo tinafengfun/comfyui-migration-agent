@@ -33,6 +33,9 @@ DIR="/home/intel/comfyui_agent"; BRANCH="v2-distributed-runtime"
 BE_SESSION="agent-backend"; FE_SESSION="agent-frontend"
 BE_PORT="3001"; FE_PORT="5173"
 WORKER_LOCAL_VENV=0; STOP_LEGACY=0; RESTART=1; TYPECHECK=1
+SETUP_LOCAL_VENV=0
+LOCAL_VENV_DIR="/home/intel/comfyui-runtime-venv"
+SHARED_VENV_PY="/nfs_share/venv-container-xpu/bin/python3"
 
 while [ $# -gt 0 ]; do case "$1" in
   --host) HOST="$2"; shift 2;;
@@ -44,7 +47,10 @@ while [ $# -gt 0 ]; do case "$1" in
   --frontend-session) FE_SESSION="$2"; shift 2;;
   --backend-port) BE_PORT="$2"; shift 2;;
   --frontend-port) FE_PORT="$2"; shift 2;;
-  --worker-local-venv) WORKER_LOCAL_VENV=1; shift;;
+  --worker-local-venv) WORKER_LOCAL_VENV=1; shift;;               # flip the flag only
+  --setup-local-venv) SETUP_LOCAL_VENV=1; shift;;                 # CREATE the node-local venv + repoint config
+  --local-venv-dir) LOCAL_VENV_DIR="$2"; shift 2;;
+  --shared-venv-python) SHARED_VENV_PY="$2"; shift 2;;
   --stop-legacy) STOP_LEGACY=1; shift;;
   --no-restart) RESTART=0; shift;;
   --no-typecheck) TYPECHECK=0; shift;;
@@ -56,6 +62,21 @@ SSH=(ssh -o ConnectTimeout=15 -o StrictHostKeyChecking=no -i "$KEY" "$USER_NAME@
 
 echo "==> V2 remote deploy → $USER_NAME@$HOST:$DIR (branch $BRANCH)"
 "${SSH[@]}" "hostname && echo reachable" >/dev/null || { echo "ERROR: cannot ssh to $HOST" >&2; exit 3; }
+
+# Node-local venv creation is a standalone helper (base64'd, run inside the image on
+# the remote) so there's no fragile heredoc/-c nesting. It takes: $1=venv dir,
+# $2=shared venv root (for the read-only .pth base). Computed locally, decoded remotely.
+SHARED_ROOT_VAL="$(dirname "$(dirname "$SHARED_VENV_PY")")"
+MK_VENV_SCRIPT='#!/usr/bin/env bash
+set -e
+VENVDIR="$1"; SHARED_ROOT="$2"
+python3 -m venv --system-site-packages --without-pip "$VENVDIR"
+SHARED_SITE=$(ls -d "$SHARED_ROOT"/lib/python*/site-packages 2>/dev/null | head -1)
+LOCAL_SITE=$(ls -d "$VENVDIR"/lib/python*/site-packages 2>/dev/null | head -1)
+[ -n "$SHARED_SITE" ] && echo "$SHARED_SITE" > "$LOCAL_SITE/zzz-shared-base.pth"
+"$VENVDIR"/bin/python -c "import torch, omni_xpu_kernel; assert torch.xpu.is_available()"
+echo "   node-local venv XPU-stack OK"'
+MK_VENV_B64=$(printf '%s' "$MK_VENV_SCRIPT" | base64 -w0 2>/dev/null || printf '%s' "$MK_VENV_SCRIPT" | base64)
 
 # The whole remote sequence is built here and run in one shell so a failure at
 # any gate aborts BEFORE the restart (mirrors deploy-agent-demo.sh's guarantee
@@ -84,14 +105,40 @@ echo "   now at: \$(git log --oneline -1)"
 echo "-- npm install (idempotent) --"
 npm install --no-audit --no-fund --silent
 
-if [ "$WORKER_LOCAL_VENV" = "1" ]; then
-  echo "-- enabling worker_local_venv on all docker nodes in gpu-nodes.json --"
+if [ "$SETUP_LOCAL_VENV" = "1" ]; then
+  echo "-- setting up node-local runtime venv at $LOCAL_VENV_DIR (shared base: $SHARED_ROOT_VAL) --"
+  IMG=\$(node -e 'const c=JSON.parse(require("fs").readFileSync("gpu-nodes.json"));console.log((c.nodes.find(n=>n.runtime==="docker")||{}).docker_image||"")')
+  [ -n "\$IMG" ] || { echo "ERROR: no docker node / docker_image in gpu-nodes.json"; exit 6; }
+  mkdir -p "$LOCAL_VENV_DIR"
+  # Create the venv INSIDE the image (ABI-compatible with its torch-xpu), on local
+  # disk, --without-pip (image python has no ensurepip; --system-site-packages still
+  # exposes the image pip which installs into this venv by sys.prefix). Layer the
+  # shared venv's site-packages as a READ-ONLY base via a .pth so ComfyUI's runtime
+  # deps (comfy_aimdo etc.) resolve without ever writing to the shared venv. Assert
+  # the XPU stack so a broken venv fails LOUDLY at deploy, not mid-migration.
+  HELPER=/nfs_share/.mk-venv-deploy.sh
+  echo "$MK_VENV_B64" | base64 -d > "\$HELPER"
+  docker run --rm --device /dev/dri -v "$LOCAL_VENV_DIR:$LOCAL_VENV_DIR" -v /nfs_share:/nfs_share \\
+    -e ZE_AFFINITY_MASK=0 \\
+    --entrypoint bash "\$IMG" "\$HELPER" "$LOCAL_VENV_DIR" "$SHARED_ROOT_VAL"
+  rm -f "\$HELPER"
+  echo "-- repointing gpu-nodes.json: venv_python -> node-local venv, model_roots += venv dir --"
   node -e '
-    const fs=require("fs");
-    const p="gpu-nodes.json";
-    const c=JSON.parse(fs.readFileSync(p,"utf8"));
-    let n=0;
-    for(const nd of (c.nodes||[])){ if((nd.runtime||"")==="docker"){ nd.worker_local_venv=true; n++; } }
+    const fs=require("fs"); const p="gpu-nodes.json"; const c=JSON.parse(fs.readFileSync(p,"utf8"));
+    const dir=process.argv[1]; const py=dir+"/bin/python3"; let n=0;
+    for(const nd of (c.nodes||[])){ if((nd.runtime||"")==="docker"){
+      nd.venv_python=py; nd.worker_local_venv=true;
+      nd.model_roots=nd.model_roots||[]; if(!nd.model_roots.includes(dir)) nd.model_roots.push(dir);
+      n++;
+    }}
+    fs.writeFileSync(p, JSON.stringify(c,null,2)+"\n");
+    console.log("   repointed "+n+" docker node(s) → "+py);
+  ' "$LOCAL_VENV_DIR"
+elif [ "$WORKER_LOCAL_VENV" = "1" ]; then
+  echo "-- enabling worker_local_venv flag only (no venv setup) on docker nodes --"
+  node -e '
+    const fs=require("fs"); const p="gpu-nodes.json"; const c=JSON.parse(fs.readFileSync(p,"utf8"));
+    let n=0; for(const nd of (c.nodes||[])){ if((nd.runtime||"")==="docker"){ nd.worker_local_venv=true; n++; } }
     fs.writeFileSync(p, JSON.stringify(c,null,2)+"\n");
     console.log("   worker_local_venv=true on "+n+" docker node(s)");
   '

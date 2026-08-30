@@ -63,39 +63,32 @@ describe("buildDockerStartScript", () => {
     expect(legacy).not.toContain(":/comfyui/custom_nodes'");
   });
 
-  it("worker_local_venv: boots an ephemeral --system-site-packages venv with an XPU-stack assert + offline pip, not the shared venv", async () => {
-    const { buildDockerStartScript, buildLocalVenvBootstrap } = await import("./comfyuiLifecycle");
+  it("node-local venv: mounts the local venv dir, uses it as entrypoint, and enables offline pip", async () => {
+    const { buildDockerStartScript } = await import("./comfyuiLifecycle");
     const script = buildDockerStartScript(
-      dockerNode({ worker_local_venv: true }),
+      dockerNode({ worker_local_venv: true, venv_python: "/home/intel/comfyui-runtime-venv/bin/python3" }),
       8188,
       "127.0.0.1",
-      "comfyui-task-9",
-      undefined,
-      undefined
+      "comfyui-task-9"
     );
-    // NOT the shared-venv entrypoint
-    expect(script).not.toContain("--entrypoint '/nfs_share/venv-container-xpu/bin/python3'");
-    expect(script).toContain("--entrypoint bash");
-    // offline pip containment
+    // the node-local venv is used directly (single source of truth, same as the SDK launch)
+    expect(script).toContain("--entrypoint '/home/intel/comfyui-runtime-venv/bin/python3'");
+    // and its dir is bind-mounted at the identical path so it resolves in-container
+    expect(script).toContain("-v '/home/intel/comfyui-runtime-venv:/home/intel/comfyui-runtime-venv'");
+    // offline pip containment (no network CUDA-torch pulls; installs land in the local venv)
     expect(script).toContain("-e PIP_NO_INDEX=1");
     expect(script).toContain("-e PIP_FIND_LINKS=/nfs_share/wheelhouse");
-    // the bootstrap: ephemeral venv + system-site-packages + shared read-only base + hard XPU gate + exec main.py
-    const boot = buildLocalVenvBootstrap("comfyui-task-9", 8188, "127.0.0.1", "--reserve-vram 1", "/nfs_share/venv-container-xpu/bin/python3");
-    expect(boot).toContain("python3 -m venv --system-site-packages --without-pip \"/tmp/venv-comfyui-task-9\"");
-    // shared venv site layered as a read-only base via a .pth (derived from the shared venv python)
-    expect(boot).toContain("/nfs_share/venv-container-xpu\"/lib/python*/site-packages");
-    expect(boot).toContain("zzz-shared-base.pth");
-    expect(boot).toContain("import torch, omni_xpu_kernel; assert torch.xpu.is_available()");
-    expect(boot).toContain("exec \"/tmp/venv-comfyui-task-9\"/bin/python /comfyui/main.py --port 8188 --listen 127.0.0.1 --reserve-vram 1");
-    expect(boot.startsWith("set -e")).toBe(true);
-    // no single quotes (it is embedded in an outer single-quoted -c arg)
-    expect(boot).not.toContain("'");
+    // no ephemeral bootstrap anymore
+    expect(script).not.toContain("--entrypoint bash");
+    expect(script).toContain("/comfyui/main.py --port 8188 --listen 127.0.0.1");
   });
 
-  it("default (no worker_local_venv): keeps the shared-venv entrypoint and no offline pip env", async () => {
+  it("shared NFS venv (default): no extra venv mount (covered by nfsRoot), no offline pip", async () => {
     const { buildDockerStartScript } = await import("./comfyuiLifecycle");
     const script = buildDockerStartScript(dockerNode(), 8188, "127.0.0.1", "comfyui-task-1");
     expect(script).toContain("--entrypoint '/nfs_share/venv-container-xpu/bin/python3'");
+    // the shared venv is under the nfsRoot mount → no separate venv-dir mount
+    expect(script).not.toContain("-v '/nfs_share/venv-container-xpu:/nfs_share/venv-container-xpu'");
     expect(script).not.toContain("--entrypoint bash");
     expect(script).not.toContain("PIP_NO_INDEX");
   });
