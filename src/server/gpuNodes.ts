@@ -54,6 +54,15 @@ export interface GpuNode {
   model_roots: string[];
   api_host: string;
   api_port: number;
+  /**
+   * Host ComfyUI binds to (the `--listen` value). Explicit setting wins; when
+   * unset, ssh nodes bind "0.0.0.0" (the agent must reach them across the network)
+   * and local nodes bind "127.0.0.1". Set to "0.0.0.0" to expose a LOCAL node's
+   * ComfyUI on the LAN (e.g. reachable at http://<node-ip>:<api_port>) instead of
+   * localhost-only. NOTE: 0.0.0.0 serves ComfyUI with no auth — use only on a
+   * trusted network. api_host stays the address the orchestrator itself dials.
+   */
+  api_listen?: string;
   launch_flags?: string[];
   ssh?: GpuNodeSsh;
   model_share?: ModelShare;
@@ -175,12 +184,23 @@ export function nodeApiUrl(node: GpuNode): string {
  * Render a compact "## GPU node" block for prompt injection.
  * The Step 05 skill branches on `kind` after reading this.
  */
+/**
+ * The host ComfyUI binds to (`--listen`). Explicit `api_listen` wins; else ssh
+ * nodes bind 0.0.0.0 (reachable across the network) and local nodes bind
+ * 127.0.0.1. Used by BOTH launch paths (orchestrator + the SDK Step-05 skill via
+ * the node block) so a node exposes ComfyUI identically however it is launched.
+ */
+export function resolveListenHost(node: GpuNode): string {
+  return node.api_listen ?? (node.kind === "ssh" ? "0.0.0.0" : "127.0.0.1");
+}
+
 export function renderGpuNodeBlock(node: GpuNode, taskId: string): string {
   const lines: string[] = ["## GPU node", ""];
   lines.push(`- name: ${node.name}`);
   lines.push(`- kind: ${node.kind}`);
   if (node.vram_gb !== undefined) lines.push(`- vram_gb: ${node.vram_gb}`);
   lines.push(`- api_url: ${nodeApiUrl(node)}`);
+  lines.push(`- listen_host: ${resolveListenHost(node)}`);
   lines.push(`- comfyui_root: ${node.comfyui_root}`);
   lines.push(`- venv_python: ${node.venv_python}`);
   lines.push(`- model_roots: ${node.model_roots.join(":") || "(none)"}`);
@@ -1072,6 +1092,7 @@ function normalizeNode(raw: unknown, index: number, sourcePath: string): GpuNode
       : [];
   const api_host = typeof o.api_host === "string" ? o.api_host : "127.0.0.1";
   const api_port = typeof o.api_port === "number" ? o.api_port : 8188;
+  const api_listen = typeof o.api_listen === "string" ? o.api_listen : undefined;
   const launch_flags =
     Array.isArray(o.launch_flags) && o.launch_flags.every((v) => typeof v === "string")
       ? (o.launch_flags as string[])
@@ -1119,6 +1140,7 @@ function normalizeNode(raw: unknown, index: number, sourcePath: string): GpuNode
     model_roots,
     api_host,
     api_port,
+    api_listen,
     launch_flags,
     vram_gb,
     model_share,

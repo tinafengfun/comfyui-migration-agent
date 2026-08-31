@@ -9,6 +9,7 @@ import {
   loadGpuNodes,
   pickNode,
   nodeApiUrl,
+  resolveListenHost,
   renderGpuNodeBlock,
   maskNodeForPublic,
   upsertNode,
@@ -300,6 +301,27 @@ describe("gpuNodes", () => {
     const block = renderGpuNodeBlock(reg.nodes[0], "task-bare");
     expect(block).toContain("runtime: bare");
     expect(block).not.toContain("docker_image:");
+  });
+
+  describe("resolveListenHost", () => {
+    const base = {
+      comfyui_root: "/x", venv_python: "/x/.venv/bin/python3",
+      model_roots: ["/m"], api_host: "127.0.0.1", api_port: 8188,
+      runtime: "docker" as const, docker_image: "img:tag"
+    };
+    it("local nodes default to 127.0.0.1 (localhost-only)", () => {
+      expect(resolveListenHost({ name: "l", kind: "local", ...base } as GpuNode)).toBe("127.0.0.1");
+    });
+    it("ssh nodes default to 0.0.0.0 (reachable across the network)", () => {
+      expect(resolveListenHost({ name: "s", kind: "ssh", ...base } as GpuNode)).toBe("0.0.0.0");
+    });
+    it("explicit api_listen wins (expose a local node on the LAN)", () => {
+      expect(resolveListenHost({ name: "l", kind: "local", api_listen: "0.0.0.0", ...base } as GpuNode)).toBe("0.0.0.0");
+    });
+    it("renderGpuNodeBlock emits listen_host for the SDK skill", () => {
+      const block = renderGpuNodeBlock({ name: "l", kind: "local", api_listen: "0.0.0.0", ...base } as GpuNode, "t1");
+      expect(block).toContain("- listen_host: 0.0.0.0");
+    });
   });
 
   describe("resolveNfsShareRoot", () => {

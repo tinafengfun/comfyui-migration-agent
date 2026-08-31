@@ -54,7 +54,7 @@ Use to create a reproducible Intel XPU ComfyUI baseline.
    - **If Step 02 decided `fp8_te_path_chosen: "ops_py_patch"` (legacy dequant-before-move)**, apply the equivalent dequant-before-move change to `comfy/ops.py` and verify `_quantized_apply` contains the `_is_fp8_quantized_tensor` + `_probe_device` + `dequantize-before-move-to-xpu` block. Prefer `native_fp8_keep_on_move` above when comfy_kitchen ≥ 0.2.28 is available — the dequant path doubles TE memory.
    - **If Step 02 decided `fp8_te_path_chosen: "cpu_offload"` (last resort)**, no `ops.py` patch is needed; the CLIPLoader widget `device=cpu` override is delivered as a runtime-policy JSON patch instead. Only use when the keep-on-move patch cannot be applied.
    - **If Step 02 decided `fp8_te_checkpoint_stripped: true`**, ensure the stripped `<name>_text_only.safetensors` is the file referenced by the CLIPLoader widget, not the original.
-8. Launch ComfyUI from the ComfyUI root, **not** from the task workspace. The SDK session's working directory is the workspace, so an unqualified `python3 main.py` inherits the wrong CWD and Python's `sys.path[0]` will not contain the ComfyUI root. **Branch on the `## GPU node` block injected at the top of this step's prompt:**
+8. Launch ComfyUI from the ComfyUI root, **not** from the task workspace. The SDK session's working directory is the workspace, so an unqualified `python3 main.py` inherits the wrong CWD and Python's `sys.path[0]` will not contain the ComfyUI root. **Branch on the `## GPU node` block injected at the top of this step's prompt.** Map its fields to the shell vars below: `COMFYUI_ROOT`←`comfyui_root`, `VENV_PYTHON`←`venv_python`, `MODEL_ROOTS`←`model_roots`, `DOCKER_IMAGE`←`docker_image`, and **`LISTEN_HOST`←`listen_host`** (the host ComfyUI must bind to — e.g. `0.0.0.0` to expose it on the LAN, `127.0.0.1` for localhost-only). Always use `--listen "${LISTEN_HOST}"`; never hardcode the listen address.
 
    ### kind=local (existing flow)
 
@@ -62,7 +62,7 @@ Use to create a reproducible Intel XPU ComfyUI baseline.
    cd "${COMFYUI_ROOT}" && \
    "${VENV_PYTHON}" main.py \
      --port "${COMFYUI_PORT:-8188}" \
-     --listen 127.0.0.1 \
+     --listen "${LISTEN_HOST}" \
      --extra-model-paths-config "${WORKSPACE}/artifacts/05-extra-model-paths.yaml" \
      --output-directory "${WORKSPACE}/outputs" \
      <Intel XPU flags: --reserve-vram 1 (keep dynamic VRAM ENABLED — do NOT pass --disable-dynamic-vram — so the sequential fp8 offload/swap can free models between stages; do NOT pass --cpu-vae, VAE runs on XPU with auto-tiled fallback)>
@@ -79,13 +79,13 @@ Use to create a reproducible Intel XPU ComfyUI baseline.
      "cd '${REMOTE_COMFYUI_ROOT}' && \
        nohup '${REMOTE_VENV_PYTHON}' main.py \
          --port ${COMFYUI_PORT:-8188} \
-         --listen 0.0.0.0 \
+         --listen "${LISTEN_HOST}" \
          > /tmp/comfyui-${TASK_ID}.log 2>&1 &"
    ```
 
    Then from the migration agent poll the **remote** API URL `${API_URL}/system_stats` until it responds (usually 10–60s). The local workspace path is not valid on the remote — skip `--extra-model-paths-config` and `--output-directory`. Outputs are fetched later via the `/view` and `/history` HTTP APIs from Steps 07/08.
 
-   Use `--listen 0.0.0.0` on the remote so the migration agent can reach it across the network. Do NOT use `--listen 127.0.0.1` for an ssh node — the agent's HTTP calls will time out.
+   For an ssh node `LISTEN_HOST` defaults to `0.0.0.0` so the migration agent can reach it across the network — never `127.0.0.1` for an ssh node, or the agent's HTTP calls will time out.
 
    ### runtime=docker (either kind — check the `## GPU node` block's `runtime`/`docker_image` fields)
 
@@ -123,7 +123,7 @@ Use to create a reproducible Intel XPU ComfyUI baseline.
      -e OMNI_FP8_KEEP_ON_MOVE=1 \
      $(for m in "${MODEL_ROOTS[@]}"; do echo -n "-v ${m}:${m} "; done) \
      "${DOCKER_IMAGE}" /comfyui/main.py \
-       --port "${COMFYUI_PORT:-8188}" --listen 127.0.0.1 \
+       --port "${COMFYUI_PORT:-8188}" --listen "${LISTEN_HOST}" \
        --extra-model-paths-config /comfyui/05-extra-model-paths.yaml \
        --output-directory /comfyui/outputs \
        <Intel XPU flags: --reserve-vram 1 ; keep dynamic VRAM enabled (no --disable-dynamic-vram) ; no --cpu-vae>
@@ -147,7 +147,7 @@ Use to create a reproducible Intel XPU ComfyUI baseline.
 
    (`--extra-model-paths-config`/`--output-directory` here are container-internal paths written into the copied tree, not the host workspace path — the host workspace isn't visible inside the container. `custom_nodes/` symlinks into the shared NFS tree resolve correctly inside the container because `model_roots` — which includes that same NFS mount — is bind-mounted at an identical path.)
 
-   SSH (`kind=ssh`): wrap the same `docker create` / `docker cp` / `docker start` sequence over SSH, using the remote's `${REMOTE_COMFYUI_ROOT}` as the `docker cp` source and `--network host` so the existing remote `api_host:api_port` reachability assumption still holds. Use `--listen 0.0.0.0` inside the container command, same rationale as the bare-metal ssh flow above.
+   SSH (`kind=ssh`): wrap the same `docker create` / `docker cp` / `docker start` sequence over SSH, using the remote's `${REMOTE_COMFYUI_ROOT}` as the `docker cp` source and `--network host` so the existing remote `api_host:api_port` reachability assumption still holds. Use `--listen "${LISTEN_HOST}"` inside the container command (defaults to `0.0.0.0` for ssh nodes), same rationale as the bare-metal ssh flow above.
 
    Verify with `docker ps --filter "name=comfyui-${TASK_ID}"` in addition to the usual `/object_info` poll. On rerun/cleanup, `docker rm -f "comfyui-${TASK_ID}"` before creating a new one — containers are ephemeral, never reused across tasks.
 
