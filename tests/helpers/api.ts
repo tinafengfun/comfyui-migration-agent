@@ -212,7 +212,7 @@ export interface ComfyRunResult {
   ok: boolean;
   status: "success" | "error" | "timeout" | "submit_failed";
   promptId?: string;
-  outputs: Array<{ filename: string; type: string }>;
+  outputs: Array<{ filename: string; type: string; subfolder: string }>;
   raw: unknown;
   detail: string;
 }
@@ -279,13 +279,13 @@ export async function comfyuiSubmitAndWait(
   return { ...empty, status: "timeout", promptId, detail: `no history within ${Math.round(timeoutMs / 60000)}min` };
 }
 
-function collectComfyOutputs(outputs: unknown): Array<{ filename: string; type: string }> {
-  const files: Array<{ filename: string; type: string }> = [];
+function collectComfyOutputs(outputs: unknown): Array<{ filename: string; type: string; subfolder: string }> {
+  const files: Array<{ filename: string; type: string; subfolder: string }> = [];
   if (!outputs || typeof outputs !== "object") return files;
   for (const nodeOut of Object.values(outputs as Record<string, any>)) {
     for (const key of ["images", "gifs", "videos"]) {
       const arr = (nodeOut as any)?.[key];
-      if (Array.isArray(arr)) for (const f of arr) if (f?.filename) files.push({ filename: f.filename, type: key });
+      if (Array.isArray(arr)) for (const f of arr) if (f?.filename) files.push({ filename: f.filename, type: key, subfolder: f.subfolder ?? "" });
     }
   }
   return files;

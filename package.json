@@ -22,7 +22,8 @@
     "playwright:ui": "playwright test --grep @ui",
     "playwright:migration": "playwright test --grep @migration",
     "playwright:wan22": "playwright test --grep @wan22",
-    "playwright:wan22-consistency": "playwright test --grep @wan22-consistency"
+    "playwright:wan22-consistency": "playwright test --grep @wan22-consistency",
+    "playwright:quality": "playwright test --grep @quality"
   },
   "dependencies": {
     "@github/copilot-sdk": "^1.0.8",
