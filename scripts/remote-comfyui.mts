@@ -29,7 +29,7 @@
  * migration step); omit it for a generic per-node container named
  * `comfyui-<node-name>`.
  */
-import { loadGpuNodes, pickNode, nodeApiUrl } from "../src/server/gpuNodes";
+import { loadGpuNodes, pickNode, nodeApiUrl, resolveListenHost } from "../src/server/gpuNodes";
 import { loadConfig } from "../src/server/config";
 import {
   objectInfoUp,
@@ -73,7 +73,7 @@ async function main() {
       }
       console.log("no --container given and could not auto-detect a comfyui-* container; falling back to bare-metal restart path");
     }
-    await startComfyUi(node, node.api_port, node.kind === "ssh" ? "0.0.0.0" : "127.0.0.1", containerFlag);
+    await startComfyUi(node, node.api_port, resolveListenHost(node), containerFlag);
     console.log(`launched; waiting up to ${waitSec}s for /system_stats…`);
     const up = await waitUp(apiUrl, waitSec);
     console.log(up ? "UP ✓" : "did NOT come up in time ✗");
