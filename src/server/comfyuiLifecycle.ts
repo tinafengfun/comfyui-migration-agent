@@ -20,7 +20,9 @@
 import { execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
 import fs from "node:fs";
+import path from "node:path";
 import { resolveNfsShareRoot, runShellOnNode, type GpuNode } from "./gpuNodes";
+import { WHEELHOUSE_DIR } from "./wheelhouse";
 
 const execFile = promisify(execFileCb);
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -239,7 +241,12 @@ async function runningContainerVramFlags(node: GpuNode, container: string): Prom
   try {
     const args = JSON.parse(r.stdout.trim());
     if (!Array.isArray(args)) return undefined;
-    return extractVramFlagTail(args.map((x: unknown) => String(x)));
+    // Flatten: the worker-local-venv launch wraps the command as
+    // `bash -c "…main.py … --reserve-vram 1"`, so .Args is ["-c", "<one big
+    // string>"] rather than individual tokens. Splitting on whitespace recovers
+    // the flag tokens for both launch shapes (a no-op for the plain-python path).
+    const tokens = args.flatMap((x: unknown) => String(x).split(/\s+/)).filter(Boolean);
+    return extractVramFlagTail(tokens);
   } catch {
     return undefined;
   }
@@ -250,12 +257,34 @@ export function buildDockerStartScript(
   port: number,
   listen: string,
   containerName: string,
-  vramFlags?: readonly string[]
+  vramFlags?: readonly string[],
+  /**
+   * Profile-scoped custom_nodes dir (see profileLaunch.ts). When set, overlays
+   * ONLY the workflow's node set at /comfyui/custom_nodes instead of exposing
+   * the node's whole accumulated tree — this is the fix for bug B (duplicate
+   * POST-route crash from loading every accumulated node). Must be an absolute
+   * path that resolves identically inside the container (i.e. under nfsRoot,
+   * which is bind-mounted at the same path). Unset → full-tree mount (legacy).
+   */
+  customNodesDir?: string
 ): string {
   if (!node.docker_image) throw new Error(`runtime=docker but node ${node.name} has no docker_image configured`);
   if (!node.venv_python) throw new Error(`runtime=docker but node ${node.name} has no venv_python configured`);
   const nfsRoot = resolveNfsShareRoot(node);
   const flags = resolveVramFlags(node, vramFlags).join(" ");
+  // worker_local_venv marks a node whose venv_python is a NODE-LOCAL venv (set up
+  // at deploy — see deploy-remote-node.sh --setup-local-venv), not the shared NFS
+  // venv. It only turns on OFFLINE pip containment here; the venv itself is a plain
+  // venv_python that BOTH launch paths (this and the SDK Step-05 skill) use, so no
+  // launch ever writes to the shared venv. That resolves the distributed conflict
+  // at its source (shared venv_python), not per-launch.
+  const useLocalVenv = node.worker_local_venv === true;
+  // A node-local venv lives outside the already-mounted nfsRoot/comfyui_root, so it
+  // must be bind-mounted at its identical path for venv_python to resolve in-container.
+  const venvRoot = path.posix.dirname(path.posix.dirname(node.venv_python));
+  const venvUnderNfs = !!nfsRoot && (venvRoot === nfsRoot || venvRoot.startsWith(nfsRoot + "/"));
+  const venvUnderCore = venvRoot === node.comfyui_root || venvRoot.startsWith(node.comfyui_root + "/");
+  const needVenvMount = !venvUnderNfs && !venvUnderCore;
   return (
     `#!/usr/bin/env bash\n` +
     `set -e\n` +
@@ -274,14 +303,29 @@ export function buildDockerStartScript(
     // node whose ESIMD attention kernel device-losts at full-size attention.
     (node.attn_backend ? `  -e OMNI_ATTN_BACKEND=${node.attn_backend} \\\n` : ``) +
     `  -e ZE_AFFINITY_MASK=0 -e OMNI_FP8_KEEP_ON_MOVE=1 -e NO_PROXY -e no_proxy -e HTTP_PROXY -e HTTPS_PROXY -e http_proxy -e https_proxy \\\n` +
+    // Node-local venv: keep ComfyUI's import-time auto-`pip install` OFFLINE and
+    // pointed at the shared wheelhouse — it can't reach the network to pull a CUDA
+    // torch, and any install lands only in this node's local venv, never the shared one.
+    (useLocalVenv ? `  -e PIP_NO_INDEX=1 -e PIP_FIND_LINKS=${WHEELHOUSE_DIR} \\\n` : ``) +
     (nfsRoot ? `  -v '${nfsRoot}:${nfsRoot}' \\\n` : ``) +
     `  -v '${node.comfyui_root}:/comfyui' \\\n` +
-    `  --entrypoint '${node.venv_python}' \\\n` +
-    `  '${node.docker_image}' \\\n` +
+    // Bind-mount the node-local venv dir at its identical path so venv_python
+    // resolves inside the container (a shared-NFS venv is already covered by the
+    // nfsRoot mount, so this only fires for a genuinely node-local venv).
+    (needVenvMount ? `  -v '${venvRoot}:${venvRoot}' \\\n` : ``) +
+    // Profile-scoped overlay: mount ONLY the workflow's custom_nodes over the
+    // core's (nested after the comfyui_root mount, exactly like
+    // harvest-objectinfo.py). This is the bug-B fix — the container no longer
+    // loads the node's whole accumulated custom_nodes tree.
+    (customNodesDir ? `  -v '${customNodesDir}:/comfyui/custom_nodes' \\\n` : ``) +
     // Dynamic VRAM must stay ENABLED (do not pass --disable-dynamic-vram): the
     // sequential fp8 offload recipe relies on ComfyUI offloading a model to make
     // room for the next stage. --cpu-vae is intentionally NOT passed -- the VAE runs
     // on XPU and ComfyUI auto-falls-back to tiled decode if a full decode would OOM.
+    // venv_python is the single runtime-venv source of truth (shared or node-local),
+    // used identically here and by the SDK Step-05 launch.
+    `  --entrypoint '${node.venv_python}' \\\n` +
+    `  '${node.docker_image}' \\\n` +
     `  /comfyui/main.py --port ${port} --listen ${listen} ${flags}\n` +
     `nohup docker logs -f '${containerName}' > /tmp/comfyui-${port}.log 2>&1 < /dev/null &\n`
   );
@@ -291,9 +335,9 @@ export function defaultContainerName(node: GpuNode): string {
   return `comfyui-${node.name}`.replace(/[^a-zA-Z0-9_.-]/g, "-");
 }
 
-async function startDocker(node: GpuNode, port: number, listen: string, containerName: string, vramFlags?: readonly string[]): Promise<void> {
+async function startDocker(node: GpuNode, port: number, listen: string, containerName: string, vramFlags?: readonly string[], customNodesDir?: string): Promise<void> {
   const scriptPath = `/tmp/start-comfyui-docker-${port}.sh`;
-  const body = buildDockerStartScript(node, port, listen, containerName, vramFlags);
+  const body = buildDockerStartScript(node, port, listen, containerName, vramFlags, customNodesDir);
   const b64 = Buffer.from(body).toString("base64");
   if (node.kind === "ssh") {
     await execFile("ssh", [...sshBase(node), `echo ${b64} | base64 -d > ${scriptPath} && chmod +x ${scriptPath}`], { timeout: 30_000 });
@@ -332,12 +376,14 @@ export async function startComfyUi(
   port: number,
   listen: string,
   containerName?: string,
-  vramFlags?: readonly string[]
+  vramFlags?: readonly string[],
+  customNodesDir?: string
 ): Promise<void> {
   if (node.runtime === "docker") {
-    await startDocker(node, port, listen, containerName ?? defaultContainerName(node), vramFlags);
+    await startDocker(node, port, listen, containerName ?? defaultContainerName(node), vramFlags, customNodesDir);
     return;
   }
+  // Bare-metal has no mount overlay; the profile is a docker-only concept for now.
   await startBareMetal(node, port, listen, vramFlags);
 }
 
@@ -361,8 +407,9 @@ async function teardownAndRelaunch(input: {
   vramFlags?: readonly string[];
   resetXpu: boolean;
   waitSec: number;
+  customNodesDir?: string;
 }): Promise<{ up: boolean; resetDetail: string }> {
-  const { node, apiUrl, container, vramFlags, resetXpu, waitSec } = input;
+  const { node, apiUrl, container, vramFlags, resetXpu, waitSec, customNodesDir } = input;
   let resetDetail = "";
   if (node.runtime === "docker" && container) {
     await dockerOnNode(node, ["rm", "-f", container], 60_000);
@@ -374,7 +421,7 @@ async function teardownAndRelaunch(input: {
     }
   }
   const listen = node.kind === "ssh" ? "0.0.0.0" : "127.0.0.1";
-  await startComfyUi(node, node.api_port, listen, container, vramFlags);
+  await startComfyUi(node, node.api_port, listen, container, vramFlags, customNodesDir);
   const up = await waitUp(apiUrl, waitSec);
   return { up, resetDetail };
 }
@@ -417,13 +464,21 @@ export async function ensureComfyUiUp(input: {
    * with forceRelaunch on a docker node. Best-effort (never blocks the relaunch).
    */
   resetXpu?: boolean;
+  /**
+   * Profile-scoped custom_nodes dir (see profileLaunch.ts) applied on any fresh
+   * launch/relaunch. Threaded verbatim into buildDockerStartScript. Undefined →
+   * full-tree mount (legacy). Because it flows through every launch path here
+   * (forceRelaunch, flag-drift relaunch, and the fresh-start branch), a Step-12
+   * forced relaunch rebuilds against the same scoped set.
+   */
+  customNodesDir?: string;
 }): Promise<EnsureComfyUiUpResult> {
-  const { node, apiUrl, waitSec = 150, vramFlags, forceRelaunch = false, resetXpu = false } = input;
+  const { node, apiUrl, waitSec = 150, vramFlags, forceRelaunch = false, resetXpu = false, customNodesDir } = input;
 
   // Capacity-ladder escalation: tear down whatever is running and relaunch fresh
   // with the escalated VRAM flags (restart/`docker start` would reuse old flags).
   if (forceRelaunch) {
-    const { up, resetDetail } = await teardownAndRelaunch({ node, apiUrl, container: input.container, vramFlags, resetXpu, waitSec });
+    const { up, resetDetail } = await teardownAndRelaunch({ node, apiUrl, container: input.container, vramFlags, resetXpu, waitSec, customNodesDir });
     return up
       ? { ok: true, detail: `relaunched fresh with vram flags [${resolveVramFlags(node, vramFlags).join(" ")}]${resetDetail}`, action: "started_fresh" }
       : { ok: false, detail: `forced relaunch did not bring up /system_stats within ${waitSec}s${resetDetail}`, action: "failed" };
@@ -441,7 +496,7 @@ export async function ensureComfyUiUp(input: {
       const desired = resolveVramFlags(node, vramFlags);
       const running = await runningContainerVramFlags(node, input.container);
       if (running && running.join(" ") !== desired.join(" ")) {
-        const { up, resetDetail } = await teardownAndRelaunch({ node, apiUrl, container: input.container, vramFlags, resetXpu, waitSec });
+        const { up, resetDetail } = await teardownAndRelaunch({ node, apiUrl, container: input.container, vramFlags, resetXpu, waitSec, customNodesDir });
         return up
           ? { ok: true, detail: `reconciled drifted vram flags [${running.join(" ")}] -> [${desired.join(" ")}]${resetDetail}`, action: "started_fresh" }
           : { ok: false, detail: `flag-drift relaunch did not bring up /system_stats within ${waitSec}s${resetDetail}`, action: "failed" };
@@ -471,7 +526,7 @@ export async function ensureComfyUiUp(input: {
       }
     }
     const listen = node.kind === "ssh" ? "0.0.0.0" : "127.0.0.1";
-    await startComfyUi(node, node.api_port, listen, input.container, vramFlags);
+    await startComfyUi(node, node.api_port, listen, input.container, vramFlags, customNodesDir);
     const up = await waitUp(apiUrl, waitSec);
     return up
       ? { ok: true, detail: "launched a fresh container via buildDockerStartScript", action: "started_fresh" }

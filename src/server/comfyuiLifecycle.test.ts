@@ -48,6 +48,51 @@ describe("buildDockerStartScript", () => {
     expect(script).not.toContain("/workspace/comfyui");
   });
 
+  it("overlays a profile-scoped custom_nodes dir ONLY when customNodesDir is set (bug-B fix)", async () => {
+    const { buildDockerStartScript } = await import("./comfyuiLifecycle");
+    const profileDir = "/nfs_share/profiles/task-1/custom_nodes";
+    const scoped = buildDockerStartScript(dockerNode(), 8188, "127.0.0.1", "comfyui-task-1", undefined, profileDir);
+    // both mounts present, and the overlay comes AFTER the comfyui_root mount
+    expect(scoped).toContain("-v '/nfs_share/comfyui-core:/comfyui'");
+    expect(scoped).toContain(`-v '${profileDir}:/comfyui/custom_nodes'`);
+    expect(scoped.indexOf("/comfyui'")).toBeLessThan(scoped.indexOf(`${profileDir}:/comfyui/custom_nodes`));
+
+    // legacy: no overlay when unset (backward-compat)
+    const legacy = buildDockerStartScript(dockerNode(), 8188, "127.0.0.1", "comfyui-task-1");
+    expect(legacy).toContain("-v '/nfs_share/comfyui-core:/comfyui'");
+    expect(legacy).not.toContain(":/comfyui/custom_nodes'");
+  });
+
+  it("node-local venv: mounts the local venv dir, uses it as entrypoint, and enables offline pip", async () => {
+    const { buildDockerStartScript } = await import("./comfyuiLifecycle");
+    const script = buildDockerStartScript(
+      dockerNode({ worker_local_venv: true, venv_python: "/home/intel/comfyui-runtime-venv/bin/python3" }),
+      8188,
+      "127.0.0.1",
+      "comfyui-task-9"
+    );
+    // the node-local venv is used directly (single source of truth, same as the SDK launch)
+    expect(script).toContain("--entrypoint '/home/intel/comfyui-runtime-venv/bin/python3'");
+    // and its dir is bind-mounted at the identical path so it resolves in-container
+    expect(script).toContain("-v '/home/intel/comfyui-runtime-venv:/home/intel/comfyui-runtime-venv'");
+    // offline pip containment (no network CUDA-torch pulls; installs land in the local venv)
+    expect(script).toContain("-e PIP_NO_INDEX=1");
+    expect(script).toContain("-e PIP_FIND_LINKS=/nfs_share/wheelhouse");
+    // no ephemeral bootstrap anymore
+    expect(script).not.toContain("--entrypoint bash");
+    expect(script).toContain("/comfyui/main.py --port 8188 --listen 127.0.0.1");
+  });
+
+  it("shared NFS venv (default): no extra venv mount (covered by nfsRoot), no offline pip", async () => {
+    const { buildDockerStartScript } = await import("./comfyuiLifecycle");
+    const script = buildDockerStartScript(dockerNode(), 8188, "127.0.0.1", "comfyui-task-1");
+    expect(script).toContain("--entrypoint '/nfs_share/venv-container-xpu/bin/python3'");
+    // the shared venv is under the nfsRoot mount → no separate venv-dir mount
+    expect(script).not.toContain("-v '/nfs_share/venv-container-xpu:/nfs_share/venv-container-xpu'");
+    expect(script).not.toContain("--entrypoint bash");
+    expect(script).not.toContain("PIP_NO_INDEX");
+  });
+
   it("enables the native-fp8 XPU recipe: OMNI_FP8_KEEP_ON_MOVE=1 env, dynamic VRAM on, no --cpu-vae", async () => {
     const { buildDockerStartScript } = await import("./comfyuiLifecycle");
     const script = buildDockerStartScript(dockerNode(), 8188, "127.0.0.1", "comfyui-task-1");

@@ -47,6 +47,34 @@ export type MigrationRoute =
   | "unsupported_cuda_kernel"
   | "not_applicable";
 
+/**
+ * V2 Node-Class — the single derived vocabulary that unifies the three prior
+ * taxonomies (parse-xlsx import buckets, this catalog's migrationRoute, and
+ * src/server/wheelhouse.ts's requirement classes) so they all speak one A/B/C:
+ *   A = recompile   — needs a prebuilt XPU wheel from the Builder (no worker compile)
+ *   B = pip deps    — plain pip (installable offline once cached)
+ *   C = pure python — patch/config only, no build, no pip
+ * Derived from migrationRoute so it never drifts from the triage decision.
+ * human_* / not_applicable routes are not a mechanical class → undefined.
+ */
+export type NodeClass = "A" | "B" | "C";
+
+export function nodeClassFromRoute(route: MigrationRoute | undefined): NodeClass | undefined {
+  switch (route) {
+    case "unsupported_cuda_kernel":
+      return "A"; // compiled CUDA kernel → needs a recompiled XPU wheel (Builder), not a worker compile
+    case "auto_deps":
+      return "B"; // resolvable by pip
+    case "auto_device_redirect":
+    case "auto_fp8":
+    case "auto_attention_fallback":
+    case "auto_enum":
+      return "C"; // pure-python patch / config / enum-package
+    default:
+      return undefined; // human_* / not_applicable / unset → not a mechanical class
+  }
+}
+
 export interface CatalogPatch {
   file: string;
   target?: string;

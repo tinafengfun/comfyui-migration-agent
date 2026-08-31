@@ -127,6 +127,8 @@ import {
   type GpuNode
 } from "./gpuNodes";
 import { ensureComfyUiUp, VRAM_ESCALATION_LADDER } from "./comfyuiLifecycle";
+import { resolveProfilePackages, buildProfileDir } from "./profileLaunch";
+import { missingClassAWheels, classAHardStopMessage } from "./wheelhouse";
 import { extractNodeModelPairs, findMatchingRecipes } from "./recipeInjector";
 import { archiveAcceptedWorkflowIfNeeded, archiveTaskSnapshot } from "./workflowArchive";
 import { syncGuiWorkflowToComfyUIServer } from "./guiWorkflowSync";
@@ -1121,6 +1123,70 @@ export class MigrationOrchestrator {
           const resetXpu = this.xpuResetPending.has(taskId);
           const forceRelaunch = stepId === "12" || resetXpu;
           if (resetXpu) this.xpuResetPending.delete(taskId);
+          // Profile-scoped launch (bug-B fix): mount ONLY this workflow's node
+          // set at /comfyui/custom_nodes instead of the node's whole accumulated
+          // tree (which crashes on duplicate POST routes). Resolve the profile
+          // from the Step-05 deploy ledger (or the Step-00 intake artifact before
+          // the first ledger exists) + enum closure + infra; build the scoped dir
+          // under NFS. If the profile can't be resolved (degraded), fall back to
+          // the full-tree mount rather than launch an empty custom_nodes.
+          let customNodesDir: string | undefined;
+          try {
+            const profile = await resolveProfilePackages(task.artifactPath);
+            if (!profile.degraded && profile.packages.length) {
+              customNodesDir = await buildProfileDir({
+                node,
+                taskId,
+                packages: profile.packages,
+                log: (msg) => void this.emit({ taskId, stepId, type: "progress", message: msg })
+              });
+              await this.emit({
+                taskId,
+                stepId,
+                type: "progress",
+                message: `Profile-scoped custom_nodes for Step ${stepId} (${profile.origin}, ${profile.packages.length} packages): ${profile.packages.join(", ")}`
+              });
+              // Builder/Worker enforcement (Phase 2): on the offline worker-local
+              // venv, a Class-A dependency (flash-attn/xformers/…) with no prebuilt
+              // wheel cannot be compiled on the worker — route it to the Builder
+              // instead of failing opaquely at container start. Only enforced when
+              // worker_local_venv is on (the offline path); a best-effort early
+              // signal (the offline pip failure would also catch it, more loudly).
+              if (node.worker_local_venv && customNodesDir) {
+                const missingWheels = await missingClassAWheels({
+                  packages: profile.packages,
+                  customNodesRoot: customNodesDir
+                }).catch(() => [] as string[]);
+                if (missingWheels.length) {
+                  await this.terminateWithHardStop({
+                    taskId,
+                    stepId,
+                    reason: classAHardStopMessage(missingWheels),
+                    improvementStrategy:
+                      "Build the missing Class-A wheels with scripts/build-wheel.mts (in the base image, --sycl if needed) so they land in /nfs_share/wheelhouse; then resume. Workers never compile Class-A."
+                  });
+                  return;
+                }
+              }
+            } else {
+              await this.emit({
+                taskId,
+                stepId,
+                type: "progress",
+                message: `Profile not resolvable (${profile.origin}); launching with the full custom_nodes tree for Step ${stepId}.`
+              });
+            }
+          } catch (err) {
+            // A profile-build failure must never block the launch — fall back to
+            // the full-tree mount (legacy behavior).
+            customNodesDir = undefined;
+            await this.emit({
+              taskId,
+              stepId,
+              type: "progress",
+              message: `Profile-scoped launch skipped (${err instanceof Error ? err.message : String(err)}); using the full custom_nodes tree.`
+            });
+          }
           const ensureResult = await ensureComfyUiUp({
             node,
             apiUrl,
@@ -1128,7 +1194,8 @@ export class MigrationOrchestrator {
             waitSec: 150,
             vramFlags,
             forceRelaunch,
-            resetXpu
+            resetXpu,
+            customNodesDir
           }).catch((err) => ({
             ok: false as const,
             action: "failed" as const,

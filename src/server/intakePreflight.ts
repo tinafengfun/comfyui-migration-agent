@@ -10,6 +10,7 @@ import {
 import { loadBuiltinNodeTypes } from "./builtinNodes";
 import { knownCustomNodeForType } from "./knownCustomNodes";
 import { catalogEnabled, resolveNodeType, resolveRepo } from "./xpuCatalogClient";
+import { customNodeRowsToProfile, PROFILE_ARTIFACT_FILE } from "./profileLaunch";
 
 export interface IntakePreflightResult {
   artifactPath: string;
@@ -118,6 +119,14 @@ export async function ensureIntakePreflight(input: {
   const modelIndex = await indexExactFilenames(modelRoots, modelRequests.map((request) => request.name));
   const aliasIndex = await indexPossibleAliases(modelRoots, modelRequests.map((request) => request.name));
   const customNodeRows = await buildCustomNodeRows(nodes, customNodeRoot, input.comfyuiRoot);
+  // Machine-readable Profile artifact: the per-task custom-node set, consumed by
+  // the profile-scoped launch (profileLaunch.resolveProfilePackages) before the
+  // first Step-05 launch (i.e. before any deploy ledger exists).
+  await fs.writeFile(
+    path.join(input.task.artifactPath, PROFILE_ARTIFACT_FILE),
+    JSON.stringify(customNodeRowsToProfile(customNodeRows), null, 2),
+    "utf8"
+  );
   // Early pre-triage against the catalog: hard-stop known XPU boundaries before a full run.
   const catalogBoundaryStops = await detectCatalogBoundaries(customNodeRows);
   // Implicit package dependencies: enum widget values (sampler_name, scheduler, …)
