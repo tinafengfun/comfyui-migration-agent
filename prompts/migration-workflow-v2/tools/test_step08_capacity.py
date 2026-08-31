@@ -19,8 +19,28 @@ from pathlib import Path
 from step08_full_validation import (
     classify_reduced_validation,
     merge_reduced_validation_into_aggregate,
+    infer_usable_budget_bytes,
 )
 from step07_branch_smoke import summarize_history
+
+
+class TestInferUsableBudget(unittest.TestCase):
+    """Budget denominator must reflect the real card, not an under-measured feasibility value."""
+
+    def test_prefers_live_system_stats_over_stale_feasibility(self):
+        # 30.3 GB card via /system_stats; feasibility under-measured (free*0.85 = 21.7 GiB).
+        ss = {"devices": [{"vram_total": int(30.3 * 1024**3)}]}
+        feas = {"hardware": {"usable_budget_bytes": int(21.7 * 1024**3)}}
+        budget = infer_usable_budget_bytes(ss, feas)
+        # ~25.8 GiB from system_stats, NOT the stale 21.7
+        self.assertAlmostEqual(budget / 1024**3, 30.3 * 0.85, places=1)
+
+    def test_falls_back_to_feasibility_when_no_live_total(self):
+        budget = infer_usable_budget_bytes({"devices": []}, {"hardware": {"usable_budget_bytes": 123}})
+        self.assertEqual(budget, 123)
+
+    def test_none_when_neither_available(self):
+        self.assertIsNone(infer_usable_budget_bytes({}, None))
 
 
 class TestClassifyReducedValidation(unittest.TestCase):

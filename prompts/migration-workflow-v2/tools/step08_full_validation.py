@@ -428,13 +428,22 @@ def copy_output_files(
 
 
 def infer_usable_budget_bytes(system_stats: dict[str, Any], feasibility: dict[str, Any] | None) -> int | None:
+    # Prefer the LIVE, torch-backed device total from ComfyUI /system_stats
+    # (vram_total) — the reliable source: torch.xpu reports the real card size
+    # (e.g. 30.3 GB). The Step-02 feasibility value can badly under-measure when
+    # host xpu-smi reports free-but-not-physical (memory_physical_size_byte=0) and
+    # the budget falls back to free*0.85 — that double-discounts a momentary free
+    # reading (already below physical) AND the 0.85 factor, yielding ~0.7x of the
+    # true card (21.7 GiB observed on a 30.3 GB card) and over-triggering the
+    # reduced-tier / insufficient capacity gate. So system_stats wins; feasibility
+    # is only a fallback when the live total is unavailable.
+    devices = system_stats.get("devices", [])
+    if devices and isinstance(devices[0].get("vram_total"), int):
+        return int(devices[0]["vram_total"] * 0.85)
     if feasibility:
         budget = feasibility.get("hardware", {}).get("usable_budget_bytes")
         if isinstance(budget, int):
             return budget
-    devices = system_stats.get("devices", [])
-    if devices and isinstance(devices[0].get("vram_total"), int):
-        return int(devices[0]["vram_total"] * 0.85)
     return None
 
 
