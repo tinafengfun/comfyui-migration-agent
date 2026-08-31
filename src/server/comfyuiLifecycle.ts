@@ -21,7 +21,7 @@ import { execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
 import fs from "node:fs";
 import path from "node:path";
-import { resolveNfsShareRoot, runShellOnNode, type GpuNode } from "./gpuNodes";
+import { resolveNfsShareRoot, resolveListenHost, runShellOnNode, type GpuNode } from "./gpuNodes";
 import { WHEELHOUSE_DIR } from "./wheelhouse";
 
 const execFile = promisify(execFileCb);
@@ -420,7 +420,7 @@ async function teardownAndRelaunch(input: {
       resetDetail = `; ${r.detail}`;
     }
   }
-  const listen = node.kind === "ssh" ? "0.0.0.0" : "127.0.0.1";
+  const listen = resolveListenHost(node);
   await startComfyUi(node, node.api_port, listen, container, vramFlags, customNodesDir);
   const up = await waitUp(apiUrl, waitSec);
   return { up, resetDetail };
@@ -525,7 +525,7 @@ export async function ensureComfyUiUp(input: {
         }
       }
     }
-    const listen = node.kind === "ssh" ? "0.0.0.0" : "127.0.0.1";
+    const listen = resolveListenHost(node);
     await startComfyUi(node, node.api_port, listen, input.container, vramFlags, customNodesDir);
     const up = await waitUp(apiUrl, waitSec);
     return up
@@ -533,7 +533,7 @@ export async function ensureComfyUiUp(input: {
       : { ok: false, detail: `fresh container launch did not bring up /system_stats within ${waitSec}s`, action: "failed" };
   }
 
-  const listen = node.kind === "ssh" ? "0.0.0.0" : "127.0.0.1";
+  const listen = resolveListenHost(node);
   await startComfyUi(node, node.api_port, listen, undefined, vramFlags);
   const up = await waitUp(apiUrl, waitSec);
   return up
