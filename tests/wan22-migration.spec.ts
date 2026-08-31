@@ -40,6 +40,13 @@ import {
   comfyuiSubmitAndWait,
   type AgentEvent,
 } from "./helpers/api";
+import { stageValidInputs } from "./helpers/media";
+import { assessOutput } from "./helpers/quality";
+
+// Feed valid generated inputs + assess output quality by default; opt out with
+// PW_SKIP_INPUT_STAGING=1 / PW_SKIP_QUALITY=1 for a bare existence-only run.
+const STAGE_INPUTS = process.env.PW_SKIP_INPUT_STAGING !== "1";
+const CHECK_QUALITY = process.env.PW_SKIP_QUALITY !== "1";
 
 // "full" (default): drive to Step 12b. "capacity": stop after answering the Step 08 gate.
 const DEPTH = (process.env.MIGRATION_DEPTH ?? "full") as "full" | "capacity";
@@ -130,11 +137,39 @@ async function executeAndValidateStep12(request: APIRequestContext, taskId: stri
     if (typeof len === "number") expect(len, "reduced length (<=5s)").toBeLessThanOrEqual(120);
   }
 
+  // Feed VALID inputs: generate an image + video, upload them into this ComfyUI's
+  // input dir, and rewire the LoadImage / VHS_LoadVideo nodes to them — so the
+  // render runs on decodable inputs we control (not whatever happened to be staged).
+  if (STAGE_INPUTS) {
+    const frameCap = Object.values(prompt).reduce((m: number, n: any) => {
+      const c = Number(n?.inputs?.frame_load_cap ?? n?.inputs?.length ?? 0);
+      return Number.isFinite(c) && c > m ? c : m;
+    }, 0);
+    const { wired } = await stageValidInputs(comfyUrl, prompt, { frames: Math.max(48, frameCap + 4) });
+    console.log(`  [step12] staged valid inputs → image nodes ${JSON.stringify(wired.imageNodes)}, video nodes ${JSON.stringify(wired.videoNodes)}`);
+  }
+
   console.log(`  [step12] executing reduced workflow on ${comfyUrl} …`);
   const result = await comfyuiSubmitAndWait(comfyUrl, prompt, { timeoutMs: RENDER_TIMEOUT_MS });
   console.log(`  [step12] render result: ${result.status} — ${result.detail}`);
   expect(result.ok, `Step 12 reduced render must succeed without OOM: ${result.detail}`).toBe(true);
   expect(result.outputs.length, "Step 12 render must produce output file(s)").toBeGreaterThan(0);
+
+  // Judge OUTPUT QUALITY, not just existence: download each output and assert it
+  // is a valid, non-blank, right-sized video (catches "ran but produced garbage").
+  if (CHECK_QUALITY) {
+    const videoOuts = result.outputs.filter((o) => o.type === "videos" || o.type === "gifs" || /\.(mp4|webm|gif|webp)$/i.test(o.filename));
+    const targets = videoOuts.length ? videoOuts : result.outputs;
+    let assessed = 0;
+    for (const out of targets) {
+      const v = await assessOutput(comfyUrl, out);
+      const dims = v.probe ? `${v.probe.width}x${v.probe.height}, ${v.probe.nbFrames}f, ${v.probe.durationSec.toFixed(1)}s, ${Math.round((v.probe.sizeBytes ?? 0) / 1024)}KB` : "no-probe";
+      console.log(`  [step12] quality ${out.filename}: ${v.ok ? "OK" : "FAIL"} (${dims}; black=${v.blackRatio ?? "-"}; contrast=${v.spatialContrast ?? "-"})${v.failures.length ? " — " + v.failures.join("; ") : ""}`);
+      expect(v.ok, `Step 12 output ${out.filename} failed quality: ${v.failures.join("; ")}`).toBe(true);
+      assessed++;
+    }
+    expect(assessed, "at least one output must be quality-assessed").toBeGreaterThan(0);
+  }
 
   // Validated → answer Pass.
   const passChoice =
