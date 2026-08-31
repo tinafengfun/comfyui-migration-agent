@@ -105,6 +105,16 @@ echo "   now at: \$(git log --oneline -1)"
 echo "-- npm install (idempotent) --"
 npm install --no-audit --no-fund --silent
 
+# Ensure the shared profile-scratch dir is writable by this node's backend user.
+# profileLaunch.buildProfileDir creates /nfs_share/profiles/<taskId>/... at launch;
+# on a multi-user NFS (root on some nodes, intel on others) the first creator would
+# otherwise own it and block the others. Sticky+world-writable (like /tmp) lets any
+# node create its own per-task subdir. Best-effort (skip if not present/permitted).
+if [ -d /nfs_share ]; then
+  mkdir -p /nfs_share/profiles 2>/dev/null || true
+  chmod 1777 /nfs_share/profiles 2>/dev/null || sudo chmod 1777 /nfs_share/profiles 2>/dev/null || true
+fi
+
 if [ "$SETUP_LOCAL_VENV" = "1" ]; then
   echo "-- setting up node-local runtime venv at $LOCAL_VENV_DIR (shared base: $SHARED_ROOT_VAL) --"
   IMG=\$(node -e 'const c=JSON.parse(require("fs").readFileSync("gpu-nodes.json"));console.log((c.nodes.find(n=>n.runtime==="docker")||{}).docker_image||"")')
