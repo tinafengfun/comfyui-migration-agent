@@ -47,6 +47,12 @@ import { assessOutput } from "./helpers/quality";
 // PW_SKIP_INPUT_STAGING=1 / PW_SKIP_QUALITY=1 for a bare existence-only run.
 const STAGE_INPUTS = process.env.PW_SKIP_INPUT_STAGING !== "1";
 const CHECK_QUALITY = process.env.PW_SKIP_QUALITY !== "1";
+// Frozen Step-12 render target: 768 "SD" long-edge + ~3s (72 frames @ 24fps), so
+// the render is deterministic content we can quality-assert, independent of the
+// capacity probe's chosen reduction. Overridable via env.
+const TARGET_MAX_SIZE = Number(process.env.PW_TARGET_MAX_SIZE ?? 768);
+const TARGET_LENGTH = Number(process.env.PW_TARGET_LENGTH ?? 72); // frames (~3s @ 24fps)
+const TARGET_FRAME_CAP = TARGET_LENGTH + 4; // source frames the video loader must supply
 
 // "full" (default): drive to Step 12b. "capacity": stop after answering the Step 08 gate.
 const DEPTH = (process.env.MIGRATION_DEPTH ?? "full") as "full" | "capacity";
@@ -137,15 +143,26 @@ async function executeAndValidateStep12(request: APIRequestContext, taskId: stri
     if (typeof len === "number") expect(len, "reduced length (<=5s)").toBeLessThanOrEqual(120);
   }
 
-  // Feed VALID inputs: generate an image + video, upload them into this ComfyUI's
-  // input dir, and rewire the LoadImage / VHS_LoadVideo nodes to them — so the
-  // render runs on decodable inputs we control (not whatever happened to be staged).
+  // Freeze the render target to 768 long-edge + ~3s (72 frames): the Bernini
+  // resolution driver (ref_max_size) and length, plus the video loader's
+  // frame_load_cap. Only these WAN2.2 drivers are touched — NOT llama_cpp's
+  // max_size (that is the VLM token cap, unrelated to picture size).
+  for (const n of Object.values(prompt) as any[]) {
+    if (!n?.inputs) continue;
+    if (n.class_type === "BerniniConditioning") {
+      if (typeof n.inputs.ref_max_size === "number") n.inputs.ref_max_size = TARGET_MAX_SIZE;
+      if (typeof n.inputs.length === "number") n.inputs.length = TARGET_LENGTH;
+    }
+    if (/VHS_LoadVideo|LoadVideo/.test(String(n.class_type)) && typeof n.inputs.frame_load_cap === "number")
+      n.inputs.frame_load_cap = TARGET_FRAME_CAP;
+  }
+  console.log(`  [step12] render target frozen: ref_max_size=${TARGET_MAX_SIZE}, length=${TARGET_LENGTH} (~3s), frame_load_cap=${TARGET_FRAME_CAP}`);
+
+  // Feed VALID inputs: generate an image + video (enough source frames), upload
+  // them into this ComfyUI's input dir, and rewire the LoadImage / VHS_LoadVideo
+  // nodes to them — so the render runs on decodable inputs we control.
   if (STAGE_INPUTS) {
-    const frameCap = Object.values(prompt).reduce((m: number, n: any) => {
-      const c = Number(n?.inputs?.frame_load_cap ?? n?.inputs?.length ?? 0);
-      return Number.isFinite(c) && c > m ? c : m;
-    }, 0);
-    const { wired } = await stageValidInputs(comfyUrl, prompt, { frames: Math.max(48, frameCap + 4) });
+    const { wired } = await stageValidInputs(comfyUrl, prompt, { frames: TARGET_FRAME_CAP + 4, size: "768x512" });
     console.log(`  [step12] staged valid inputs → image nodes ${JSON.stringify(wired.imageNodes)}, video nodes ${JSON.stringify(wired.videoNodes)}`);
   }
 
@@ -179,7 +196,12 @@ async function executeAndValidateStep12(request: APIRequestContext, taskId: stri
       best.v.ok,
       `Step 12: the primary generated video (${best.out.filename}) failed quality: ${best.v.failures.join("; ")}`
     ).toBe(true);
-    console.log(`  [step12] primary output ${best.out.filename} passed quality (${verdicts.filter((x) => x.v.ok).length}/${verdicts.length} outputs OK)`);
+    // The frozen target is ~3s: the primary output should carry roughly TARGET_LENGTH
+    // frames (allow generous slack for the graph's fps / trimming).
+    const p = best.v.probe!;
+    if (p.nbFrames > 0) expect(p.nbFrames, `primary ~${TARGET_LENGTH}f (3s)`).toBeGreaterThanOrEqual(Math.floor(TARGET_LENGTH * 0.6));
+    if (p.durationSec > 0) expect(p.durationSec, "primary ~3s of content").toBeGreaterThanOrEqual(2.0);
+    console.log(`  [step12] primary ${best.out.filename} OK: ${p.width}x${p.height}, ${p.nbFrames}f, ${p.durationSec.toFixed(2)}s (${verdicts.filter((x) => x.v.ok).length}/${verdicts.length} outputs pass)`);
   }
 
   // Validated → answer Pass.
