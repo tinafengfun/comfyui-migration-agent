@@ -121,12 +121,19 @@ def parse_xpu_discovery(probe: dict[str, Any]) -> dict[str, Any]:
         }
     physical = int(data.get("memory_physical_size_byte", 0) or 0)
     free = int(data.get("memory_free_size_byte", 0) or 0)
+    # Budget from PHYSICAL (stable card size), not transient free: `free` is a
+    # momentary reading already below physical, so free*0.85 double-discounts and
+    # under-budgets (e.g. 21.7 GiB on a ~32 GB card). Fall back to free*0.85 only
+    # when physical is unavailable; Step 08 additionally prefers the live
+    # torch-backed /system_stats vram_total over this value.
+    usable = int(physical * 0.85) if physical else (int(free * 0.85) if free else None)
     return {
         "device_name": data.get("device_name", "unknown"),
         "pci_device_id": data.get("pci_device_id", "unknown"),
         "physical_memory_bytes": physical or None,
         "free_memory_bytes": free or None,
-        "usable_budget_bytes": int(free * 0.85) if free else None,
+        "usable_budget_bytes": usable,
+        "budget_basis": "physical*0.85" if physical else ("free*0.85" if free else "none"),
         "evidence": "xpu-smi discovery -d 0 -j",
     }
 
