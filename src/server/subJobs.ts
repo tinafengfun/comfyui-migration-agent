@@ -504,7 +504,10 @@ async function sniffTextMasqueradingAsBinary(filePath: string): Promise<string |
     const { bytesRead } = await handle.read(buf, 0, 512, 0);
     const head = buf.subarray(0, bytesRead).toString("utf8");
     if (TEXT_MASQUERADE_MARKERS.some((re) => re.test(head))) {
-      return `downloaded content looks like an HTML page, not a .${ext} file (starts with: ${head.slice(0, 80).replace(/\s+/g, " ").trim()}...)`;
+      return (
+        `downloaded content looks like an HTML page, not a .${ext} file (starts with: ${head.slice(0, 80).replace(/\s+/g, " ").trim()}...). ` +
+        `The source URL points at a web page, not a direct file download — for HuggingFace use the /resolve/<rev>/<file> link (not /blob/), for other hosts use the raw/direct-download URL.`
+      );
     }
   } catch {
     // Binary content that isn't valid UTF-8 will throw or produce replacement

@@ -138,6 +138,26 @@ export function hfCliAvailableSync(env: NodeJS.ProcessEnv = process.env): boolea
 }
 
 /**
+ * Rewrite a HuggingFace `/blob/` URL (which serves the file's HTML *web page*,
+ * not the file) to the `/resolve/` direct-download URL, and force `?download=true`
+ * so the CDN returns the raw bytes. No-op for non-HF or already-resolve URLs.
+ * This is what makes a human-pasted "blob" link work on the curl path (the hf-cli
+ * path already tolerates blob via parseHfFileUrl); without it curl downloads the
+ * HTML page and validation rejects it as a masquerade.
+ */
+export function hfNormalizeToResolveUrl(url: string): string {
+  try {
+    const u = new URL(url.trim());
+    if (!/(^|\.)huggingface\.co$|(^|\.)hf-mirror\.com$/i.test(u.hostname)) return url;
+    u.pathname = u.pathname.replace(/^(\/[^/]+\/[^/]+)\/blob\//, "$1/resolve/");
+    if (/\/resolve\//.test(u.pathname) && !u.searchParams.has("download")) u.searchParams.set("download", "true");
+    return u.toString();
+  } catch {
+    return url;
+  }
+}
+
+/**
  * Parses a HuggingFace file URL (blob or resolve form) into the pieces `hf
  * download <repo_id> <filenames...>` needs. Returns undefined for anything
  * that isn't a concrete file URL (e.g. a bare repo landing page) -- the hf
@@ -774,6 +794,11 @@ function withCurlDownloadCommand(
   config: SourceProviderConfig
 ): AssetSourceCandidate {
   if (!candidate.downloadUrl || !input.targetPath) return candidate;
+  // A HuggingFace /blob/ link serves an HTML page, not the file — rewrite it to
+  // the /resolve/ direct URL so curl downloads the bytes (curl's --fail can't
+  // catch it: a blob page is a valid HTTP 200).
+  const effectiveUrl =
+    candidate.provider === "huggingface" ? hfNormalizeToResolveUrl(candidate.downloadUrl) : candidate.downloadUrl;
   const headers =
     candidate.provider === "huggingface" && config.hasHuggingFaceToken
       ? ["-H", "Authorization: Bearer ${HF_TOKEN}"]
@@ -803,7 +828,7 @@ function withCurlDownloadCommand(
       ...headers,
       "--output",
       input.targetPath,
-      candidate.downloadUrl
+      effectiveUrl
     ],
     notes: `${candidate.notes} curl honors HTTPS_PROXY/HTTP_PROXY/ALL_PROXY and CURL_CA_BUNDLE/NODE_EXTRA_CA_CERTS at execution time.`
   };

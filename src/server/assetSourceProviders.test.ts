@@ -7,6 +7,7 @@ import {
   executeCandidateDownload,
   extractHuggingFaceFileSources,
   parseHfFileUrl,
+  hfNormalizeToResolveUrl,
   searchAssetSourceProviders,
   withDownloadCommand,
   type AssetSourceCandidate,
@@ -305,6 +306,27 @@ describe("parseHfFileUrl", () => {
 
   it("returns undefined for a bare repo landing page (no file to name -- the exact broken shape from the real incident)", () => {
     expect(parseHfFileUrl("https://huggingface.co/meituan-longcat/LongCat-Video-Avatar-1.5")).toBeUndefined();
+  });
+});
+
+describe("hfNormalizeToResolveUrl", () => {
+  it("rewrites a /blob/ (HTML page) URL to /resolve/ + ?download=true", () => {
+    expect(hfNormalizeToResolveUrl("https://huggingface.co/org/repo/blob/main/Wan/umt5-xxl-enc-fp8_e4m3fn.safetensors")).toBe(
+      "https://huggingface.co/org/repo/resolve/main/Wan/umt5-xxl-enc-fp8_e4m3fn.safetensors?download=true"
+    );
+  });
+  it("leaves a /resolve/ URL's path intact (adds download flag)", () => {
+    expect(hfNormalizeToResolveUrl("https://hf-mirror.com/org/repo/resolve/main/file.safetensors")).toBe(
+      "https://hf-mirror.com/org/repo/resolve/main/file.safetensors?download=true"
+    );
+  });
+  it("is a no-op for non-HuggingFace hosts", () => {
+    expect(hfNormalizeToResolveUrl("https://example.com/x/y/blob/main/file.safetensors")).toBe(
+      "https://example.com/x/y/blob/main/file.safetensors"
+    );
+  });
+  it("returns the input unchanged when it isn't a URL", () => {
+    expect(hfNormalizeToResolveUrl("not a url")).toBe("not a url");
   });
 });
 
