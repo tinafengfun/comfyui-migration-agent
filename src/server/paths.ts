@@ -101,7 +101,9 @@ export const SCHEMA_FILES = {
   feedbackEvent: path.join(GLOBAL_DIRS.schemasRoot, "feedback-event.schema.json"),
   // Custom-node XPU-support catalog record (see src/catalog/). Validated on every
   // catalog-server write; a superset of recipe + knownCustomNodes.
-  xpuNode: path.join(GLOBAL_DIRS.schemasRoot, "xpu-node.schema.json")
+  xpuNode: path.join(GLOBAL_DIRS.schemasRoot, "xpu-node.schema.json"),
+  // API-node → local-model substitution recipe (Step 03b node localization).
+  nodeSubstitution: path.join(GLOBAL_DIRS.schemasRoot, "node-substitution.schema.json")
 } as const;
 
 // ─────────────────────────────────────────────────────────────────────────────

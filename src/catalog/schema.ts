@@ -45,6 +45,14 @@ export type MigrationRoute =
   | "human_env_conflict"
   | "human_source_unknown"
   | "unsupported_cuda_kernel"
+  // Node calls an external cloud API (no local compute) — cannot run on the
+  // offline XPU target. `api_local_substitute`: a local model node does the
+  // equivalent work (VLM/LLM/TTS) → the node-localization step (03b) proposes a
+  // graph substitution (human-approved). `api_no_local_equivalent`: no local
+  // equivalent exists → a "cannot localize" boundary (human). See
+  // docs/prd/api-node-local-substitution.md.
+  | "api_local_substitute"
+  | "api_no_local_equivalent"
   | "not_applicable";
 
 /**

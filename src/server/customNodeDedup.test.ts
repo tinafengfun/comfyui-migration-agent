@@ -12,6 +12,9 @@ describe("nodeClassFromRoute (taxonomy unification)", () => {
     expect(nodeClassFromRoute("auto_enum")).toBe("C");
     expect(nodeClassFromRoute("human_source_work")).toBeUndefined();
     expect(nodeClassFromRoute("not_applicable")).toBeUndefined();
+    // API-substitution routes are not a mechanical A/B/C class (handled by the 03b step).
+    expect(nodeClassFromRoute("api_local_substitute")).toBeUndefined();
+    expect(nodeClassFromRoute("api_no_local_equivalent")).toBeUndefined();
     expect(nodeClassFromRoute(undefined)).toBeUndefined();
   });
 });

@@ -1,0 +1,145 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://comfyui-migration-agent/schemas/node-substitution.schema.json",
+  "title": "Node substitution recipe",
+  "description": "Capability-matrix entry for the Step-03b node-localization step: how to replace one cloud-API node (e.g. GeminiNode) with a local-model subgraph, graph-rewired. One file per fromNodeType under recipes/substitutions/.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "fromNodeType", "toSubgraph", "links", "provenance"],
+  "properties": {
+    "id": { "type": "string", "description": "Unique recipe id, kebab-case." },
+    "fromNodeType": { "type": "string", "description": "The cloud-API node class to replace (matched on node.type)." },
+    "model": { "type": "string", "description": "Human-facing label of the local model used (for provenance/gate)." },
+    "description": { "type": "string" },
+    "toSubgraph": {
+      "type": "array",
+      "minItems": 1,
+      "description": "Local node(s) to insert. Each gets a fresh graph id; referenced by `key`. Ports must be declared in full (Step 03b runs before ComfyUI/object_info is available, so slot order is resolved from these arrays).",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["key", "localType"],
+        "properties": {
+          "key": { "type": "string", "description": "Recipe-local handle for this node (referenced in links)." },
+          "localType": { "type": "string", "description": "The local node class_type to insert." },
+          "inputs": {
+            "type": "array",
+            "description": "Linkable input ports in slot order (name→slot). asInput remaps add to this.",
+            "items": { "type": "object", "additionalProperties": false, "required": ["name", "type"], "properties": { "name": { "type": "string" }, "type": { "type": "string" } } }
+          },
+          "outputs": {
+            "type": "array",
+            "description": "Output ports in slot order (name→slot).",
+            "items": { "type": "object", "additionalProperties": false, "required": ["name", "type"], "properties": { "name": { "type": "string" }, "type": { "type": "string" } } }
+          },
+          "widgets_values": {
+            "type": "array",
+            "description": "Positional widget values, matching the local node's widget order in object_info."
+          }
+        }
+      }
+    },
+    "links": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["internal", "inMap", "outMap"],
+      "properties": {
+        "internal": {
+          "type": "array",
+          "description": "Links between the inserted subgraph nodes.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["from", "to"],
+            "properties": {
+              "from": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["node", "output"],
+                "properties": {
+                  "node": { "type": "string" },
+                  "output": { "type": "string" },
+                  "type": { "type": "string" }
+                }
+              },
+              "to": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["node", "input"],
+                "properties": {
+                  "node": { "type": "string" },
+                  "input": { "type": "string" }
+                }
+              }
+            }
+          }
+        },
+        "inMap": {
+          "type": "object",
+          "description": "API-node input name → where its incoming link should re-point in the subgraph. asInput:true converts a widget on the target node to a linked input.",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["node", "input"],
+            "properties": {
+              "node": { "type": "string" },
+              "input": { "type": "string" },
+              "asInput": { "type": "boolean" }
+            }
+          }
+        },
+        "outMap": {
+          "type": "object",
+          "description": "API-node output name (or slot index as string) → the subgraph node/output that should feed its downstream consumers.",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["node", "output"],
+            "properties": {
+              "node": { "type": "string" },
+              "output": { "type": "string" }
+            }
+          }
+        },
+        "widgetMap": {
+          "type": "object",
+          "description": "API-node widget name → subgraph node widget to copy the value into.",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["node", "widget"],
+            "properties": {
+              "node": { "type": "string" },
+              "widget": { "type": "string" }
+            }
+          }
+        },
+        "dropInputs": {
+          "type": "array",
+          "description": "API-node inputs with no local equivalent — dropped and recorded in provenance.",
+          "items": { "type": "string" }
+        },
+        "audio": {
+          "type": "object",
+          "description": "Optional audio→ASR hook: when the API node has a connected audio input, insert a local ASR node and join its text into `joinInto`. Deferred/unvalidated in Phase 0.",
+          "additionalProperties": false,
+          "required": ["asrType", "joinInto"],
+          "properties": {
+            "asrType": { "type": "string" },
+            "joinInto": { "type": "object", "additionalProperties": false, "required": ["node", "input"], "properties": { "node": { "type": "string" }, "input": { "type": "string" } } }
+          }
+        }
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["createdAt"],
+      "properties": {
+        "createdAt": { "type": "string" },
+        "approvedBy": { "type": "string" },
+        "note": { "type": "string" }
+      }
+    }
+  }
+}

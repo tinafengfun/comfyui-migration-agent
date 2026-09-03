@@ -60,6 +60,7 @@ describe("Phase 1 monolithic agent", () => {
       "01",
       "02",
       "03",
+      "03b",
       "04",
       "05",
       "06",

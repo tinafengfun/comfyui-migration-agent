@@ -40,6 +40,19 @@ const stepSeed: Array<Omit<MigrationStepDefinition, "promptPath" | "skillPath"> 
     humanIntervention: "Clarify ambiguous branches and in-scope outputs."
   },
   {
+    // Deterministic, OPTIONAL, extensible step: detect nodes that need localizing
+    // (Phase 0: cloud-API nodes → a local-model subgraph, e.g. GeminiNode → local
+    // llama.cpp VLM) and, on human approval, rewrite the GUI graph so the deployed
+    // workflow runs fully offline on the XPU. Fast-passes when nothing matches. No
+    // prompt/skill — runs entirely in orchestrator.runStep. See
+    // docs/prd/api-node-local-substitution.md.
+    id: "03b",
+    name: "Node localization (API → local model)",
+    requiredOutput: "03b-node-localization.md",
+    humanIntervention: "Approve substituting a cloud-API node with a local-model subgraph (behavior may differ), or reject to keep it as a human boundary.",
+    optional: true
+  },
+  {
     id: "04",
     name: "Source audit",
     prompt: "migration-workflow-v2/prompts/04-source-audit-prompt.md",
