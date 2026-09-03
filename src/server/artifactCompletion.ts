@@ -81,6 +81,8 @@ export function expectedArtifactGroups(step: MigrationStepDefinition): string[][
       return [["02-feasibility.md"]];
     case "03":
       return [["03-inventory.md"], ["03-workflow-topology.md", "03-node-inventory.csv"]];
+    case "03b":
+      return [["03b-node-localization.md"]];
     case "04":
       return [["04-source-audit.md"]];
     case "05":

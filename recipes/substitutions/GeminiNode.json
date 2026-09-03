@@ -1,0 +1,274 @@
+{
+  "id": "gemininode-to-llama-cpp-vlm",
+  "fromNodeType": "GeminiNode",
+  "model": "ComfyUI-llama-cpp_vlm (Qwen3.5 VLM GGUF, local XPU/CPU)",
+  "description": "Replace the Google Gemini cloud VLM (image+prompt->text) with a local llama.cpp VLM subgraph (model_loader + parameters + instruct_adv) running offline on the XPU. Audio/video/files inputs are dropped (ASR hook deferred).",
+  "toSubgraph": [
+    {
+      "key": "loader",
+      "localType": "llama_cpp_model_loader",
+      "inputs": [
+        {
+          "name": "model",
+          "type": "COMBO"
+        },
+        {
+          "name": "mmproj",
+          "type": "COMBO"
+        },
+        {
+          "name": "chat_handler",
+          "type": "COMBO"
+        },
+        {
+          "name": "n_ctx",
+          "type": "INT"
+        },
+        {
+          "name": "vram_limit",
+          "type": "INT"
+        },
+        {
+          "name": "image_min_tokens",
+          "type": "INT"
+        },
+        {
+          "name": "image_max_tokens",
+          "type": "INT"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "llama_model",
+          "type": "LLAMACPPMODEL"
+        }
+      ],
+      "widgets_values": [
+        "Qwen3.5-27B-heretic.Q4_K_M.gguf",
+        "Qwen3.5-27B-heretic.mmproj-Q8_0.gguf",
+        "Qwen3.5",
+        8192,
+        -1,
+        0,
+        0,
+        "None",
+        3,
+        10,
+        false
+      ]
+    },
+    {
+      "key": "params",
+      "localType": "llama_cpp_parameters",
+      "inputs": [
+        {
+          "name": "max_tokens",
+          "type": "INT"
+        },
+        {
+          "name": "top_k",
+          "type": "INT"
+        },
+        {
+          "name": "top_p",
+          "type": "FLOAT"
+        },
+        {
+          "name": "min_p",
+          "type": "FLOAT"
+        },
+        {
+          "name": "typical_p",
+          "type": "FLOAT"
+        },
+        {
+          "name": "temperature",
+          "type": "FLOAT"
+        },
+        {
+          "name": "repeat_penalty",
+          "type": "FLOAT"
+        },
+        {
+          "name": "frequency_penalty",
+          "type": "FLOAT"
+        },
+        {
+          "name": "presence_penalty",
+          "type": "FLOAT"
+        },
+        {
+          "name": "mirostat_mode",
+          "type": "INT"
+        },
+        {
+          "name": "mirostat_eta",
+          "type": "FLOAT"
+        },
+        {
+          "name": "mirostat_tau",
+          "type": "FLOAT"
+        },
+        {
+          "name": "state_uid",
+          "type": "INT"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "parameters",
+          "type": "LLAMACPPARAMS"
+        }
+      ],
+      "widgets_values": [
+        4096,
+        30,
+        0.9,
+        0.05,
+        1,
+        0.8,
+        1,
+        0,
+        1,
+        0,
+        0.1,
+        5,
+        -1
+      ]
+    },
+    {
+      "key": "vlm",
+      "localType": "llama_cpp_instruct_adv",
+      "inputs": [
+        {
+          "name": "llama_model",
+          "type": "LLAMACPPMODEL"
+        },
+        {
+          "name": "parameters",
+          "type": "LLAMACPPARAMS"
+        },
+        {
+          "name": "images",
+          "type": "IMAGE"
+        },
+        {
+          "name": "queue_handler",
+          "type": "*"
+        },
+        {
+          "name": "preset_prompt",
+          "type": "COMBO"
+        },
+        {
+          "name": "custom_prompt",
+          "type": "STRING"
+        },
+        {
+          "name": "system_prompt",
+          "type": "STRING"
+        },
+        {
+          "name": "inference_mode",
+          "type": "COMBO"
+        },
+        {
+          "name": "max_frames",
+          "type": "INT"
+        },
+        {
+          "name": "max_size",
+          "type": "INT"
+        },
+        {
+          "name": "seed",
+          "type": "INT"
+        },
+        {
+          "name": "force_offload",
+          "type": "BOOLEAN"
+        },
+        {
+          "name": "save_states",
+          "type": "BOOLEAN"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "output",
+          "type": "STRING"
+        },
+        {
+          "name": "output_list",
+          "type": "STRING"
+        },
+        {
+          "name": "state_uid",
+          "type": "INT"
+        }
+      ],
+      "widgets_values": [
+        "Prompt Style - Detailed",
+        "You are the continuity director for a four-panel comic page. Given the image(s) and the user prompt, produce the required text.",
+        "",
+        "one by one",
+        24,
+        256,
+        43244235043652,
+        "randomize",
+        false,
+        false
+      ]
+    }
+  ],
+  "links": {
+    "internal": [
+      {
+        "from": {
+          "node": "loader",
+          "output": "llama_model"
+        },
+        "to": {
+          "node": "vlm",
+          "input": "llama_model"
+        }
+      },
+      {
+        "from": {
+          "node": "params",
+          "output": "parameters"
+        },
+        "to": {
+          "node": "vlm",
+          "input": "parameters"
+        }
+      }
+    ],
+    "inMap": {
+      "images": {
+        "node": "vlm",
+        "input": "images"
+      },
+      "prompt": {
+        "node": "vlm",
+        "input": "custom_prompt"
+      }
+    },
+    "outMap": {
+      "0": {
+        "node": "vlm",
+        "output": "output"
+      }
+    },
+    "dropInputs": [
+      "audio",
+      "video",
+      "files"
+    ]
+  },
+  "provenance": {
+    "createdAt": "2026-09-03",
+    "approvedBy": "tinafengfun",
+    "note": "Phase 0 GeminiNode->local VLM; audio/video/files dropped (ASR deferred)."
+  }
+}

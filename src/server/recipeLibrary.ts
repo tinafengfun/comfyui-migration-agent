@@ -180,6 +180,9 @@ function collectRecipeFiles(root: string): string[] {
         continue;
       }
       if (st.isDirectory()) {
+        // recipes/substitutions/ holds node-substitution recipes (a different
+        // schema, loaded by substitutionRecipes.ts) — not node recipes.
+        if (entry === "substitutions") continue;
         walk(full);
       } else if (st.isFile() && full.endsWith(".json")) {
         out.push(full);

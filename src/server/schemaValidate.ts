@@ -29,7 +29,7 @@ import { SCHEMA_FILES } from "./paths";
 // Public types
 // ─────────────────────────────────────────────────────────────────────────────
 
-export type SchemaKind = "skillFrontmatter" | "recipe" | "feedbackEvent" | "xpuNode";
+export type SchemaKind = "skillFrontmatter" | "recipe" | "feedbackEvent" | "xpuNode" | "nodeSubstitution";
 
 export interface ValidationOk {
   ok: true;

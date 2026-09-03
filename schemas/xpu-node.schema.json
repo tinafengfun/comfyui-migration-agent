@@ -227,6 +227,8 @@
         "human_env_conflict",
         "human_source_unknown",
         "unsupported_cuda_kernel",
+        "api_local_substitute",
+        "api_no_local_equivalent",
         "not_applicable"
       ],
       "description": "Triage class: how this node migrates to XPU + who acts. auto_* = agent may attempt autonomously (bounded, objective-gated); human_*/unsupported_*/not_applicable = no autonomous attempts. Orthogonal to xpuSupport (the end state). Shared vocabulary across Step 04 route, Step 02 hard_stop, and this record."

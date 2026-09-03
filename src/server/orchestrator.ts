@@ -108,6 +108,8 @@ import { appendFeedbackEvent, type FeedbackEventInput } from "./feedbackLog";
 import { recordRecipeOutcome } from "./analyticsDb";
 import { ensureWorkflowInventory } from "./workflowInventory";
 import { normalizeWorkflowForApi } from "./workflowNormalize";
+import { planNodeLocalization, type LocalizationProposal } from "./nodeLocalization";
+import { substituteNodes, type GGraph } from "./graphSubstitute";
 import {
   checkComfyUiCoreDrift,
   checkOmniXpuAcceleration,
@@ -909,6 +911,89 @@ export class MigrationOrchestrator {
         type: "step_completed",
         message: summary,
         data: inventory
+      });
+      return;
+    }
+
+    if (stepId === "03b") {
+      // Optional, extensible node-localization step. Detect nodes that need local
+      // handling (Phase 0: cloud-API nodes → a local-model subgraph). Fast-pass
+      // when nothing matches or the feature is off; otherwise gate for approval —
+      // the substitution is applied in applyStep03bLocalizationDecision on approve.
+      const artifactPath = path.join(task.artifactPath, "03b-node-localization.md");
+      const writeDoc = async (body: string): Promise<void> => {
+        await fs.writeFile(artifactPath, body, "utf8");
+        await this.store.appendArtifact({
+          taskId,
+          stepId,
+          path: artifactPath,
+          relativePath: path.relative(task.workspacePath, artifactPath),
+          kind: "markdown"
+        });
+      };
+      const complete = async (summary: string): Promise<void> => {
+        await this.updateStepAndPersist(taskId, stepId, "completed", { summary, error: undefined });
+        await this.emit({ taskId, stepId, type: "step_completed", message: summary });
+      };
+
+      if (process.env.NODE_LOCALIZATION_ENABLED !== "1") {
+        await writeDoc("# Step 03b — Node localization\n\nDisabled (set NODE_LOCALIZATION_ENABLED=1 to enable). No changes.\n");
+        await complete("Step 03b node localization is disabled (NODE_LOCALIZATION_ENABLED != 1) — no changes.");
+        return;
+      }
+
+      let proposals: LocalizationProposal[] = [];
+      try {
+        const graph = JSON.parse(await fs.readFile(task.workflowPath, "utf8")) as GGraph;
+        proposals = planNodeLocalization(graph).proposals;
+      } catch (e) {
+        await writeDoc(`# Step 03b — Node localization\n\nSkipped: could not read/parse the workflow (${(e as Error).message}). No changes.\n`);
+        await complete(`Step 03b skipped: ${(e as Error).message}`);
+        return;
+      }
+
+      if (proposals.length === 0) {
+        await writeDoc("# Step 03b — Node localization\n\n✅ Nothing to localize: no cloud-API nodes (or other localizable nodes) found. No changes.\n");
+        await complete("Step 03b: nothing to localize — no API/local-substitution nodes found.");
+        return;
+      }
+
+      // Propose + gate. The substitution is applied on approval.
+      const list = proposals
+        .map((p) => `  - node ${p.nodeId} \`${p.from}\` → ${p.toNodes.join(" + ")} (${p.model ?? "local model"}); dropped inputs: ${p.droppedInputs.join(", ") || "none"}`)
+        .join("\n");
+      await fs.writeFile(
+        path.join(task.artifactPath, "03b-gate-signal.json"),
+        JSON.stringify(
+          {
+            stepId: "03b",
+            gated: true,
+            category: "node_substitution",
+            trigger: "deterministic",
+            reason: `${proposals.length} node(s) call an external API and would be replaced by a local-model subgraph`,
+            items: proposals.map((p) => ({ name: p.from, kind: "api_node", action: `substitute with ${p.toNodes.join(" + ")}` }))
+          },
+          null,
+          2
+        ),
+        "utf8"
+      );
+      const message = `Step 03b found ${proposals.length} cloud-API node(s) to localize.`;
+      await this.updateStepAndPersist(taskId, stepId, "waiting_for_human", { summary: message, error: undefined });
+      await this.emit({
+        taskId,
+        stepId,
+        type: "human_question",
+        message,
+        data: {
+          question:
+            `Step 03b — the workflow calls external cloud APIs that can't run on the offline XPU. Proposed local substitutions:\n\n${list}\n\n` +
+            `Substituting swaps the cloud model for a local one — the OUTPUT MAY DIFFER. Approve to rewrite the graph to run fully offline, or reject to keep these as a human boundary.`,
+          choices: ["Approve — substitute with the local model", "Reject — keep the API node (human boundary)"],
+          allowFreeform: true,
+          blockingReason: "node_substitution",
+          proposals
+        }
       });
       return;
     }
@@ -2723,6 +2808,10 @@ export class MigrationOrchestrator {
       return true;
     }
 
+    if (decision.stepId === "03b" && (await this.applyStep03bLocalizationDecision({ task, decision }))) {
+      return true;
+    }
+
     if (decision.stepId !== "00") {
       const artifactGate = await checkRequiredArtifactGate(task, stepDefinition);
       if (!artifactGate.gated) {
@@ -4344,6 +4433,85 @@ export class MigrationOrchestrator {
    * tier via 08's step12_context); hardware escalation / hard stop terminate the
    * task as a classified capacity hard stop. Mirrors applyStep12AcceptanceDecision.
    */
+  /**
+   * Step 03b node-localization resume: on approve, apply the (deterministic,
+   * re-derived) substitution plan to the GUI graph, overwrite task.workflowPath so
+   * Steps 05–12 execute the localized graph, and record provenance. On reject,
+   * leave the graph unchanged and record the API nodes as a human boundary. Either
+   * way the step completes (it is optional and never blocks task completion).
+   */
+  private async applyStep03bLocalizationDecision(input: {
+    task: MigrationTask;
+    decision: HumanDecision;
+  }): Promise<boolean> {
+    const { task, decision } = input;
+    const answer = (decision.answer ?? "").toLowerCase();
+    const approved = /approve|substitut|localiz|yes|proceed|accept|ok\b/.test(answer) && !/reject|keep|decline|no\b/.test(answer);
+    const rejected = /reject|keep the api|keep it|decline|boundary|do not|don'?t/.test(answer);
+    if (!approved && !rejected) return false; // not a decision this handler owns
+
+    const artifactPath = path.join(task.artifactPath, "03b-node-localization.md");
+    const provenancePath = path.join(task.artifactPath, "03b-node-localization.json");
+    const finish = async (md: string, summary: string): Promise<void> => {
+      await fs.writeFile(artifactPath, md, "utf8");
+      await this.store.appendArtifact({
+        taskId: task.id,
+        stepId: "03b",
+        path: artifactPath,
+        relativePath: path.relative(task.workspacePath, artifactPath),
+        kind: "markdown"
+      });
+      // Clear the gate so a resume doesn't re-pause.
+      await fs.writeFile(
+        path.join(task.artifactPath, "03b-gate-signal.json"),
+        JSON.stringify({ stepId: "03b", gated: false }, null, 2),
+        "utf8"
+      );
+      await this.updateStepAndPersist(task.id, "03b", "completed", { summary, error: undefined });
+      await this.emit({ taskId: task.id, stepId: "03b", type: "step_completed", message: summary });
+    };
+
+    let graph: GGraph;
+    try {
+      graph = JSON.parse(await fs.readFile(task.workflowPath, "utf8")) as GGraph;
+    } catch (e) {
+      await finish(`# Step 03b — Node localization\n\nCould not read the workflow (${(e as Error).message}); no changes.\n`, `Step 03b: could not read workflow (${(e as Error).message}).`);
+      return true;
+    }
+    const { plans, proposals } = planNodeLocalization(graph);
+
+    if (rejected || plans.length === 0) {
+      const md =
+        `# Step 03b — Node localization (REJECTED)\n\nThe human declined the substitution. The following cloud-API node(s) remain and are a human boundary (cannot run offline on the XPU):\n\n` +
+        proposals.map((p) => `- node ${p.nodeId} \`${p.from}\``).join("\n") +
+        "\n";
+      await finish(md, `Step 03b: substitution rejected — ${proposals.length} API node(s) remain as a human boundary.`);
+      return true;
+    }
+
+    // Approve → apply the substitution to the GUI graph.
+    const { workflow, report } = substituteNodes(graph, plans);
+    const backup = task.workflowPath.replace(/\.json$/i, "") + ".gui-original-preloc.json";
+    await fs.copyFile(task.workflowPath, backup).catch(() => {});
+    await fs.writeFile(task.workflowPath, `${JSON.stringify(workflow, null, 2)}\n`, "utf8");
+    await fs.writeFile(provenancePath, `${JSON.stringify({ substituted: report.substituted, isDag: report.isDag, warnings: report.warnings }, null, 2)}\n`, "utf8");
+    await this.store.appendArtifact({
+      taskId: task.id,
+      stepId: "03b",
+      path: provenancePath,
+      relativePath: path.relative(task.workspacePath, provenancePath),
+      kind: "json"
+    });
+    const md =
+      `# Step 03b — Node localization (APPLIED)\n\nReplaced ${report.substituted.length} cloud-API node(s) with local-model subgraph(s) so the workflow runs fully offline on the XPU. GUI original backed up to \`${path.basename(backup)}\`.\n\n` +
+      report.substituted
+        .map((s) => `- node ${s.fromId} \`${s.from}\` → ${s.toNodes.join(" + ")} (${s.model ?? "local model"}); dropped inputs: ${s.droppedInputs.join(", ") || "none"}. **Output may differ from the cloud model.**`)
+        .join("\n") +
+      `\n\nGraph is a DAG: ${report.isDag}.${report.warnings.length ? " Warnings: " + report.warnings.join("; ") : ""}\n`;
+    await finish(md, `Step 03b: substituted ${report.substituted.length} API node(s) with local models (DAG=${report.isDag}).`);
+    return true;
+  }
+
   private async applyStep08CapacityDecision(input: {
     task: MigrationTask;
     decision: HumanDecision;
