@@ -10,6 +10,7 @@ import { promisify } from "node:util";
 import { promises as fsp } from "node:fs";
 import path from "node:path";
 import os from "node:os";
+import { vlmJudgeOutput, type VlmNodeConfig, type VlmVerdict } from "./vlmJudge";
 
 const exec = promisify(execFile);
 
@@ -48,7 +49,23 @@ export interface QualityVerdict {
   probe: MediaProbe | null;
   blackRatio: number | null;
   spatialContrast: number | null; // avg per-frame luma range YHIGH-YLOW (0 = flat/blank color)
+  vlm: VlmVerdict | null; // subjective judge (only when a VlmNodeConfig is supplied)
   failures: string[];
+}
+
+/**
+ * Optional subjective judge: run the on-node local VLM over the output and fail
+ * on a FAIL verdict. Catches "ran-but-degenerate" renders (a muddy near-flat
+ * image) that clear the objective spatialContrast threshold and would otherwise
+ * FALSELY PASS — see vlmJudge.ts. `vlm` comes from the localized workflow
+ * (extractVlmConfigFromGraph). If the judge can't run (no VLM / infra error) it
+ * returns null and assessOutput keeps only the objective verdict (fail-open on
+ * infra, fail-closed on an actual FAIL).
+ */
+export interface JudgeOptions {
+  vlm: VlmNodeConfig;
+  prompt?: string;
+  comfyUrl?: string;
 }
 
 /** Download an output file from ComfyUI's /view into a local path. */
@@ -141,13 +158,15 @@ export async function spatialContrast(filePath: string): Promise<number> {
 export async function assessOutput(
   comfyUrl: string,
   out: { filename: string; type: string; subfolder?: string },
-  thresholds: QualityThresholds = DEFAULT_THRESHOLDS
+  thresholds: QualityThresholds = DEFAULT_THRESHOLDS,
+  judge?: JudgeOptions
 ): Promise<QualityVerdict> {
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), "pw-output-quality-"));
   const failures: string[] = [];
   let probe: MediaProbe | null = null;
   let black: number | null = null;
   let contrast: number | null = null;
+  let vlm: VlmVerdict | null = null;
   try {
     const local = await fetchOutput(comfyUrl, out, dir);
     probe = await probeMedia(local);
@@ -169,10 +188,17 @@ export async function assessOutput(
       if (contrast !== null && contrast < 3)
         failures.push(`flat/blank output: spatial luma contrast ${contrast.toFixed(1)} ~ 0 (single flat color)`);
     }
+    // Subjective judge (semantic; catches degenerate renders the objective
+    // metric misses). Only fails on an explicit FAIL — a null verdict (no VLM
+    // available / infra error) never blocks, so the objective gate still governs.
+    if (judge?.vlm && probe) {
+      vlm = await vlmJudgeOutput(judge.comfyUrl ?? comfyUrl, out, judge.vlm, { prompt: judge.prompt });
+      if (vlm && !vlm.pass) failures.push(`VLM judge FAIL: ${vlm.reason}`);
+    }
   } catch (e) {
     failures.push(`assess threw: ${e instanceof Error ? e.message : String(e)}`);
   } finally {
     await fsp.rm(dir, { recursive: true, force: true });
   }
-  return { ok: failures.length === 0, filename: out.filename, type: out.type, probe, blackRatio: black, spatialContrast: contrast, failures };
+  return { ok: failures.length === 0, filename: out.filename, type: out.type, probe, blackRatio: black, spatialContrast: contrast, vlm, failures };
 }

@@ -427,6 +427,65 @@ def copy_output_files(
     return copied_records, copied_paths
 
 
+def assess_output_degeneracy(copied_paths: list[Path]) -> dict[str, Any]:
+    """Flag a render that RAN but produced DEGENERATE (flat/near-constant) output.
+
+    This is the tell of a functionally-dead model -- e.g. a bad quantized *mirror*
+    checkpoint that loads with healthy-looking weights but emits a constant latent,
+    so every panel decodes to one muddy flat color (real incident 2026-09-04: the
+    wissxi ``flux-2-klein-base-9b-fp8`` mirror rendered uniform brown while the full
+    checkpoint + ``flux2-vae`` rendered correctly). Such a model otherwise sails
+    through Step 08 (it runs, fits VRAM) and is only caught by a human at Step 12.
+
+    Even the 1-step capacity-probe output exposes it: the degenerate forward is
+    constant regardless of sampler steps. We measure per-image grayscale spread
+    (std-dev + max-min range on a downscaled copy).
+
+    SCOPE (measured 2026-09-04): this cheap objective metric reliably flags only a
+    SEVERE flat render (std<12, range<40). A milder degenerate "muddy mush" keeps a
+    wide tonal range (dark corners -> lighter center) and scores std~33/range~170 --
+    indistinguishable from a real low-contrast image by pixel spread alone. So this
+    is a fast PRE-FILTER; the AUTHORITATIVE degenerate/quality check is the semantic
+    VLM judge (tests/helpers/vlmJudge.ts, run in the Playwright @migration gate),
+    which correctly returns PASS(real)/FAIL(degenerate). NON-BLOCKING signal here.
+    """
+    result: dict[str, Any] = {"checked": 0, "any_degenerate": False, "files": []}
+    try:
+        from PIL import Image  # ComfyUI venv ships PIL
+        import statistics
+    except Exception as exc:  # pragma: no cover - PIL always present in the ComfyUI venv
+        return {"skipped": True, "reason": f"PIL unavailable: {exc}", "any_degenerate": False}
+    for p in copied_paths:
+        if p.suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp", ".bmp"}:
+            continue
+        try:
+            with Image.open(p) as im:
+                gray = im.convert("L")
+                gray.thumbnail((256, 256))
+                px = list(gray.getdata())
+            if len(px) < 2:
+                continue
+            std = float(statistics.pstdev(px))
+            rng = float(max(px) - min(px))
+            # Degenerate only when BOTH spread metrics are low (conservative -> a
+            # genuinely low-contrast but real image is not falsely flagged).
+            degen = std < 12.0 and rng < 40.0
+            result["checked"] += 1
+            result["any_degenerate"] = result["any_degenerate"] or degen
+            result["files"].append(
+                {"path": str(p), "luma_std": round(std, 2), "luma_range": round(rng, 1), "degenerate": degen}
+            )
+        except Exception as exc:
+            result["files"].append({"path": str(p), "error": str(exc)})
+    if result["any_degenerate"]:
+        result["note"] = (
+            "Output is flat/near-constant -> the model likely renders DEGENERATE (a bad "
+            "quantized/mirror checkpoint that loads but emits a constant latent). Prefer the "
+            "full/official checkpoint (+ its matching VAE) before delivery; do NOT ship this."
+        )
+    return result
+
+
 def infer_usable_budget_bytes(system_stats: dict[str, Any], feasibility: dict[str, Any] | None) -> int | None:
     # Prefer the LIVE, torch-backed device total from ComfyUI /system_stats
     # (vram_total) — the reliable source: torch.xpu reports the real card size
@@ -1289,6 +1348,16 @@ def main() -> int:
     output_files, copied_paths = copy_output_files(raw_output_files, output_copy_dir)
     write_json(output_files_path, output_files)
 
+    # Degenerate-output guard: catch a model that RAN but produced a flat/constant
+    # image (a bad quantized/mirror checkpoint). Non-blocking signal in the summary.
+    output_degeneracy = assess_output_degeneracy(copied_paths)
+    if output_degeneracy.get("any_degenerate"):
+        print(
+            "[step08] WARNING: output appears DEGENERATE (flat/constant) -- "
+            f"{output_degeneracy.get('note', '')}",
+            flush=True,
+        )
+
     executed_nodes = history_summary["executed_nodes"] if history_summary else []
     cached_nodes = history_summary["cached_nodes"] if history_summary else []
     node_accounting = source_node_accounting(artifact_dir / "03-node-inventory.csv", executed_nodes, cached_nodes)
@@ -1450,6 +1519,7 @@ def main() -> int:
         "run_status": run_status,
         "output_files": output_files,
         "copied_output_files": [str(path) for path in copied_paths],
+        "output_degeneracy": output_degeneracy,
         "executed_nodes": executed_nodes,
         "cached_nodes": cached_nodes,
         "node_accounting": {
