@@ -26,8 +26,13 @@ if ! bash "$SCRIPT_DIR/bootstrap-catalog-repo.sh"; then
   echo "!! [catalog] repo bootstrap failed (non-fatal) -- server still runs local-only." >&2
 fi
 
-# 2) Ensure the server is up (idempotent; no-op if /healthz already answers).
-if bash "$SCRIPT_DIR/start-catalog-server.sh"; then
+# 2) (Re)start the server with the freshly-deployed code. A deploy syncs new
+# code/schema, so the running server would otherwise stay on the OLD code until
+# someone hand-restarts it (the ad-hoc "restart catalog-server on new schema"
+# background task that used to linger as a stale orphan). Default to a clean
+# reap-then-start here so every deploy converges the catalog to the new code with
+# no orphans. Override with XPU_CATALOG_RESTART=0 to keep the running instance.
+if XPU_CATALOG_RESTART="${XPU_CATALOG_RESTART:-1}" bash "$SCRIPT_DIR/start-catalog-server.sh"; then
   echo "==> [catalog] server healthy on :$PORT"
 else
   echo "!! [catalog] server did not come up (non-fatal). If in a sandboxed shell that reaps" >&2

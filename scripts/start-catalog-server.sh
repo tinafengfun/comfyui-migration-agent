@@ -29,12 +29,36 @@ BRANCH="${XPU_CATALOG_BRANCH:-main}"
 HEALTH="http://127.0.0.1:${PORT}/healthz"
 LOG="/tmp/xpu-catalog-server-${PORT}.log"
 
-echo "==> catalog-server: repo=$REPO data=$DATA_DIR db=$DB port=$PORT remote=${REMOTE:-<local-only>}"
+# XPU_CATALOG_RESTART=1 forces a clean reap-then-start (use after a code/schema
+# change). Without it this stays idempotent (no-op if already healthy). This is
+# the SUPPORTED way to restart the catalog -- do NOT spawn ad-hoc background
+# `restart` tasks (they linger as orphans in sandboxed shells that reap detached
+# procs, exactly the stale-task bug this replaces).
+RESTART="${XPU_CATALOG_RESTART:-0}"
 
-# Idempotent: already serving on this port?
-if curl -sf "$HEALTH" >/dev/null 2>&1; then
+echo "==> catalog-server: repo=$REPO data=$DATA_DIR db=$DB port=$PORT remote=${REMOTE:-<local-only>} restart=$RESTART"
+
+# Reap any catalog-server process (by script pattern + by whoever holds the port).
+# Idempotent + safe to call when nothing is running.
+reap_catalog() {
+  pkill -f "src/catalog/server.ts" 2>/dev/null || true
+  local pids
+  pids=$(ss -tlnp 2>/dev/null | awk -v p=":${PORT}\$" '$4 ~ p {print $NF}' \
+           | grep -oE 'pid=[0-9]+' | cut -d= -f2 | sort -u || true)
+  [ -n "${pids:-}" ] && { echo "    reaping stale port holders: $pids"; echo "$pids" | xargs -r kill 2>/dev/null || true; }
+  for _ in $(seq 1 5); do curl -sf "$HEALTH" >/dev/null 2>&1 || break; sleep 1; done
+}
+
+if [ "$RESTART" = "1" ]; then
+  echo "    XPU_CATALOG_RESTART=1 -> reaping any existing catalog-server for a clean restart"
+  reap_catalog
+elif curl -sf "$HEALTH" >/dev/null 2>&1; then
   echo "    already healthy: $(curl -s "$HEALTH")"
   exit 0
+else
+  # Not healthy, but a stale/half-dead process may still hold the port -- reap it
+  # so the launch below can bind (prevents "port in use" orphan loops).
+  reap_catalog
 fi
 
 mkdir -p "$DATA_DIR/nodes" "$(dirname "$DB")"
