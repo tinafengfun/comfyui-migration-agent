@@ -112,6 +112,37 @@ prompt/seed/cfg is consistent with dead conditioning).
 2. Test the model in a reference upstream ComfyUI with official Flux.2 support, or with a **non-quantized (bf16)** Flux.2 Klein checkpoint.
 3. Check comfy_kitchen's handling of the `_quantization_metadata` custom fp8 format vs what this checkpoint carries.
 
+## EXHAUSTIVE BISECTION (2026-09-04, round 2) — isolated to the ComfyUI-fork/comfy_kitchen Flux.2 forward
+
+Direct component probes (via `docker exec` python, CPU, real model files) — every input to the forward
+is HEALTHY, yet the forward output is degenerate:
+
+| Component | Direct probe | Result |
+|---|---|---|
+| Text conditioning | encode 2 very different prompts, diff embeddings | ✅ alive: shape (1,512,12288), non-zero, 62% rel-diff between prompts |
+| VAE | encode→decode a colorful image | ✅ round-trips faithfully |
+| UNet weights | load model, inspect dequantized weights | ✅ float32, healthy magnitudes (absmean 0.008–0.02, norms ~0.95) |
+| Model config | inspect detected params | ✅ **`model_config: Flux2`**, 4-axis RoPE [32,32,32,32], theta 2000, 8 double + 24 single blocks, guidance_embed=False — correct Flux.2 |
+| OmniXPU patches (rope/attn/fp8) | **disable custom node, re-render** | ❌ still blank → not OmniXPU |
+| CFG/guidance | cfg 5→1 | ❌ still blank |
+
+**Definitive conclusion:** the blank/constant render is a **hardware-independent forward-computation bug
+in this ComfyUI fork** (Intel `llm-scaler-omni:0.1.0-b7`, comfy_kitchen 0.2.28) for **Flux.2 Klein**.
+Every input is provably correct; the UNet forward still yields a constant latent, on CPU and XPU, with
+OmniXPU on OR off. The only remaining layer is comfy_kitchen's core ops / the fork's Flux.2 model code.
+This is NOT: node localization, fp8, the XPU, oneDNN, the VAE, the conditioning, the weights, or the config.
+
+**Resolution paths (all heavy / owned outside this repo):**
+1. **Reference render** — run this exact model+workflow in a **vanilla upstream ComfyUI** with official
+   Flux.2 support (separate venv, same `/nfs_share` models). Correct there ⇒ confirms the Intel-fork bug.
+2. **Report to Intel** (llm-scaler-omni) — the b7 image's ComfyUI/comfy_kitchen renders Flux.2 Klein as a
+   constant image; needs a fork fix.
+3. **Use a different ComfyUI core** for Flux.2 workflows (the agent supports multiple cores) once one is
+   confirmed to render Flux.2 correctly.
+
+Node localization (Phase 0) is DELIVERED + VALIDATED regardless — see [[node_localization_step03b]] /
+`docs/prd/api-node-local-substitution.md`.
+
 ## (superseded) earlier cheap step
 
 Before committing to the image rebuild, **prove the hypothesis cheaply**: scratch venv w/ torch
