@@ -1,6 +1,20 @@
-# Backlog: fp8 GEMM broken on Battlemage (oneDNN 3.7.1) → blank Flux renders
+# Backlog: Flux.2-Klein blank render — SOLVED (bad fp8 mirror model)
 
-Status: **OPEN** — diagnosed 2026-09-04, fix not yet applied.
+Status: **SOLVED 2026-09-04.** Root cause = **the fp8 mirror UNet
+`flux-2-klein-base-9b-fp8.safetensors` (wissxi mirror) is bad** — it produces a constant latent →
+uniform brown, on ANY hardware/image. **Fix: use the full-precision `flux-2-klein-9b.safetensors`
+(18 GB, already on `/nfs_share/models/diffusion_models`) + `flux2-vae.safetensors`.** Verified: renders
+a correct photorealistic image on the Battlemage XPU (llm-scaler-omni 0.2.0-b1, but image-independent).
+
+The whole "fp8 GEMM / oneDNN / XPU / comfy_kitchen forward" investigation below was chasing a red
+herring — none of those were the cause. The fork renders Flux.2 Klein fine (prior good outputs exist,
+and the full model renders perfectly). Trace-back: Step-02 decision **D4** accepted the mirror-staged
+UNet because the official BFL repo was gated; that mirror model is defective. **Lesson for the agent:
+a mirror/quantized model that loads with healthy-looking weights can still be functionally dead —
+validate that a render is non-degenerate, or prefer the full/official checkpoint when both are staged.**
+
+### Original (now-superseded) framing:
+Status: OPEN — diagnosed 2026-09-04, fix not yet applied.
 Owner: (unassigned)
 Severity: HIGH for fp8 diffusion on Battlemage nodes; **does NOT affect node localization** (validated) or bf16 rendering.
 
