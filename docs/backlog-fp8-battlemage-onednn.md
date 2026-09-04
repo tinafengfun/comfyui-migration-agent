@@ -168,3 +168,19 @@ rebuild is worth it. If not → fp8 on Battlemage needs a deeper oneDNN fix / di
 
 Deferred per PRD `docs/prd/api-node-local-substitution.md`: catalog-backed API classifier + Step-00
 detection; modality matrix (LLM/TTS); real audio→ASR; `api_no_local_equivalent` boundary report.
+
+## FOLLOW-UP: subjective quality verification (feasible — validated 2026-09-04)
+
+The blank-render incident exposed a **blind spot in the objective quality gate** (`tests/helpers/quality.ts`):
+`spatialContrast` (per-frame luma range) flags *truly* flat/black output, but the degenerate muddy-brown
+render scored **5–17**, clearing the **threshold of 3** → it would have **falsely PASSED**. (Good comic = 213.)
+Raising the threshold is unsafe (real low-contrast images exist).
+
+**Fix (validated feasible): add a local-VLM subjective judge.** The same on-node Qwen VLM used for
+GeminiNode localization was given each render + a judge prompt:
+- good apple → **"PASS — high-quality, detailed render of a red apple … realistic lighting and reflections."**
+- blank brown → **"FAIL — uniform, muddy brown color with no distinct objects, details, or coherent content."**
+
+So a VLM judge cheaply catches exactly the "ran-but-degenerate" class the objective metric misses, and
+works for both image and video (sample frames). Recommended: wire an optional local-VLM judge into Step 07/08/12
+(and the Playwright quality helper) as a semantic gate alongside the objective ffprobe checks.
