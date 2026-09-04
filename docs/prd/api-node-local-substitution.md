@@ -188,3 +188,32 @@ step (03b) does propose→approve→rewrite; the rest of the pipeline (05 deploy
   **local ASR sub-node** (speech→text) and feed the transcript into the VLM prompt (a
   multi-node substitution), rather than dropping audio. Video/files: dropped in v1 (noted
   in provenance) unless a connected modality has a local sub-node.
+
+---
+
+## Phase 0 — DELIVERED & VALIDATED (2026-09-04)
+
+**Status: shipped.** Merged in PR #10 (`feat-node-localization-phase0` → `main`). Deployed to
+agent-demo with `NODE_LOCALIZATION_ENABLED=1`.
+
+**What shipped:** the dedicated optional Step **03b — node localization**, plus routes
+(`api_local_substitute` / `api_no_local_equivalent`), the substitution recipe schema +
+`recipes/substitutions/GeminiNode.json`, the handler registry (`nodeLocalization.ts`), the pure
+GUI-graph transform (`graphSubstitute.ts`), and the orchestrator gate/apply flow. 756 unit+integration
+tests green.
+
+**Live validation on remote-124-12** (Story generation v2, 4× GeminiNode):
+- Step 03b detected all 4 GeminiNodes and, on approval, substituted each with the local llama.cpp VLM
+  subgraph. Deployed graph + ComfyUI API prompt: **GeminiNode = 0, `llama_cpp_instruct_adv` × 4**,
+  DAG-valid, original backed up.
+- Full pipeline ran **00→12 fully offline** (no cloud), fit VRAM (Step 08 capacity `ok`, 79%).
+- The local VLMs executed on the XPU and produced **correct, coherent story text**, correctly wired
+  into the Flux `CLIPTextEncode` conditioning (exactly replacing GeminiNode's output).
+
+**Known separate issue (NOT localization):** the Flux.2-Klein *image* render comes out blank/muddy.
+Root-caused as a **hardware-independent Flux.2-Klein-fp8 / ComfyUI-build** problem (reproduces on CPU;
+VAE round-trips fine; fp8 GEMMs run clean; register errors non-fatal). Orthogonal to this feature.
+Tracked in `docs/backlog-fp8-battlemage-onednn.md`.
+
+**Deferred to later phases** (unchanged): catalog-backed API classifier + Step-00 detection; modality
+matrix (LLM/TTS); real audio→ASR; `api_no_local_equivalent` boundary report.
