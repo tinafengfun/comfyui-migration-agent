@@ -56,7 +56,63 @@ comfy_kitchen's `triton` backend has no fp8 linear, so enabling it doesn't help.
    bf16 GEMM. Correct output, higher VRAM (may need `--lowvram`). Contrast w/ memory `xpu_fp8_oom_fix`
    (keep-on-move to SAVE memory) which assumes fp8 GEMM works — it doesn't on this GPU.
 
-## Next cheap step (in progress 2026-09-04)
+## CORRECTION (2026-09-04, after verbose capture) — register error is a RED HERRING
+
+`ONEDNN_VERBOSE=1` capture during Flux sampling shows the `Insufficient registers in requested
+bundle` errors are **non-fatal**: each is immediately followed by a successful `exec` of that same
+GEMM (oneDNN tries one kernel strategy, it overflows GRF, logs the error, **falls back to a working
+kernel and executes** with a real timing). The GEMMs complete correctly.
+
+Moreover the failing GEMMs are **bf16 text-stream** projections at **M=1106** (the tokenized text
+conditioning length), NOT fp8:
+```
+1106x4096:4096x24576   (bf16)   1106x12288:12288x4096 (bf16)   1x1106x4096:1x4096x4096 (bf16 attn)
+```
+The **fp8 GEMMs run clean** (`4096x4096:4096x4096`, `4096x12288:12288x2048`, wei:f8_e4m3). So:
+- fp8 on this Battlemage GPU is actually FINE (the earlier "oneDNN 3.7.1 too old" and "N>4096
+  refusal" theories do NOT explain the blank panels).
+- The N-tiling patch to `patch_fp8_gemm.py` was correct behavior but **did not fix the blank render**
+  (reg errors only 1380→1080, and those remaining are the non-fatal bf16 ones). Patch was REVERTED
+  on the node.
+
+**Real open question — why blank:** M=1106 means the local Qwen VLM emits **verbose multi-paragraph
+story scripts** (~1106 tokens) as the Flux prompt, vs GeminiNode's concise per-panel prompts.
+Leading hypotheses (unconfirmed): (a) over-long/rambling conditioning → degenerate denoising;
+(b) OmniXPU fp8 weight-scale handling; (c) the distilled `full_encoder_small_decoder` VAE.
+**Decisive next test:** render one panel with a SHORT hardcoded prompt (bypass VLM). Clean image →
+it's VLM verbosity (fix = tune the substitution recipe `system_prompt` to force concise prompts, or
+cap tokens). Still blank → fp8-scale or VAE.
+
+## RESOLVED DIRECTION (2026-09-04) — blank render is a Flux.2-Klein model/ComfyUI issue, NOT fp8/XPU
+
+Systematic bisection (all on remote-124-12, short concise prompt to remove VLM verbosity):
+
+| Suspect | Test | Result |
+|---|---|---|
+| VLM verbose prompt | hardcoded "red apple…" prompt | ❌ still blank |
+| fp8 / oneDNN / XPU precision | **CPU (`--cpu`) render** | ❌ **still blank** → hardware-independent |
+| "Insufficient registers" errors | ONEDNN_VERBOSE capture | ❌ **non-fatal** — each GEMM re-execs on a fallback kernel; failing ones are **bf16 text-stream** (M=1106), not fp8; fp8 GEMMs run clean |
+| VAE decoder | encode→decode a real colorful image | ✅ **round-trips perfectly** — VAE fine |
+| checkpoint key mismatch | model-load diagnostics | ✅ all UNet keys load (only text-enc `lm_head` missing, expected) |
+| guidance/CFG config | cfg=5 → cfg=1 render | ❌ still blank |
+
+**Conclusion:** the UNet yields a **constant latent** (→ uniform mid-brown after VAE) on **CPU and XPU
+alike**, with every model loading and the VAE working. So fp8/XPU/oneDNN is fully exonerated (the whole
+"upgrade oneDNN 3.7.1 / rebuild image" thread is MOOT — fp8 GEMM is fine here). The fault is a
+**hardware-independent Flux.2-Klein render problem** in this ComfyUI/comfy_kitchen build.
+
+**Leading hypothesis:** the models are **custom-fp8-quantized** (`_quantization_metadata format_version
+1.0`, per-layer float8_e4m3fn) — both `flux-2-klein-base-9b-fp8` and `qwen_3_8b_fp8mixed`. This
+ComfyUI/comfy_kitchen build likely **mishandles that quant format** → the text encoder emits ~zero
+embeddings and/or the UNet emits ~constant output → unconditional mean image (constant regardless of
+prompt/seed/cfg is consistent with dead conditioning).
+
+**Next steps if pursued (all orthogonal to the migration + to node localization, which is VALIDATED):**
+1. Confirm dead conditioning: encode two very different prompts, diff the CLIP embeddings (non-zero? prompt-dependent?).
+2. Test the model in a reference upstream ComfyUI with official Flux.2 support, or with a **non-quantized (bf16)** Flux.2 Klein checkpoint.
+3. Check comfy_kitchen's handling of the `_quantization_metadata` custom fp8 format vs what this checkpoint carries.
+
+## (superseded) earlier cheap step
 
 Before committing to the image rebuild, **prove the hypothesis cheaply**: scratch venv w/ torch
 2.12+/2.13 `+xpu` (oneDNN ≥3.8) via proxy, run a single fp8 `e4m3fn` GEMM at Flux shapes
